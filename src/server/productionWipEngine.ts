@@ -39,20 +39,19 @@ function getLocationForProcess(processType: string, stepNumber: number): string 
   }
 }
 
-// Initialize Realistic Automotive Sheet Metal Demo MOs
+// Initialize Realistic Automotive Sheet Metal MOs for the Anti-Theft ECU Bracket Family
 export function initializeProductionWipSeed() {
   if (manufacturingOrdersStore.length > 0) return;
 
-  const rtg206 = INITIAL_ROUTINGS.find(r => r.partCode === 'SAPCO-ASSY-206-001') || INITIAL_ROUTINGS[0];
-  const rtgTara = INITIAL_ROUTINGS.find(r => r.partCode === 'SAPCO-ASSY-TAR-002') || INITIAL_ROUTINGS[1];
+  const rtgMain = INITIAL_ROUTINGS.find(r => r.partCode === 'WIP-ECU-MAIN-BRK') || INITIAL_ROUTINGS[0];
+  const rtgComp = INITIAL_ROUTINGS.find(r => r.partCode === 'WIP-ECU-COMP-BRK') || INITIAL_ROUTINGS[1] || INITIAL_ROUTINGS[0];
+  const rtgAsy = INITIAL_ROUTINGS.find(r => r.partCode === 'SAPCO-ASY-ECU-BRK-01') || INITIAL_ROUTINGS[2] || INITIAL_ROUTINGS[0];
 
-  // MO-1: Peugot 206 Radiator Crossmember Bracket (SAPCO-ASSY-206-001)
-  // Target: 1000 PCS. Initial Input: 1000 Blanks loaded at OP10
-  // Multi-step progression with exact quantity conservation
-  const mo1Ops: ManufacturingOperation[] = rtg206.operations.map((op, idx) => ({
-    id: `MOP-2026-001-${op.stepNumber}`,
-    moId: 'MO-2026-001',
-    moNumber: 'MO-2026-001',
+  // MO-1: صفحه براکت اصلی ضدسرقت رایانه موتور (WIP-ECU-MAIN-BRK)
+  const moMainOps: ManufacturingOperation[] = rtgMain.operations.map((op, idx) => ({
+    id: `MOP-ECU-MAIN-${op.stepNumber}`,
+    moId: 'MO-ECU-MAIN-01',
+    moNumber: 'MO-ECU-MAIN-01',
     stepNumber: op.stepNumber,
     stepCode: op.stepCode,
     stepName: op.stepName,
@@ -61,7 +60,7 @@ export function initializeProductionWipSeed() {
     machineId: op.machineId,
     machineName: op.machineName,
     warehouseLocation: getLocationForProcess(op.processType, op.stepNumber),
-    status: idx === 0 ? 'COMPLETED' : idx <= 3 ? 'IN_PROGRESS' : 'READY',
+    status: idx <= 1 ? 'COMPLETED' : idx <= 4 ? 'IN_PROGRESS' : 'READY',
     waitingInputQty: 0,
     inProgressQty: 0,
     goodOutputQty: 0,
@@ -76,79 +75,82 @@ export function initializeProductionWipSeed() {
     createdAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
   }));
 
-  // Step 10: Shearing (1000 input -> 990 good + 10 scrap -> 990 transferred out)
-  mo1Ops[0].waitingInputQty = 0;
-  mo1Ops[0].inProgressQty = 0;
-  mo1Ops[0].goodOutputQty = 990;
-  mo1Ops[0].scrapQty = 10;
-  mo1Ops[0].transferredQty = 990;
-  mo1Ops[0].readyForTransferQty = 0;
-  mo1Ops[0].status = 'COMPLETED';
+  if (moMainOps[0]) {
+    moMainOps[0].goodOutputQty = 1500;
+    moMainOps[0].transferredQty = 1500;
+    moMainOps[0].status = 'COMPLETED';
+  }
+  if (moMainOps[1]) {
+    moMainOps[1].goodOutputQty = 1490;
+    moMainOps[1].scrapQty = 10;
+    moMainOps[1].transferredQty = 1490;
+    moMainOps[1].status = 'COMPLETED';
+  }
+  if (moMainOps[2]) {
+    moMainOps[2].inProgressQty = 190;
+    moMainOps[2].goodOutputQty = 1290;
+    moMainOps[2].scrapQty = 10;
+    moMainOps[2].transferredQty = 1000;
+    moMainOps[2].readyForTransferQty = 290;
+    moMainOps[2].status = 'IN_PROGRESS';
+  }
+  if (moMainOps[3]) {
+    moMainOps[3].waitingInputQty = 100;
+    moMainOps[3].inProgressQty = 100;
+    moMainOps[3].goodOutputQty = 800;
+    moMainOps[3].transferredQty = 650;
+    moMainOps[3].readyForTransferQty = 150;
+    moMainOps[3].status = 'IN_PROGRESS';
+  }
+  if (moMainOps[4]) {
+    moMainOps[4].waitingInputQty = 100;
+    moMainOps[4].goodOutputQty = 550;
+    moMainOps[4].transferredQty = 500;
+    moMainOps[4].readyForTransferQty = 50;
+    moMainOps[4].status = 'IN_PROGRESS';
+  }
+  if (moMainOps[5]) {
+    moMainOps[5].waitingInputQty = 80;
+    moMainOps[5].goodOutputQty = 420;
+    moMainOps[5].transferredQty = 420;
+    moMainOps[5].status = 'IN_PROGRESS';
+  }
+  if (moMainOps[6]) {
+    moMainOps[6].waitingInputQty = 0;
+    moMainOps[6].goodOutputQty = 420;
+    moMainOps[6].readyForTransferQty = 420;
+    moMainOps[6].status = 'IN_PROGRESS';
+  }
 
-  // Step 20: Blanking (received 990 -> 975 good + 15 scrap -> 975 transferred out)
-  mo1Ops[1].waitingInputQty = 0;
-  mo1Ops[1].inProgressQty = 0;
-  mo1Ops[1].goodOutputQty = 975;
-  mo1Ops[1].scrapQty = 15;
-  mo1Ops[1].transferredQty = 975;
-  mo1Ops[1].readyForTransferQty = 0;
-  mo1Ops[1].status = 'COMPLETED';
-
-  // Step 30: Punch & Form (received 975 -> 50 in progress, 900 good + 5 scrap + 20 rework)
-  // Ready for transfer: 400 (500 already transferred to OP40)
-  mo1Ops[2].waitingInputQty = 0;
-  mo1Ops[2].inProgressQty = 50;
-  mo1Ops[2].goodOutputQty = 900;
-  mo1Ops[2].scrapQty = 5;
-  mo1Ops[2].reworkQty = 20;
-  mo1Ops[2].transferredQty = 500;
-  mo1Ops[2].readyForTransferQty = 400; // 900 - 500
-  mo1Ops[2].status = 'IN_PROGRESS';
-
-  // Step 40: Bending (received 500 -> 150 waiting, 100 in progress, 240 good + 10 scrap)
-  // Ready for transfer: 140 (100 transferred to OP50)
-  mo1Ops[3].waitingInputQty = 150;
-  mo1Ops[3].inProgressQty = 100;
-  mo1Ops[3].goodOutputQty = 240;
-  mo1Ops[3].scrapQty = 10;
-  mo1Ops[3].transferredQty = 100;
-  mo1Ops[3].readyForTransferQty = 140; // 240 - 100
-  mo1Ops[3].status = 'IN_PROGRESS';
-
-  // Step 50: Spot Weld (received 100 -> 100 waiting in queue)
-  mo1Ops[4].waitingInputQty = 100;
-  mo1Ops[4].inProgressQty = 0;
-  mo1Ops[4].status = 'READY';
-
-  const mo1: ManufacturingOrder = {
-    id: 'MO-2026-001',
-    moNumber: 'MO-2026-001',
-    partId: rtg206.partId,
-    partCode: rtg206.partCode,
-    partName: rtg206.partName,
-    targetQuantity: 1000,
-    initialInputQuantity: 1000,
-    completedQuantity: 0,
-    totalScrapQuantity: 40, // 10 + 15 + 5 + 10
-    totalReworkQuantity: 20,
+  const moMain: ManufacturingOrder = {
+    id: 'MO-ECU-MAIN-01',
+    moNumber: 'MO-ECU-MAIN-01',
+    partId: rtgMain.partId,
+    partCode: rtgMain.partCode,
+    partName: rtgMain.partName,
+    targetQuantity: 1500,
+    initialInputQuantity: 1500,
+    completedQuantity: 420,
+    totalScrapQuantity: 20,
+    totalReworkQuantity: 0,
     totalRejectedQuantity: 0,
-    routingId: rtg206.id,
-    routingVersion: rtg206.version,
+    routingId: rtgMain.id,
+    routingVersion: rtgMain.version,
     status: 'IN_PROGRESS',
-    startDate: new Date(Date.now() - 48 * 3600 * 1000).toISOString().slice(0, 10),
-    dueDate: new Date(Date.now() + 48 * 3600 * 1000).toISOString().slice(0, 10),
-    operations: mo1Ops,
-    notes: 'سفارش فوری خط مونتاژ ایران‌خودرو - کلاف ورق ST14 ساپکو',
+    startDate: new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10),
+    dueDate: new Date(Date.now() + 72 * 3600 * 1000).toISOString().slice(0, 10),
+    operations: moMainOps,
+    notes: 'زیرفرآیند ۱: تولید صفحه اصلی براکت ضدسرقت رایانه موتور از رول DC01A ۲×۱۱۴۰ با ۱۵ مهره جوشی M6',
     createdBy: 'مهندس حسینی (مدیر تولید)',
-    createdAt: new Date(Date.now() - 48 * 3600 * 1000).toISOString(),
+    createdAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
-  // MO-2: Tara Front Bumper Beam (SAPCO-ASSY-TAR-002) - Multiple MOs support
-  const mo2Ops: ManufacturingOperation[] = rtgTara.operations.map((op, idx) => ({
-    id: `MOP-2026-002-${op.stepNumber}`,
-    moId: 'MO-2026-002',
-    moNumber: 'MO-2026-002',
+  // MO-2: مکمل براکت ضدسرقت رایانه موتور (WIP-ECU-COMP-BRK)
+  const moCompOps: ManufacturingOperation[] = rtgComp.operations.map((op, idx) => ({
+    id: `MOP-ECU-COMP-${op.stepNumber}`,
+    moId: 'MO-ECU-COMP-01',
+    moNumber: 'MO-ECU-COMP-01',
     stepNumber: op.stepNumber,
     stepCode: op.stepCode,
     stepName: op.stepName,
@@ -157,50 +159,50 @@ export function initializeProductionWipSeed() {
     machineId: op.machineId,
     machineName: op.machineName,
     warehouseLocation: getLocationForProcess(op.processType, op.stepNumber),
-    status: idx === 0 ? 'IN_PROGRESS' : 'PENDING',
-    waitingInputQty: idx === 0 ? 300 : 0,
-    inProgressQty: idx === 0 ? 200 : 0,
-    goodOutputQty: 0,
+    status: idx === 0 ? 'COMPLETED' : 'IN_PROGRESS',
+    waitingInputQty: 0,
+    inProgressQty: 0,
+    goodOutputQty: idx === 0 ? 1500 : 460,
     scrapQty: 0,
     reworkQty: 0,
     rejectedQty: 0,
-    readyForTransferQty: 0,
-    transferredQty: 0,
+    readyForTransferQty: idx === rtgComp.operations.length - 1 ? 460 : 120,
+    transferredQty: idx === rtgComp.operations.length - 1 ? 0 : 460,
     standardCycleTimeSec: op.standardCycleTimeSec,
     scrapNormPercent: op.scrapNormPercent,
     lastActivityAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
-    createdAt: new Date(Date.now() - 12 * 3600 * 1000).toISOString(),
+    createdAt: new Date(Date.now() - 20 * 3600 * 1000).toISOString(),
   }));
 
-  const mo2: ManufacturingOrder = {
-    id: 'MO-2026-002',
-    moNumber: 'MO-2026-002',
-    partId: rtgTara.partId,
-    partCode: rtgTara.partCode,
-    partName: rtgTara.partName,
-    targetQuantity: 500,
-    initialInputQuantity: 500,
-    completedQuantity: 0,
+  const moComp: ManufacturingOrder = {
+    id: 'MO-ECU-COMP-01',
+    moNumber: 'MO-ECU-COMP-01',
+    partId: rtgComp.partId,
+    partCode: rtgComp.partCode,
+    partName: rtgComp.partName,
+    targetQuantity: 1500,
+    initialInputQuantity: 1500,
+    completedQuantity: 460,
     totalScrapQuantity: 0,
     totalReworkQuantity: 0,
     totalRejectedQuantity: 0,
-    routingId: rtgTara.id,
-    routingVersion: rtgTara.version,
+    routingId: rtgComp.id,
+    routingVersion: rtgComp.version,
     status: 'IN_PROGRESS',
-    startDate: new Date(Date.now() - 12 * 3600 * 1000).toISOString().slice(0, 10),
+    startDate: new Date(Date.now() - 20 * 3600 * 1000).toISOString().slice(0, 10),
     dueDate: new Date(Date.now() + 72 * 3600 * 1000).toISOString().slice(0, 10),
-    operations: mo2Ops,
-    notes: 'پروژه تارا فاز ۲ - ورق گالوانیزه DX51D ساپکو',
-    createdBy: 'مهندس حسینی',
-    createdAt: new Date(Date.now() - 12 * 3600 * 1000).toISOString(),
+    operations: moCompOps,
+    notes: 'زیرفرآیند ۲ (موازی): تولید قطعه مکمل براکت ضدسرقت رایانه موتور با ۲ پیچ پایه جوشی M6x20',
+    createdBy: 'مهندس حسینی (مدیر تولید)',
+    createdAt: new Date(Date.now() - 20 * 3600 * 1000).toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
-  // MO-3: Second batch of Peugot 206 Radiator Crossmember (Same part, independent MO)
-  const mo3Ops: ManufacturingOperation[] = rtg206.operations.map((op, idx) => ({
-    id: `MOP-2026-003-${op.stepNumber}`,
-    moId: 'MO-2026-003',
-    moNumber: 'MO-2026-003',
+  // MO-3: مجموعه نهایی براکت ضدسرقت رایانه موتور (SAPCO-ASY-ECU-BRK-01)
+  const moAsyOps: ManufacturingOperation[] = rtgAsy.operations.map((op, idx) => ({
+    id: `MOP-ECU-ASY-${op.stepNumber}`,
+    moId: 'MO-ECU-ASY-01',
+    moNumber: 'MO-ECU-ASY-01',
     stepNumber: op.stepNumber,
     stepCode: op.stepCode,
     stepName: op.stepName,
@@ -209,144 +211,96 @@ export function initializeProductionWipSeed() {
     machineId: op.machineId,
     machineName: op.machineName,
     warehouseLocation: getLocationForProcess(op.processType, op.stepNumber),
-    status: idx === 0 ? 'READY' : 'PENDING',
-    waitingInputQty: idx === 0 ? 600 : 0,
-    inProgressQty: 0,
-    goodOutputQty: 0,
+    status: 'IN_PROGRESS',
+    waitingInputQty: idx === 0 ? 420 : 50,
+    inProgressQty: 50,
+    goodOutputQty: 350,
     scrapQty: 0,
     reworkQty: 0,
     rejectedQty: 0,
-    readyForTransferQty: 0,
-    transferredQty: 0,
+    readyForTransferQty: idx === rtgAsy.operations.length - 1 ? 350 : 50,
+    transferredQty: idx === rtgAsy.operations.length - 1 ? 350 : 350,
     standardCycleTimeSec: op.standardCycleTimeSec,
     scrapNormPercent: op.scrapNormPercent,
     lastActivityAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
+    createdAt: new Date(Date.now() - 12 * 3600 * 1000).toISOString(),
   }));
 
-  const mo3: ManufacturingOrder = {
-    id: 'MO-2026-003',
-    moNumber: 'MO-2026-003',
-    partId: rtg206.partId,
-    partCode: rtg206.partCode,
-    partName: rtg206.partName,
-    targetQuantity: 600,
-    initialInputQuantity: 600,
-    completedQuantity: 0,
+  const moAsy: ManufacturingOrder = {
+    id: 'MO-ECU-ASY-01',
+    moNumber: 'MO-ECU-ASY-01',
+    partId: rtgAsy.partId,
+    partCode: rtgAsy.partCode,
+    partName: rtgAsy.partName,
+    targetQuantity: 1500,
+    initialInputQuantity: 1500,
+    completedQuantity: 350,
     totalScrapQuantity: 0,
     totalReworkQuantity: 0,
     totalRejectedQuantity: 0,
-    routingId: rtg206.id,
-    routingVersion: rtg206.version,
-    status: 'RELEASED',
+    routingId: rtgAsy.id,
+    routingVersion: rtgAsy.version,
+    status: 'IN_PROGRESS',
     startDate: new Date().toISOString().slice(0, 10),
     dueDate: new Date(Date.now() + 96 * 3600 * 1000).toISOString().slice(0, 10),
-    operations: mo3Ops,
-    notes: 'بچ دوم قطعه ۲۰۶ طبق زمان‌بندی هفتگی',
-    createdBy: 'مهندس حسینی',
+    operations: moAsyOps,
+    notes: 'مونتاژ نهایی مجموعه براکت ضدسرقت رایانه موتور (اتصال صفحه اصلی و مکمل با جوش CO2 و رنگ کاتافورز ED)',
+    createdBy: 'مهندس حسینی (مدیر تولید)',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
-  manufacturingOrdersStore.push(mo1, mo2, mo3);
+  manufacturingOrdersStore.push(moMain, moComp, moAsy);
 
-  // Seed sample In-Transit Transfers
+  // Seed sample In-Transit Transfers for Anti-Theft ECU Bracket
   wipTransfersStore.push(
     {
-      id: 'TRF-2026-001',
-      transferNumber: 'TRF-2026-001',
-      moId: 'MO-2026-001',
-      moNumber: 'MO-2026-001',
-      partId: rtg206.partId,
-      partCode: rtg206.partCode,
-      partName: rtg206.partName,
-      fromOperationId: mo1Ops[0].id,
+      id: 'TRF-ECU-001',
+      transferNumber: 'TRF-ECU-001',
+      moId: 'MO-ECU-MAIN-01',
+      moNumber: 'MO-ECU-MAIN-01',
+      partId: rtgMain.partId,
+      partCode: rtgMain.partCode,
+      partName: rtgMain.partName,
+      fromOperationId: moMainOps[0]?.id || 'MOP-ECU-MAIN-10',
       fromStepNumber: 10,
-      fromStepName: mo1Ops[0].stepName,
-      fromLocation: mo1Ops[0].warehouseLocation,
-      toOperationId: mo1Ops[1].id,
+      fromStepName: moMainOps[0]?.stepName || 'برش رول ۲×۱۱۴۰',
+      fromLocation: 'LOC-RAW-B1',
+      toOperationId: moMainOps[2]?.id || 'MOP-ECU-MAIN-20',
       toStepNumber: 20,
-      toStepName: mo1Ops[1].stepName,
-      toLocation: mo1Ops[1].warehouseLocation,
-      quantity: 990,
+      toStepName: moMainOps[2]?.stepName || 'پرسکاری بلنکینگ',
+      toLocation: 'LOC-WIP-BLANK',
+      quantity: 1490,
       status: 'APPROVED',
       dispatchedBy: 'علی رضایی (سرپرست برش)',
-      dispatchedAt: new Date(Date.now() - 20 * 3600 * 1000).toISOString(),
+      dispatchedAt: new Date(Date.now() - 18 * 3600 * 1000).toISOString(),
       receivedBy: 'رضا کریمی (اپراتور پرس ۲۵۰)',
-      receivedAt: new Date(Date.now() - 19 * 3600 * 1000).toISOString(),
-      notes: 'پالت پلاستیکی کدرنگی آبی حاوی ۹۹۰ شیت نواربری شده',
+      receivedAt: new Date(Date.now() - 17 * 3600 * 1000).toISOString(),
+      notes: 'انتقال شیت‌های سایزشده صفحه اصلی براکت ضدسرقت به پرس ۲۵۰ تن',
     },
     {
-      id: 'TRF-2026-002',
-      transferNumber: 'TRF-2026-002',
-      moId: 'MO-2026-001',
-      moNumber: 'MO-2026-001',
-      partId: rtg206.partId,
-      partCode: rtg206.partCode,
-      partName: rtg206.partName,
-      fromOperationId: mo1Ops[1].id,
-      fromStepNumber: 20,
-      fromStepName: mo1Ops[1].stepName,
-      fromLocation: mo1Ops[1].warehouseLocation,
-      toOperationId: mo1Ops[2].id,
-      toStepNumber: 30,
-      toStepName: mo1Ops[2].stepName,
-      toLocation: mo1Ops[2].warehouseLocation,
-      quantity: 975,
+      id: 'TRF-ECU-002',
+      transferNumber: 'TRF-ECU-002',
+      moId: 'MO-ECU-MAIN-01',
+      moNumber: 'MO-ECU-MAIN-01',
+      partId: rtgMain.partId,
+      partCode: rtgMain.partCode,
+      partName: rtgMain.partName,
+      fromOperationId: moMainOps[6]?.id || 'MOP-ECU-MAIN-50',
+      fromStepNumber: 50,
+      fromStepName: moMainOps[6]?.stepName || 'پرس‌جوش ۱۵ عدد مهره M6',
+      fromLocation: 'LOC-WELD-IN',
+      toOperationId: moAsyOps[0]?.id || 'MOP-ECU-ASY-60',
+      toStepNumber: 60,
+      toStepName: moAsyOps[0]?.stepName || 'ایستگاه جوشکاری CO2 مونتاژ نهایی',
+      toLocation: 'LOC-WELD-OUT',
+      quantity: 420,
       status: 'APPROVED',
-      dispatchedBy: 'رضا کریمی',
-      dispatchedAt: new Date(Date.now() - 15 * 3600 * 1000).toISOString(),
-      receivedBy: 'استاد احمدی (پرس شولر ۴۰۰)',
-      receivedAt: new Date(Date.now() - 14 * 3600 * 1000).toISOString(),
-      notes: 'بلنک‌های تمیزکاری شده بدون پلیسه',
-    },
-    {
-      id: 'TRF-2026-003',
-      transferNumber: 'TRF-2026-003',
-      moId: 'MO-2026-001',
-      moNumber: 'MO-2026-001',
-      partId: rtg206.partId,
-      partCode: rtg206.partCode,
-      partName: rtg206.partName,
-      fromOperationId: mo1Ops[2].id,
-      fromStepNumber: 30,
-      fromStepName: mo1Ops[2].stepName,
-      fromLocation: mo1Ops[2].warehouseLocation,
-      toOperationId: mo1Ops[3].id,
-      toStepNumber: 40,
-      toStepName: mo1Ops[3].stepName,
-      toLocation: mo1Ops[3].warehouseLocation,
-      quantity: 500,
-      status: 'APPROVED',
-      dispatchedBy: 'استاد احمدی',
-      dispatchedAt: new Date(Date.now() - 10 * 3600 * 1000).toISOString(),
-      receivedBy: 'حسین مرادی (پرس برک)',
-      receivedAt: new Date(Date.now() - 9 * 3600 * 1000).toISOString(),
-      notes: 'پارت اول انتقال به خم‌کاری',
-    },
-    {
-      id: 'TRF-2026-004',
-      transferNumber: 'TRF-2026-004',
-      moId: 'MO-2026-001',
-      moNumber: 'MO-2026-001',
-      partId: rtg206.partId,
-      partCode: rtg206.partCode,
-      partName: rtg206.partName,
-      fromOperationId: mo1Ops[3].id,
-      fromStepNumber: 40,
-      fromStepName: mo1Ops[3].stepName,
-      fromLocation: mo1Ops[3].warehouseLocation,
-      toOperationId: mo1Ops[4].id,
-      toStepNumber: 50,
-      toStepName: mo1Ops[4].stepName,
-      toLocation: mo1Ops[4].warehouseLocation,
-      quantity: 100,
-      status: 'APPROVED',
-      dispatchedBy: 'حسین مرادی',
+      dispatchedBy: 'سعید باقری (اپراتور پرس‌جوش)',
       dispatchedAt: new Date(Date.now() - 4 * 3600 * 1000).toISOString(),
-      receivedBy: 'سعید باقری (پرس‌جوش)',
+      receivedBy: 'مهندس اکبری (سلول جوش CO2)',
       receivedAt: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
-      notes: 'پارت اول خم U جهت پرس‌جوش مهره',
+      notes: 'تحویل ۴۲۰ عدد صفحه اصلی تکمیل‌شده با ۱۵ مهره جوشی به ایستگاه جوش CO2',
     }
   );
 }

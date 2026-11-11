@@ -1,15 +1,8 @@
-export type AiProvider = 'LOCAL_NLP' | 'OLLAMA' | 'GROQ' | 'OPENROUTER' | 'GEMINI';
+export type AiProvider = 'LOCAL_NLP' | 'GEMINI';
 
 export interface AiSettings {
   provider: AiProvider;
-  ollamaEndpoint: string; // default: 'http://localhost:11434'
-  ollamaModel: string; // default: 'qwen2.5:7b' or 'llama3.2'
-  groqApiKey: string;
-  groqModel: string; // default: 'llama-3.3-70b-versatile'
-  openRouterApiKey: string;
-  openRouterModel: string; // default: 'meta-llama/llama-3.2-3b-instruct:free'
-  geminiApiKey: string;
-  geminiModel: string; // default: 'gemini-2.5-flash'
+  geminiModel?: string;
 }
 
 export type AiActionType =

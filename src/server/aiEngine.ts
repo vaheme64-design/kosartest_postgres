@@ -15,12 +15,12 @@ export function convertPersianDigitsToEnglish(str: string): string {
 
 /**
  * Intelligent Local Offline NLP Rule Engine
- * Works 100% offline without any internet connection, API keys, or external servers.
+ * Works 100% offline without external servers.
  */
 export function processLocalNlpCommand(
   promptText: string,
   partsCatalog: Part[],
-  warehouses: WarehouseDefinition[]
+  _warehouses: WarehouseDefinition[]
 ): AiActionPayload {
   const rawText = promptText.trim();
   const normalizedText = convertPersianDigitsToEnglish(rawText).toLowerCase();
@@ -38,7 +38,7 @@ export function processLocalNlpCommand(
 
   // 2. Extract Numbers (Quantity / Weight)
   let extractedQuantity: number | undefined;
-  const qtyMatch = normalizedText.match(/(?:وزن\s*[:=]?\s*|تعداد\s*[:=]?\s*|تیراژ\s*[:=]?\s*)?([0-9]+(?:[\.,][0-9]+)?)\s*(?:کیلوگرم|کیلو|تن|عدد|kg|pcs)?/i);
+  const qtyMatch = normalizedText.match(/(?:وزن\s*[:=]?\s*|تعداد\s*[:=]?\s*|تیراژ\s*[:=]?\s*)?([0-9]+(?:[.,][0-9]+)?)\s*(?:کیلوگرم|کیلو|تن|عدد|kg|pcs)?/i);
   if (qtyMatch && qtyMatch[1]) {
     const parsed = parseFloat(qtyMatch[1].replace(/,/g, ''));
     if (!isNaN(parsed) && parsed > 0) {
@@ -59,7 +59,7 @@ export function processLocalNlpCommand(
       extractedCoilPack = `CP-${extractedCoilPack}`;
     }
   } else {
-    const directCp = normalizedText.match(/\b(cp-[a-z0-9\-]+)\b/i);
+    const directCp = normalizedText.match(/\b(cp-[a-z0-9-]+)\b/i);
     if (directCp) extractedCoilPack = directCp[1].toUpperCase();
   }
 
@@ -83,7 +83,7 @@ export function processLocalNlpCommand(
   }
 
   if (!matchedPart) {
-    const commonGrades = ['st12', 'dc04', 'st14', 'st37', 'dx51d', 'st52'];
+    const commonGrades = ['dc01a', 'dc01', 'm6'];
     for (const g of commonGrades) {
       if (normalizedText.includes(g)) {
         matchedPart = partsCatalog.find(
@@ -100,10 +100,8 @@ export function processLocalNlpCommand(
   const ownership = isCustomer ? 'CUSTOMER_SUPPLIED' : isSapco ? 'SAPCO_SUPPLIER_OWNED' : 'COMPANY_OWNED';
 
   // 7. Route to Actions based on exact user intent
-
-  // A. Create Work Order (MO) Intent
   if (isCreateMo) {
-    const partName = matchedPart ? matchedPart.name : 'قطعه انتخابی';
+    const partName = matchedPart ? matchedPart.name : 'مجموعه براکت ضدسرقت رایانه موتور';
     const qtyText = extractedQuantity ? `${extractedQuantity.toLocaleString('fa-IR')} عدد` : 'تیراژ مشخص‌شده';
     return {
       actionType: 'OPEN_CREATE_MO',
@@ -113,16 +111,14 @@ export function processLocalNlpCommand(
     };
   }
 
-  // B. Track Order Intent
   if (isTrackOrder) {
     return {
       actionType: 'OPEN_TRACK_ORDER',
       targetTab: 'production',
-      message: 'هدایت به پیشخوان تولید جهت پیگیری زنجیره کامل دستور ساخت.',
+      message: 'هدایت به پیشخوان تولید جهت پیگیری زنجیره کامل دستور ساخت براکت ضدسرقت.',
     };
   }
 
-  // C. Heat Traceability Intent
   if (isHeatTrace) {
     return {
       actionType: 'OPEN_HEAT_TRACEABILITY',
@@ -131,9 +127,8 @@ export function processLocalNlpCommand(
     };
   }
 
-  // D. Explicit Goods Receipt
   if (isExplicitReceipt) {
-    const partName = matchedPart ? matchedPart.name : 'ورق فولادی';
+    const partName = matchedPart ? matchedPart.name : 'رول ورق روغنی DC01A';
     const qtyText = extractedQuantity ? `${extractedQuantity.toLocaleString('fa-IR')} ${matchedPart?.unit || 'کیلوگرم'}` : 'مشخص‌نشده';
     return {
       actionType: 'OPEN_RECEIPT',
@@ -154,14 +149,13 @@ export function processLocalNlpCommand(
         locationCode: 'LOC-RAW-A1',
         ownership: ownership as any,
         referenceNumber: `REC-${Date.now().toString().slice(-4)}`,
-        notes: `ایجاد شده خودکار با دستور دستیار هوش مصنوعی: «${rawText}»`,
+        notes: `ایجاد شده با دستیار هوشمند: «${rawText}»`,
       },
     };
   }
 
-  // E. Explicit Goods Issue
   if (isExplicitIssue) {
-    const partName = matchedPart ? matchedPart.name : 'کالای انتخابی';
+    const partName = matchedPart ? matchedPart.name : 'رول ورق روغنی DC01A';
     const qtyText = extractedQuantity ? `${extractedQuantity.toLocaleString('fa-IR')} ${matchedPart?.unit || 'کیلوگرم'}` : 'مشخص‌نشده';
     return {
       actionType: 'OPEN_ISSUE',
@@ -177,12 +171,11 @@ export function processLocalNlpCommand(
         warehouseId: 'WH-RAW',
         targetWarehouseId: 'WH-WIP-STAMP',
         issuePurpose: 'PRODUCTION_LINE',
-        notes: `حواله با دستیار هوش مصنوعی: «${rawText}»`,
+        notes: `حواله با دستیار هوشمند: «${rawText}»`,
       },
     };
   }
 
-  // F. Reorder / Safety Stock Check
   if (isReorderCheck) {
     return {
       actionType: 'CHECK_REORDER',
@@ -192,9 +185,8 @@ export function processLocalNlpCommand(
     };
   }
 
-  // G. Stock Inquiry
   if (isStockQuery) {
-    const partName = matchedPart ? matchedPart.name : 'کالای انتخابی';
+    const partName = matchedPart ? matchedPart.name : 'مجموعه براکت ضدسرقت رایانه موتور';
     return {
       actionType: 'QUERY_STOCK',
       targetTab: 'inventory',
@@ -207,7 +199,6 @@ export function processLocalNlpCommand(
     };
   }
 
-  // Navigation
   if (isNavigate) {
     if (/ماشین|دستگاه|پرس/i.test(rawText)) {
       return { actionType: 'NAVIGATE', targetTab: 'machines', message: 'انتقال به بخش ماشین‌آلات، پرس‌ها و ظرفیت سنجی.' };
@@ -226,16 +217,15 @@ export function processLocalNlpCommand(
     }
   }
 
-  // Default fallback to receipt or general guidance
   return {
     actionType: 'UNKNOWN',
-    message: `دستور دریافت شد: «${rawText}». می‌توانید بگویید: «رسید ۵ تن ورق ST12 با کویل پک CP-101» یا «حواله خروج ۴۰۰ کیلوگرم DC04» یا «مشاهده کسری و نقطه سفارش».`,
+    message: `دستور دریافت شد: «${rawText}». می‌توانید بگویید: «رسید ۵ تن ورق DC01A با کویل پک CP-101» یا «صدور دستور تولید براکت ضدسرقت رایانه موتور» یا «مشاهده کسری و نقطه سفارش».`,
   };
 }
 
 /**
- * Universal AI Command Dispatcher
- * Dispatches to Ollama (local), Groq, OpenRouter, Gemini, or fallback local NLP
+ * Factory ERP Command Dispatcher
+ * Uses built-in deterministic NLP or server-configured Gemini API.
  */
 export async function executeAiCommand(
   prompt: string,
@@ -243,242 +233,44 @@ export async function executeAiCommand(
   partsCatalog: Part[],
   warehouses: WarehouseDefinition[]
 ): Promise<AiActionPayload> {
-  const provider = settings.provider || 'LOCAL_NLP';
+  const provider = settings?.provider || 'LOCAL_NLP';
 
-  // 1. If Local NLP Engine is chosen, execute instantly
-  if (provider === 'LOCAL_NLP') {
+  if (provider === 'LOCAL_NLP' || !process.env.GEMINI_API_KEY) {
     return processLocalNlpCommand(prompt, partsCatalog, warehouses);
   }
 
-  // Prepare system context with current parts catalog
-  const catalogSummary = partsCatalog.slice(0, 40).map(p => ({
-    id: p.id,
-    code: p.code,
-    name: p.name,
-    unit: p.unit,
-    grade: p.materialGrade || '',
-    category: p.category,
-  }));
-
-  const systemPrompt = `You are KPIMS AI, an expert industrial ERP assistant for Kosar Automotive Metal Parts Stamping Factory.
-Your job is to understand factory operator Persian natural language instructions and output a single JSON action payload to pre-fill ERP forms or navigate.
-User may say:
-- "یک ورق روغنی ST12 با وزن ۴۵۰۰ کیلوگرم و کویل پک CP-882 رسید شد"
-- "حواله خروج ۶۰۰ کیلو ورق DC04 برای سالن پرس صادر کن"
-- "کسری موجودی و نقطه سفارش را نشان بده"
-- "برو به ماشین‌آلات"
-
-Available Parts Catalog:
-${JSON.stringify(catalogSummary)}
-
-Output MUST BE STRICT VALID JSON (without markdown fences if possible, or inside \`\`\`json \`\`\`) with schema:
-{
-  "actionType": "OPEN_RECEIPT" | "OPEN_ISSUE" | "OPEN_TRANSFER" | "NAVIGATE" | "CHECK_REORDER" | "QUERY_STOCK" | "UNKNOWN",
-  "message": "Persian message explaining what was prepared and asking user to review and confirm",
-  "targetTab": "inventory" | "production" | "planning" | "master_data" | "machines" | "reports" | "sapco" | "settings",
-  "targetSubTab": "DASHBOARD" | "MOVEMENTS" | "BALANCES" | "REORDER_ALERTS" | "CONTRACTS" | "PHYSICAL_COILS",
-  "prefillReceipt": {
-    "subType": "SAPCO_MATERIAL" | "CUSTOMER_SUPPLIED" | "SUPPLIER_PURCHASE" | "FINISHED_PRODUCT",
-    "partId": "part id from catalog",
-    "partCode": "part code",
-    "partName": "part name",
-    "quantity": number,
-    "unit": "KG" | "PCS",
-    "coilPackNumber": "string",
-    "physicalCoilCode": "string",
-    "heatNumber": "string",
-    "warehouseId": "WH-RAW",
-    "locationCode": "LOC-RAW-A1",
-    "ownership": "SAPCO_SUPPLIER_OWNED" | "COMPANY_OWNED" | "CUSTOMER_SUPPLIED",
-    "referenceNumber": "string",
-    "notes": "string"
-  },
-  "prefillIssue": {
-    "partId": "part id",
-    "partCode": "part code",
-    "partName": "part name",
-    "quantity": number,
-    "unit": "KG" | "PCS",
-    "warehouseId": "WH-RAW",
-    "targetWarehouseId": "WH-WIP-STAMP",
-    "issuePurpose": "PRODUCTION_LINE",
-    "notes": "string"
-  }
-}`;
-
   try {
-    let rawJsonResponse = '';
+    const catalogSummary = partsCatalog.slice(0, 20).map(p => ({
+      id: p.id,
+      code: p.code,
+      name: p.name,
+      unit: p.unit,
+      grade: p.materialGrade || '',
+      category: p.category,
+    }));
 
-    // 2. Ollama (100% Free & Local in Iran - Default: http://localhost:11434)
-    if (provider === 'OLLAMA') {
-      const endpoint = settings.ollamaEndpoint || 'http://localhost:11434';
-      const model = settings.ollamaModel || 'qwen2.5:7b';
-      const res = await fetch(`${endpoint.replace(/\/+$/, '')}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: model,
-          stream: false,
-          format: 'json',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt },
-          ],
-        }),
-      });
-      if (!res.ok) {
-        throw new Error(`Ollama error HTTP ${res.status}: ${await res.text()}`);
-      }
-      const data = await res.json();
-      rawJsonResponse = data?.message?.content || '';
-    }
+    const systemPrompt = `You are KPIMS ERP Assistant for an automotive stamping factory.
+Understand Persian operator instructions and return valid JSON matching AiActionPayload for parts: ${JSON.stringify(catalogSummary)}`;
 
-    // 3. Groq Cloud (Free Tier - api.groq.com)
-    else if (provider === 'GROQ') {
-      const apiKey = settings.groqApiKey;
-      if (!apiKey) throw new Error('کلید API سرویس Groq وارد نشده است.');
+    const { GoogleGenAI } = await import('@google/genai');
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `${systemPrompt}\n\nUser command: ${prompt}`,
+      config: {
+        responseMimeType: 'application/json',
+      },
+    });
 
-      const groqCandidates = Array.from(
-        new Set([
-          settings.groqModel || 'llama-3.1-8b-instant',
-          'llama-3.3-70b-versatile',
-          'llama-3.1-8b-instant',
-          'llama3-70b-8192',
-          'llama3-8b-8192',
-          'mixtral-8x7b-32768',
-        ])
-      );
-
-      let lastErrText = '';
-      for (const modelCandidate of groqCandidates) {
-        try {
-          const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${apiKey}`,
-            },
-            body: JSON.stringify({
-              model: modelCandidate,
-              response_format: { type: 'json_object' },
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt },
-              ],
-            }),
-          });
-
-          if (res.ok) {
-            const data = await res.json();
-            rawJsonResponse = data?.choices?.[0]?.message?.content || '';
-            if (rawJsonResponse) break;
-          } else {
-            lastErrText = await res.text();
-          }
-        } catch (err: any) {
-          lastErrText = err.message;
-        }
-      }
-
-      if (!rawJsonResponse) {
-        throw new Error(`Groq API error: ${lastErrText}`);
+    if (response.text) {
+      const parsed = JSON.parse(response.text.trim()) as AiActionPayload;
+      if (parsed && parsed.actionType) {
+        return parsed;
       }
     }
-
-    // 4. OpenRouter (Free Tier - openrouter.ai)
-    else if (provider === 'OPENROUTER') {
-      const apiKey = settings.openRouterApiKey;
-      if (!apiKey) throw new Error('کلید API سرویس OpenRouter وارد نشده است.');
-      const openRouterCandidates = Array.from(
-        new Set([
-          settings.openRouterModel || 'gpt-4o-mini',
-          'gpt-4o-mini',
-          'google/gemini-flash-1.5',
-          'google/gemini-2.5-flash:free',
-          'meta-llama/llama-3.3-70b-instruct:free',
-        ])
-      );
-      let lastOpenRouterErr = '';
-      for (const modelCandidate of openRouterCandidates) {
-        try {
-          const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${apiKey}`,
-              'HTTP-Referer': 'https://kpims.local',
-              'X-Title': 'KPIMS Industrial ERP',
-            },
-            body: JSON.stringify({
-              model: modelCandidate,
-              messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt },
-              ],
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            rawJsonResponse = data?.choices?.[0]?.message?.content || '';
-            if (rawJsonResponse) break;
-          } else {
-            lastOpenRouterErr = await res.text();
-          }
-        } catch (err: any) {
-          lastOpenRouterErr = err.message;
-        }
-      }
-      if (!rawJsonResponse) {
-        throw new Error(`OpenRouter API error: ${lastOpenRouterErr}`);
-      }
-    }
-
-    // 5. Google Gemini API (@google/genai)
-    else if (provider === 'GEMINI') {
-      const apiKey = settings.geminiApiKey || process.env.GEMINI_API_KEY;
-      if (!apiKey) throw new Error('کلید API سرویس Gemini تنظیم نشده است.');
-      const { GoogleGenAI } = await import('@google/genai');
-      const ai = new GoogleGenAI({ apiKey });
-      const geminiCandidates = Array.from(
-        new Set([
-          settings.geminiModel || 'gemini-1.5-flash',
-          'gemini-1.5-flash',
-          'gemini-2.5-flash',
-          'gemini-1.5-pro',
-        ])
-      );
-      let lastGeminiErr = '';
-      for (const gemModel of geminiCandidates) {
-        try {
-          const response = await ai.models.generateContent({
-            model: gemModel,
-            contents: `${systemPrompt}\n\nUser command: ${prompt}`,
-            config: {
-              responseMimeType: 'application/json',
-            },
-          });
-          if (response.text) {
-            rawJsonResponse = response.text;
-            break;
-          }
-        } catch (err: any) {
-          lastGeminiErr = err.message;
-        }
-      }
-      if (!rawJsonResponse) {
-        throw new Error(`Gemini API error: ${lastGeminiErr}`);
-      }
-    }
-
-    // Clean JSON response
-    const cleanJson = rawJsonResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-    const parsed = JSON.parse(cleanJson);
-    return parsed;
-  } catch (err: any) {
-    console.warn(`[AI Dispatcher] Fallback to Local NLP due to error: ${err.message}`);
-    // Graceful fallback to offline local rule engine
-    const fallback = processLocalNlpCommand(prompt, partsCatalog, warehouses);
-    fallback.message = `${fallback.message} (پردازش‌شده با موتور پشتیبان داخلی)`;
-    return fallback;
+  } catch {
+    // Fallback to deterministic local NLP engine
   }
+
+  return processLocalNlpCommand(prompt, partsCatalog, warehouses);
 }

@@ -107,74 +107,13 @@ const INITIAL_PRODUCT_STRUCTURES: ProductStructureData[] = [
       },
     ],
   },
-  {
-    id: 'PS-TARA-BRK',
-    rootPartId: 'PRT-FGD-TARA-BRK',
-    rootPartCode: 'SAPCO-ASY-TARA-BRK-01',
-    rootPartName: 'مجموعه براکت تارا با پوشش کاتافورز ED',
-    carModel: 'تارا',
-    subComponents: [
-      {
-        id: 'SUB-TAR-01',
-        partId: 'PRT-WIP-TARA-LG',
-        partCode: 'WIP-TARA-BRK-LARGE',
-        partName: 'براکت تارا بزرگ',
-        quantity: 1,
-        unit: 'عدد',
-        subComponents: [
-          {
-            id: 'RAW-TAR-LG',
-            partId: 'PRT-RM-DC01A-2-1140',
-            partCode: 'RM-COIL-DC01A-2.0-1140',
-            partName: 'رول ورق DC01A ضخامت ۲ عرض ۱۱۴۰',
-            quantity: 0.65,
-            unit: 'کیلوگرم',
-          },
-          {
-            id: 'FST-TAR-LG',
-            partId: 'PRT-FST-NUT-M6',
-            partCode: 'FST-NUT-WELD-M6',
-            partName: 'مهره جوشی M6',
-            quantity: 8,
-            unit: 'عدد',
-          },
-        ],
-      },
-      {
-        id: 'SUB-TAR-02',
-        partId: 'PRT-WIP-TARA-SM',
-        partCode: 'WIP-TARA-BRK-SMALL',
-        partName: 'براکت تارا کوچک',
-        quantity: 1,
-        unit: 'عدد',
-        subComponents: [
-          {
-            id: 'RAW-TAR-SM',
-            partId: 'PRT-RM-DC01A-2-1140',
-            partCode: 'RM-COIL-DC01A-2.0-1140',
-            partName: 'رول ورق DC01A ضخامت ۲ عرض ۱۱۴۰',
-            quantity: 0.35,
-            unit: 'کیلوگرم',
-          },
-          {
-            id: 'FST-TAR-SM',
-            partId: 'PRT-FST-NUT-M6',
-            partCode: 'FST-NUT-WELD-M6',
-            partName: 'مهره جوشی M6',
-            quantity: 12,
-            unit: 'عدد',
-          },
-        ],
-      },
-    ],
-  },
 ];
 
 interface ProductStructureViewProps {
   parts: Part[];
 }
 
-const STORAGE_KEY_PRODUCT_STRUCTURES = 'kpims_product_structures_v1';
+const STORAGE_KEY_PRODUCT_STRUCTURES = 'kpims_product_structures_v3';
 
 export const ProductStructureView: React.FC<ProductStructureViewProps> = ({ parts }) => {
   const [structures, setStructures] = useState<ProductStructureData[]>(() => {

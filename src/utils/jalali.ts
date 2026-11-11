@@ -9,6 +9,8 @@ export interface JalaliDate {
   day: number;
   monthName: string;
   formatted: string;
+  weekdayIndex: number; // 1 = شنبه ... 7 = جمعه
+  weekdayName: string;
 }
 
 const JALALI_MONTH_NAMES = [
@@ -26,13 +28,31 @@ const JALALI_MONTH_NAMES = [
   'اسفند',
 ];
 
+const PERSIAN_WEEKDAY_NAMES = [
+  'شنبه',
+  'یکشنبه',
+  'دوشنبه',
+  'سه‌شنبه',
+  'چهارشنبه',
+  'پنج‌شنبه',
+  'جمعه',
+];
+
+const toPersianDigitsInternal = (num: number | string): string => {
+  const persianMap: Record<string, string> = {
+    '0': '۰', '1': '۱', '2': '۲', '3': '۳', '4': '۴',
+    '5': '۵', '6': '۶', '7': '۷', '8': '۸', '9': '۹',
+  };
+  return String(num).replace(/[0-9]/g, w => persianMap[w] || w);
+};
+
 /**
  * Converts a Gregorian Date to Jalali (Solar Hijri)
  */
 export function gregorianToJalali(gy: number, gm: number, gd: number): { jy: number; jm: number; jd: number } {
   const g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
   let jy: number;
-  let gy2 = gm > 2 ? gy + 1 : gy;
+  const gy2 = gm > 2 ? gy + 1 : gy;
   let days =
     355666 +
     365 * gy +
@@ -62,90 +82,10 @@ export function gregorianToJalali(gy: number, gm: number, gd: number): { jy: num
 }
 
 /**
- * Format any ISO string, timestamp or Date into Persian Jalali string
- * e.g. "۱۴۰۳/۰۸/۰۹" or "۹ آبان ۱۴۰۳"
- */
-export function formatToJalali(
-  inputDate?: string | Date | null,
-  options: { includeTime?: boolean; textualMonth?: boolean } = {}
-): string {
-  if (!inputDate) return '—';
-
-  const d = typeof inputDate === 'string' ? new Date(inputDate) : inputDate;
-  if (isNaN(d.getTime())) return '—';
-
-  const { jy, jm, jd } = gregorianToJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
-
-  const toPersianDigits = (num: number | string): string => {
-    const persianMap: Record<string, string> = {
-      '0': '۰', '1': '۱', '2': '۲', '3': '۳', '4': '۴',
-      '5': '۵', '6': '۶', '7': '۷', '8': '۸', '9': '۹',
-    };
-    return String(num).replace(/[0-9]/g, w => persianMap[w] || w);
-  };
-
-  const padZero = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-
-  if (options.textualMonth) {
-    const monthName = JALALI_MONTH_NAMES[jm - 1] || '';
-    let result = `${toPersianDigits(jd)} ${monthName} ${toPersianDigits(jy)}`;
-    if (options.includeTime) {
-      const hours = padZero(d.getHours());
-      const mins = padZero(d.getMinutes());
-      result += ` - ساعت ${toPersianDigits(hours)}:${toPersianDigits(mins)}`;
-    }
-    return result;
-  }
-
-  let result = `${toPersianDigits(jy)}/${toPersianDigits(padZero(jm))}/${toPersianDigits(padZero(jd))}`;
-
-  if (options.includeTime) {
-    const hours = padZero(d.getHours());
-    const mins = padZero(d.getMinutes());
-    result += ` ${toPersianDigits(hours)}:${toPersianDigits(mins)}`;
-  }
-
-  return result;
-}
-
-/**
- * Returns current Jalali date object
- */
-export function getCurrentJalaliDate(): JalaliDate {
-  const now = new Date();
-  const { jy, jm, jd } = gregorianToJalali(now.getFullYear(), now.getMonth() + 1, now.getDate());
-  const padZero = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-  return {
-    year: jy,
-    month: jm,
-    day: jd,
-    monthName: JALALI_MONTH_NAMES[jm - 1] || '',
-    formatted: `${jy}/${padZero(jm)}/${padZero(jd)}`,
-  };
-}
-
-/**
- * Returns true if the given Jalali year is a leap year (کبیسه)
- */
-export function isJalaliLeapYear(jy: number): boolean {
-  return ((((((jy - (jy > 0 ? 474 : 473)) % 2820) + 474) + 38) * 682) % 2816) < 682;
-}
-
-/**
- * Returns the number of days in a given Jalali month (1-12)
- */
-export function getJalaliMonthDays(jy: number, jm: number): number {
-  if (jm >= 1 && jm <= 6) return 31;
-  if (jm >= 7 && jm <= 11) return 30;
-  if (jm === 12) return isJalaliLeapYear(jy) ? 30 : 29;
-  return 30;
-}
-
-/**
  * Converts a Jalali date to Gregorian Date object
  */
 export function jalaliToGregorian(jy: number, jm: number, jd: number): { gy: number; gm: number; gd: number } {
-  let sal_a: number, gy: number, gm: number, gd: number, days: number;
+  let gy: number, gm: number, gd: number, days: number;
   jy += 1595;
   days =
     -355668 +
@@ -180,17 +120,37 @@ export function jalaliToGregorian(jy: number, jm: number, jd: number): { gy: num
 }
 
 /**
+ * Returns true if the given Jalali year is a leap year (کبیسه)
+ * Uses exact round-trip verification against the 33-year astronomical cycle
+ * so that 1403 is accurately leap (30 Esfand) and 1404 is normal (29 Esfand).
+ */
+export function isJalaliLeapYear(jy: number): boolean {
+  const g = jalaliToGregorian(jy, 12, 30);
+  const j = gregorianToJalali(g.gy, g.gm, g.gd);
+  return j.jy === jy && j.jm === 12 && j.jd === 30;
+}
+
+/**
+ * Returns the number of days in a given Jalali month (1-12)
+ */
+export function getJalaliMonthDays(jy: number, jm: number): number {
+  if (jm >= 1 && jm <= 6) return 31;
+  if (jm >= 7 && jm <= 11) return 30;
+  if (jm === 12) return isJalaliLeapYear(jy) ? 30 : 29;
+  return 30;
+}
+
+/**
  * Parses any Jalali date string like "1404/02/20" or "۱۴۰۴/۰۲/۲۰" into year, month, day
  */
 export function parseJalaliString(str?: string | null): { year: number; month: number; day: number } | null {
   if (!str) return null;
-  // Convert Persian numbers to English
   const persianToEng: Record<string, string> = {
     '۰': '0', '۱': '1', '۲': '2', '۳': '3', '۴': '4',
     '۵': '5', '۶': '6', '۷': '7', '۸': '8', '۹': '9',
   };
   const normalized = str.replace(/[۰-۹]/g, c => persianToEng[c] || c).trim();
-  const match = normalized.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  const match = normalized.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
   if (!match) return null;
   const year = parseInt(match[1], 10);
   const month = parseInt(match[2], 10);
@@ -199,30 +159,127 @@ export function parseJalaliString(str?: string | null): { year: number; month: n
   return { year, month, day };
 }
 
+/**
+ * Safely parses a string or Date into a local Date without UTC midnight day-shift
+ */
+export function parseSafeGregorianDate(input: string | Date): Date {
+  if (input instanceof Date) return input;
+  const trimmed = input.trim();
+  const dateOnlyMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (dateOnlyMatch) {
+    const gy = parseInt(dateOnlyMatch[1], 10);
+    const gm = parseInt(dateOnlyMatch[2], 10);
+    const gd = parseInt(dateOnlyMatch[3], 10);
+    return new Date(gy, gm - 1, gd, 12, 0, 0);
+  }
+  return new Date(trimmed);
+}
+
+/**
+ * Format any ISO string, Jalali string, timestamp or Date into Persian Jalali string
+ * e.g. "۱۴۰۵/۰۸/۲۰" or "۲۰ آبان ۱۴۰۵"
+ */
+export function formatToJalali(
+  inputDate?: string | Date | null,
+  options: { includeTime?: boolean; textualMonth?: boolean } = {}
+): string {
+  if (!inputDate) return '—';
+
+  const padZero = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+
+  if (typeof inputDate === 'string') {
+    const alreadyJalali = parseJalaliString(inputDate);
+    if (alreadyJalali) {
+      const { year: jy, month: jm, day: jd } = alreadyJalali;
+      if (options.textualMonth) {
+        const monthName = JALALI_MONTH_NAMES[jm - 1] || '';
+        return `${toPersianDigitsInternal(jd)} ${monthName} ${toPersianDigitsInternal(jy)}`;
+      }
+      return `${toPersianDigitsInternal(jy)}/${toPersianDigitsInternal(padZero(jm))}/${toPersianDigitsInternal(padZero(jd))}`;
+    }
+  }
+
+  const d = parseSafeGregorianDate(inputDate);
+  if (isNaN(d.getTime())) return '—';
+
+  const { jy, jm, jd } = gregorianToJalali(d.getFullYear(), d.getMonth() + 1, d.getDate());
+
+  if (options.textualMonth) {
+    const monthName = JALALI_MONTH_NAMES[jm - 1] || '';
+    let result = `${toPersianDigitsInternal(jd)} ${monthName} ${toPersianDigitsInternal(jy)}`;
+    if (options.includeTime) {
+      const hours = padZero(d.getHours());
+      const mins = padZero(d.getMinutes());
+      result += ` - ساعت ${toPersianDigitsInternal(hours)}:${toPersianDigitsInternal(mins)}`;
+    }
+    return result;
+  }
+
+  let result = `${toPersianDigitsInternal(jy)}/${toPersianDigitsInternal(padZero(jm))}/${toPersianDigitsInternal(padZero(jd))}`;
+
+  if (options.includeTime) {
+    const hours = padZero(d.getHours());
+    const mins = padZero(d.getMinutes());
+    result += ` ${toPersianDigitsInternal(hours)}:${toPersianDigitsInternal(mins)}`;
+  }
+
+  return result;
+}
+
+/**
+ * Returns the 1-based Persian weekday index for a given Date (1 = شنبه ... 7 = جمعه)
+ */
+export function getTodayWorkDayIndex(referenceDate: Date = new Date()): number {
+  return ((referenceDate.getDay() + 1) % 7) + 1;
+}
+
+/**
+ * Returns current Jalali date object
+ */
+export function getCurrentJalaliDate(referenceDate: Date = new Date()): JalaliDate {
+  const { jy, jm, jd } = gregorianToJalali(
+    referenceDate.getFullYear(),
+    referenceDate.getMonth() + 1,
+    referenceDate.getDate()
+  );
+  const padZero = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+  const weekdayIndex = getTodayWorkDayIndex(referenceDate);
+  return {
+    year: jy,
+    month: jm,
+    day: jd,
+    monthName: JALALI_MONTH_NAMES[jm - 1] || '',
+    formatted: `${jy}/${padZero(jm)}/${padZero(jd)}`,
+    weekdayIndex,
+    weekdayName: PERSIAN_WEEKDAY_NAMES[weekdayIndex - 1] || 'شنبه',
+  };
+}
+
 export interface DynamicWorkDay {
   index: number;
   name: string;
   shortName: string;
-  date: string; // Persian formatted date, e.g. "۱۴۰۴/۰۲/۲۰"
+  date: string; // Persian formatted date, e.g. "۱۴۰۵/۰۸/۲۰"
+  isoDate: string; // YYYY-MM-DD local date
   isToday: boolean;
 }
 
 /**
- * Dynamically generates standard Persian workdays (شنبه تا پنج‌شنبه)
- * based on real-time current date (new Date()). No static hardcoded years.
+ * Dynamically generates all 7 Persian week days (شنبه تا جمعه)
+ * anchored to the current week of referenceDate.
  */
 export function getDynamicWorkDays(referenceDate: Date = new Date()): DynamicWorkDay[] {
-  // In JavaScript: Sunday = 0, Monday = 1, ..., Saturday = 6
-  // In Iran work week: Saturday = 1st day of work week
   const jsDay = referenceDate.getDay();
-  // Calculate offset to the preceding Saturday
-  // If today is Saturday (6), diff is 0
-  // If today is Sunday (0), diff is -1 day (or Saturday was 1 day ago)
   const daysSinceSaturday = (jsDay + 1) % 7;
 
-  const saturday = new Date(referenceDate);
-  saturday.setDate(referenceDate.getDate() - daysSinceSaturday);
-  saturday.setHours(0, 0, 0, 0);
+  const saturday = new Date(
+    referenceDate.getFullYear(),
+    referenceDate.getMonth(),
+    referenceDate.getDate() - daysSinceSaturday,
+    12,
+    0,
+    0
+  );
 
   const dayNames = [
     { index: 1, name: 'شنبه', shortName: 'شنبه' },
@@ -230,32 +287,52 @@ export function getDynamicWorkDays(referenceDate: Date = new Date()): DynamicWor
     { index: 3, name: 'دوشنبه', shortName: 'دوشنبه' },
     { index: 4, name: 'سه‌شنبه', shortName: 'سه‌شنبه' },
     { index: 5, name: 'چهارشنبه', shortName: 'چهارشنبه' },
-    { index: 6, name: 'پنج‌شنبه (جبرانی)', shortName: 'پنج‌شنبه' },
+    { index: 6, name: 'پنج‌شنبه', shortName: 'پنج‌شنبه' },
+    { index: 7, name: 'جمعه', shortName: 'جمعه' },
   ];
 
-  const todayMidnight = new Date(referenceDate);
-  todayMidnight.setHours(0, 0, 0, 0);
+  const todayY = referenceDate.getFullYear();
+  const todayM = referenceDate.getMonth();
+  const todayD = referenceDate.getDate();
+
+  const tomorrowDate = new Date(todayY, todayM, todayD + 1, 12, 0, 0);
+  const pad = (n: number) => String(n).padStart(2, '0');
 
   return dayNames.map((item, i) => {
-    const targetDate = new Date(saturday);
-    targetDate.setDate(saturday.getDate() + i);
+    const targetDate = new Date(
+      saturday.getFullYear(),
+      saturday.getMonth(),
+      saturday.getDate() + i,
+      12,
+      0,
+      0
+    );
 
-    const isToday = targetDate.getTime() === todayMidnight.getTime();
-    const isTomorrow = targetDate.getTime() === todayMidnight.getTime() + 86400000;
+    const isToday =
+      targetDate.getFullYear() === todayY &&
+      targetDate.getMonth() === todayM &&
+      targetDate.getDate() === todayD;
+
+    const isTomorrow =
+      targetDate.getFullYear() === tomorrowDate.getFullYear() &&
+      targetDate.getMonth() === tomorrowDate.getMonth() &&
+      targetDate.getDate() === tomorrowDate.getDate();
 
     let displayTitle = item.name;
     if (isToday) displayTitle = `${item.name} (امروز)`;
     else if (isTomorrow) displayTitle = `${item.name} (فردا)`;
+
+    const isoDate = `${targetDate.getFullYear()}-${pad(targetDate.getMonth() + 1)}-${pad(targetDate.getDate())}`;
 
     return {
       index: item.index,
       name: displayTitle,
       shortName: item.shortName,
       date: formatToJalali(targetDate),
+      isoDate,
       isToday,
     };
   });
 }
 
-export { JALALI_MONTH_NAMES };
-
+export { JALALI_MONTH_NAMES, PERSIAN_WEEKDAY_NAMES };

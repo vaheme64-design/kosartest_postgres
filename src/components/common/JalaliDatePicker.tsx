@@ -42,8 +42,18 @@ export const JalaliDatePicker: React.FC<JalaliDatePickerProps> = ({
     const direct = parseJalaliString(value);
     if (direct) return direct;
 
-    // Check if ISO Gregorian date passed
-    const gDate = new Date(value);
+    // Check if ISO YYYY-MM-DD date passed (avoid UTC midnight day shift)
+    const trimmed = value.trim();
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) {
+      const gy = parseInt(isoMatch[1], 10);
+      const gm = parseInt(isoMatch[2], 10);
+      const gd = parseInt(isoMatch[3], 10);
+      const { jy, jm, jd } = gregorianToJalali(gy, gm, gd);
+      return { year: jy, month: jm, day: jd };
+    }
+
+    const gDate = new Date(trimmed);
     if (!isNaN(gDate.getTime())) {
       const { jy, jm, jd } = gregorianToJalali(
         gDate.getFullYear(),
@@ -122,7 +132,7 @@ export const JalaliDatePicker: React.FC<JalaliDatePickerProps> = ({
   // Determine starting weekday of the 1st of this Jalali month
   const firstDayWeekdayIndex = useMemo(() => {
     const { gy, gm, gd } = jalaliToGregorian(viewYear, viewMonth, 1);
-    const gDate = new Date(gy, gm - 1, gd);
+    const gDate = new Date(gy, gm - 1, gd, 12, 0, 0);
     const jsDay = gDate.getDay(); // 0: Sun, 1: Mon, ... 6: Sat
     // In Persian: Sat=0, Sun=1, Mon=2, Tue=3, Wed=4, Thu=5, Fri=6
     return (jsDay + 1) % 7;
@@ -132,8 +142,7 @@ export const JalaliDatePicker: React.FC<JalaliDatePickerProps> = ({
     const pad = (n: number) => String(n).padStart(2, '0');
     const jalaliStr = `${year}/${pad(month)}/${pad(day)}`;
     const { gy, gm, gd } = jalaliToGregorian(year, month, day);
-    const gDate = new Date(Date.UTC(gy, gm - 1, gd));
-    const isoStr = gDate.toISOString().slice(0, 10);
+    const isoStr = `${gy}-${pad(gm)}-${pad(gd)}`;
 
     setManualText(jalaliStr);
     onChange(jalaliStr, isoStr);

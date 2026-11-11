@@ -29,6 +29,7 @@ import {
 } from '../utils/formatters';
 import { InventoryModuleSkeleton } from './ui/Skeleton';
 import { SearchableSelect } from './common/SearchableSelect';
+import { formatToJalali } from '../utils/jalali';
 
 interface SapcoMaterialsViewProps {
   coils: SapcoCoilReceipt[];
@@ -48,46 +49,40 @@ const DEFAULT_HEAT_LINKS: Record<
 > = {
   '0': {
     heatNumber: 'HT-99412-MOB',
-    batchNumber: 'BCH-SAP-1404-101',
+    batchNumber: 'BCH-SAP-ECU-101',
     linkedProductionBatches: [
       {
-        batchCode: 'BCH-PRD-1404-2001',
-        moCode: 'MO-1404-2001',
-        partCode: 'SAPCO-ASY-ECU-BRK-01',
-        partName: 'براکت ضدسرقت رایانه موتور (ECU)',
-        allocatedKg: 7613,
-        targetQtyPcs: 5000,
-        linkedAt: '۱۴۰۴/۰۲/۲۰',
+        batchCode: 'BCH-PRD-ECU-MAIN',
+        moCode: 'MO-ECU-MAIN-01',
+        partCode: 'WIP-ECU-MAIN-BRK',
+        partName: 'صفحه براکت اصلی ضدسرقت رایانه موتور',
+        allocatedKg: 1500,
+        targetQtyPcs: 1500,
+        linkedAt: formatToJalali(new Date()),
+      },
+      {
+        batchCode: 'BCH-PRD-ECU-COMP',
+        moCode: 'MO-ECU-COMP-01',
+        partCode: 'WIP-ECU-COMP-BRK',
+        partName: 'قطعه مکمل براکت ضدسرقت رایانه موتور',
+        allocatedKg: 720,
+        targetQtyPcs: 1500,
+        linkedAt: formatToJalali(new Date()),
       },
     ],
   },
   '1': {
-    heatNumber: 'HT-88305-MOB',
-    batchNumber: 'BCH-SAP-1404-102',
+    heatNumber: 'HT-99415-MOB',
+    batchNumber: 'BCH-SAP-ECU-102',
     linkedProductionBatches: [
       {
-        batchCode: 'BCH-PRD-1404-2002',
-        moCode: 'MO-1404-2002',
-        partCode: 'SAPCO-SEAT-BACK-LH',
-        partName: 'اسکلت صندلی چپ و راست (قالب ۲ کویته)',
-        allocatedKg: 8778,
-        targetQtyPcs: 4000,
-        linkedAt: '۱۴۰۴/۰۲/۲۰',
-      },
-    ],
-  },
-  '2': {
-    heatNumber: 'HT-77190-FOOLAD',
-    batchNumber: 'BCH-SAP-1404-103',
-    linkedProductionBatches: [
-      {
-        batchCode: 'BCH-PRD-1404-2003',
-        moCode: 'MO-1404-2003',
-        partCode: 'SAPCO-BUMP-BEAM-FR',
-        partName: 'تیر عرضی سپر جلو (امگا)',
-        allocatedKg: 11178,
-        targetQtyPcs: 2000,
-        linkedAt: '۱۴۰۴/۰۲/۲۰',
+        batchCode: 'BCH-PRD-ECU-ASY',
+        moCode: 'MO-ECU-ASY-01',
+        partCode: 'SAPCO-ASY-ECU-BRK-01',
+        partName: 'مجموعه براکت ضدسرقت رایانه موتور (ECU)',
+        allocatedKg: 2220,
+        targetQtyPcs: 1500,
+        linkedAt: formatToJalali(new Date()),
       },
     ],
   },
@@ -121,7 +116,7 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
     >
   >(() => {
     try {
-      const saved = localStorage.getItem('kpims_sapco_coil_batch_links_v1');
+      const saved = localStorage.getItem('kpims_sapco_coil_batch_links_v3');
       if (saved) return JSON.parse(saved);
     } catch {
       // ignore
@@ -141,7 +136,7 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
   ) => {
     setCoilBatchLinks(next);
     try {
-      localStorage.setItem('kpims_sapco_coil_batch_links_v1', JSON.stringify(next));
+      localStorage.setItem('kpims_sapco_coil_batch_links_v3', JSON.stringify(next));
     } catch {
       // ignore
     }
@@ -151,8 +146,8 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
   const [materialGradesList, setMaterialGradesList] = useState<
     Array<{ code: string; name: string; standard?: string; yieldStrengthMpa?: number }>
   >([
-    { code: 'DC04', name: 'DC04 (کشش عمیق)', standard: 'EN 10130' },
     { code: 'DC01A', name: 'DC01A (فرم‌پذیر استاندارد)', standard: 'EN 10130' },
+    { code: 'DC04', name: 'DC04 (کشش عمیق)', standard: 'EN 10130' },
     { code: 'ST14', name: 'ST14 (نورد سرد فوق کشش)', standard: 'DIN 1623' },
     { code: 'ST12', name: 'ST12 (کشش معمولی)', standard: 'DIN 1623' },
     { code: 'DX51D', name: 'DX51D (گالوانیزه)', standard: 'EN 10346' },
@@ -169,17 +164,17 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
   const [batchNumber, setBatchNumber] = useState('');
   const [heatNumber, setHeatNumber] = useState('');
   const [selectedPartId, setSelectedPartId] = useState('');
-  const [materialGrade, setMaterialGrade] = useState('DC04');
-  const [thicknessMm, setThicknessMm] = useState<number>(1.2);
-  const [widthMm, setWidthMm] = useState<number>(1250);
-  const [receivedWeightKg, setReceivedWeightKg] = useState<number>(12000);
+  const [materialGrade, setMaterialGrade] = useState('DC01A');
+  const [thicknessMm, setThicknessMm] = useState<number>(2.0);
+  const [widthMm, setWidthMm] = useState<number>(1140);
+  const [receivedWeightKg, setReceivedWeightKg] = useState<number>(8450);
   const [initialLinkedMoCode, setInitialLinkedMoCode] = useState<string>('');
 
   // Modal for Linking an Existing Coil/Heat to a Production Batch (MO)
   const [linkingCoil, setLinkingCoil] = useState<SapcoCoilReceipt | null>(null);
   const [selectedMoForLink, setSelectedMoForLink] = useState<string>('');
   const [linkProductionBatchCode, setLinkProductionBatchCode] = useState<string>('');
-  const [linkAllocatedKg, setLinkAllocatedKg] = useState<string>('2500');
+  const [linkAllocatedKg, setLinkAllocatedKg] = useState<string>('1500');
 
   // Modal for viewing End-to-End Heat/Batch Traceability Tree
   const [traceabilityCoil, setTraceabilityCoil] = useState<SapcoCoilReceipt | null>(null);
@@ -187,7 +182,7 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
   // Load active Manufacturing Orders from localStorage so we can link coils directly to them
   const activeManufacturingOrders = useMemo(() => {
     try {
-      const saved = localStorage.getItem('kpims_highway_scenarios_v3');
+      const saved = localStorage.getItem('kpims_highway_scenarios_v4');
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
@@ -197,25 +192,25 @@ export const SapcoMaterialsView: React.FC<SapcoMaterialsViewProps> = ({
     }
     return [
       {
+        id: 'SCN-ECU-MAIN',
+        orderCode: 'MO-ECU-MAIN-01',
+        partCode: 'WIP-ECU-MAIN-BRK',
+        partName: 'صفحه براکت اصلی ضدسرقت رایانه موتور',
+        orderQty: 1500,
+      },
+      {
+        id: 'SCN-ECU-COMP',
+        orderCode: 'MO-ECU-COMP-01',
+        partCode: 'WIP-ECU-COMP-BRK',
+        partName: 'قطعه مکمل براکت ضدسرقت رایانه موتور',
+        orderQty: 1500,
+      },
+      {
         id: 'SCN-ECU-BRK',
-        orderCode: 'MO-1404-2001',
+        orderCode: 'MO-ECU-ASY-01',
         partCode: 'SAPCO-ASY-ECU-BRK-01',
-        partName: 'براکت ضدسرقت رایانه موتور (ECU)',
-        orderQty: 5000,
-      },
-      {
-        id: 'SCN-SEAT-LHRH',
-        orderCode: 'MO-1404-2002',
-        partCode: 'SAPCO-SEAT-BACK-LH',
-        partName: 'اسکلت صندلی چپ و راست (قالب ۲ کویته)',
-        orderQty: 4000,
-      },
-      {
-        id: 'SCN-BUMP-BEAM',
-        orderCode: 'MO-1404-2003',
-        partCode: 'SAPCO-BUMP-BEAM-FR',
-        partName: 'تیر عرضی سپر جلو (امگا)',
-        orderQty: 2000,
+        partName: 'مجموعه براکت ضدسرقت رایانه موتور (ECU)',
+        orderQty: 1500,
       },
     ];
   }, [linkingCoil, showModal, coilBatchLinks]);

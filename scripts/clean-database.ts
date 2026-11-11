@@ -6,9 +6,6 @@ async function cleanDatabase() {
   console.log('🧹 Starting full database cleanup (WIP, Customer Orders, Inventory, Plans)...');
 
   try {
-    // Disable SQLite foreign keys temporarily for clean wipe
-    await prisma.$executeRawUnsafe('PRAGMA foreign_keys = OFF;');
-
     // 1. Wipe WIP & Production Execution
     await prisma.productionScrap.deleteMany({});
     await prisma.machineAssignment.deleteMany({});
@@ -42,9 +39,6 @@ async function cleanDatabase() {
     await prisma.materialLot.deleteMany({});
     await prisma.stockBalance.deleteMany({});
     console.log('  -> Cleared all Inventory documents, transactions, and coils.');
-
-    // Re-enable SQLite foreign keys
-    await prisma.$executeRawUnsafe('PRAGMA foreign_keys = ON;');
 
     console.log('✅ Full database cleanup finished successfully! All test orders, WIP, and stocks have been reset to zero.');
   } catch (err) {

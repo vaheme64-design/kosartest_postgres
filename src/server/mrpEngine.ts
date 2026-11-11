@@ -22,6 +22,8 @@ import { INITIAL_SAPCO_CONTRACTS, INITIAL_INVENTORY_RESERVATIONS, INITIAL_INVENT
 import { calculateDetailedStockBalances } from './inventoryEngine';
 import { InventoryReservation } from '../types/inventory';
 import { toPersianDigits } from '../utils/formatters';
+import { formatToJalali } from '../utils/jalali';
+import { getAllBoms } from './bomAndParallelEngine';
 
 // Runtime store for active inventory reservations (allows auto-reserving via Pre-Issue Check)
 export const activeReservationsStore: InventoryReservation[] = JSON.parse(
@@ -44,26 +46,17 @@ export interface ServerQcHoldOverride {
 
 export const serverQcHoldStore: Record<string, ServerQcHoldOverride> = {};
 
-// Runtime store for VIP parts (قطعات کلیدی)
+// Runtime store for VIP parts (قطعات کلیدی - فقط مجموعه براکت ضدسرقت رایانه موتور)
 export const serverVipPartsStore: Record<string, boolean> = {
-  'PRT-ECU-BRK-01': true,
+  'PRT-FGD-ECU-BRK': true,
   'SAPCO-ASY-ECU-BRK-01': true,
-  'PRT-PEDAL-01': true,
-  'SAPCO-998120': true,
-  'RM-COIL-DC04-08': true,
 };
 
 /**
- * Format a Jalali date string for display
+ * Format a Jalali date string for display using accurate astronomical conversion
  */
 function getJalaliNowString(): string {
-  const d = new Date();
-  const jy = d.getFullYear() - 621;
-  const jm = String(d.getMonth() + 1).padStart(2, '0');
-  const jd = String(d.getDate()).padStart(2, '0');
-  const jh = String(d.getHours()).padStart(2, '0');
-  const jmin = String(d.getMinutes()).padStart(2, '0');
-  return `${jy}/${jm}/${jd} ${jh}:${jmin}`;
+  return formatToJalali(new Date(), { includeTime: true });
 }
 
 /**
@@ -78,7 +71,7 @@ export function runFullMrp(options?: {
 }): MrpRunResult {
   const parts = INITIAL_PARTS;
   const orders = customerOrdersStore;
-  const boms = INITIAL_ADVANCED_BOMS;
+  const boms = getAllBoms();
   const routings = INITIAL_ROUTINGS;
   const coils = INITIAL_SAPCO_COILS;
   const contracts = INITIAL_SAPCO_CONTRACTS;
@@ -118,7 +111,7 @@ export function runFullMrp(options?: {
   const partNetRequirementsMap = new Map<string, number>();
 
   grossDemandByPart.forEach((demand, partId) => {
-    const part = parts.find(p => p.id === partId);
+    const part = parts.find(p => p.id === partId || p.code === partId);
     if (!part) return;
 
     // FG on-hand stock
@@ -220,36 +213,37 @@ export function runFullMrp(options?: {
     const partObj = parts.find(p => p.id === pRow.partId);
 
     if (bom && bom.components.length > 0) {
-      // Use multi-layer advanced BOM components
+      // Explode multi-layer advanced BOM components
       bom.components.forEach(cmp => {
         const componentQty = netQty * cmp.quantityPerAssembly;
         const scrapFactor = 1 + ((cmp.scrapAllowancePercent || 0) / 100);
         const grossWeightKg = Math.round(componentQty * (cmp.grossWeightKg || 0.1) * scrapFactor * 10) / 10;
 
-        // Determine material key and attributes
         let materialKey = cmp.componentPartCode;
-        let grade = 'ST14';
-        let thickness = 1.0;
-        let width = 1250;
+        let materialName = cmp.componentPartName;
+        let grade = 'DC01A';
+        let thickness = 2.0;
+        let width = 1140;
 
         if (cmp.componentType === 'RAW_SHEET') {
-          if (cmp.componentPartName.includes('DC04')) grade = 'DC04';
-          else if (cmp.componentPartName.includes('ST14')) grade = 'ST14';
-          else if (cmp.componentPartName.includes('DX51')) grade = 'DX51D';
-          else if (cmp.componentPartName.includes('ST37')) grade = 'ST37';
-
-          if (cmp.componentPartName.includes('0.8')) thickness = 0.8;
-          else if (cmp.componentPartName.includes('1.0')) thickness = 1.0;
-          else if (cmp.componentPartName.includes('1.2')) thickness = 1.2;
-          else if (cmp.componentPartName.includes('1.5')) thickness = 1.5;
-          else if (cmp.componentPartName.includes('2.0')) thickness = 2.0;
-
-          materialKey = `RAW-COIL-${grade}-${thickness.toFixed(1)}`;
+          materialKey = 'RM-COIL-DC01A-2.0-1140';
+          materialName = 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm (ابعاد ۲×۱۱۴۰)';
+          grade = 'DC01A';
+          thickness = 2.0;
+          width = 1140;
+        } else if (cmp.componentPartCode === 'FST-NUT-WELD-M6') {
+          grade = 'FST-NUT-M6';
+          thickness = 0;
+          width = 0;
+        } else if (cmp.componentPartCode === 'FST-BOLT-WELD-M6-20') {
+          grade = 'FST-BOLT-M6';
+          thickness = 0;
+          width = 0;
         }
 
         const existing = rawMap.get(materialKey) || {
           materialCode: materialKey,
-          materialName: cmp.componentPartName,
+          materialName,
           grade,
           thicknessMm: thickness,
           widthMm: width,
@@ -259,12 +253,12 @@ export function runFullMrp(options?: {
           demandedByParts: [],
         };
 
-        existing.totalQuantity += componentQty;
+        existing.totalQuantity += cmp.componentType === 'RAW_SHEET' ? grossWeightKg : componentQty;
         existing.totalWeightKg += grossWeightKg;
         existing.demandedByParts.push({
           partId: pRow.partId,
           partCode: pRow.partCode,
-          partName: pRow.partName,
+          partName: `${pRow.partName} (${cmp.componentPartName})`,
           requiredQuantity: componentQty,
           weightKg: grossWeightKg,
         });
@@ -272,22 +266,21 @@ export function runFullMrp(options?: {
         rawMap.set(materialKey, existing);
       });
     } else {
-      // Standard single-material explosion based on part weight and grade
-      const grade = partObj?.materialGrade || 'ST14';
-      const thickness = partObj?.thicknessMm || 1.2;
-      const unitWeight = partObj?.weightPerUnitKg || 1.5;
-      const materialKey = `RAW-COIL-${grade}-${thickness.toFixed(1)}`;
-      const totalWeightKg = Math.round(netQty * unitWeight * 1.15 * 10) / 10; // 15% standard stamping scrap norm
+      const grade = partObj?.materialGrade || 'DC01A';
+      const thickness = partObj?.thicknessMm || 2.0;
+      const unitWeight = partObj?.weightPerUnitKg || 1.25;
+      const materialKey = 'RM-COIL-DC01A-2.0-1140';
+      const totalWeightKg = Math.round(netQty * unitWeight * 1.15 * 10) / 10;
 
       const existing = rawMap.get(materialKey) || {
         materialCode: materialKey,
-        materialName: `کویل ورق روغنی / گالوانیزه ${grade} ضخامت ${thickness}mm`,
+        materialName: `رول ورق روغنی ${grade} ضخامت ${thickness}mm عرض ۱۱۴۰`,
         grade,
         thicknessMm: thickness,
-        widthMm: 1250,
+        widthMm: 1140,
         unitCode: 'KG',
-        totalQuantity: totalWeightKg,
-        totalWeightKg,
+        totalQuantity: 0,
+        totalWeightKg: 0,
         demandedByParts: [],
       };
 
@@ -305,12 +298,12 @@ export function runFullMrp(options?: {
     }
   });
 
-  // Ensure default automotive materials are visible even if demand is small
+  // Ensure the 4 raw materials & fasteners of the Anti-Theft ECU Bracket are always visible
   const defaultMaterialKeys = [
-    { key: 'RAW-COIL-DC04-0.8', name: 'کویل ورق روغنی کشش عمیق DC04 ضخامت 0.8mm ساپکو', grade: 'DC04', thk: 0.8 },
-    { key: 'RAW-COIL-ST14-1.2', name: 'کویل ورق سرد فرم‌دهی ST14 ضخامت 1.2mm ساپکو', grade: 'ST14', thk: 1.2 },
-    { key: 'RAW-COIL-DX51D-1.5', name: 'کویل ورق گالوانیزه ضدخوردگی DX51D ضخامت 1.5mm', grade: 'DX51D', thk: 1.5 },
-    { key: 'FST-NUT-WELD-M8', name: 'مهره جوشی چهارگوش پایه‌دار M8 DIN 928', grade: 'STEEL-8', thk: 0, unit: 'PCS' },
+    { key: 'RM-COIL-DC01A-2.0-1140', name: 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm (ابعاد ۲×۱۱۴۰)', grade: 'DC01A', thk: 2.0, width: 1140, unit: 'KG' },
+    { key: 'RM-SHT-DC01A-2.0-1000', name: 'ورق شیت روغنی DC01A ضخامت 2mm ابعاد ۲×۱۰۰۰ (ورق آلترناتیو)', grade: 'DC01A', thk: 2.0, width: 1000, unit: 'KG' },
+    { key: 'FST-NUT-WELD-M6', name: 'مهره جوشی چهارگوش پایه‌دار M6 استاندارد DIN 928 (۱۵ عدد در هر براکت)', grade: 'FST-NUT-M6', thk: 0, width: 0, unit: 'PCS' },
+    { key: 'FST-BOLT-WELD-M6-20', name: 'پیچ پایه جوشی مقاومتی M6x20 استاندارد خودرویی (۲ عدد در هر مکمل)', grade: 'FST-BOLT-M6', thk: 0, width: 0, unit: 'PCS' },
   ];
 
   defaultMaterialKeys.forEach(dm => {
@@ -320,8 +313,8 @@ export function runFullMrp(options?: {
         materialName: dm.name,
         grade: dm.grade,
         thicknessMm: dm.thk,
-        widthMm: 1250,
-        unitCode: dm.unit || 'KG',
+        widthMm: dm.width,
+        unitCode: dm.unit,
         totalQuantity: 0,
         totalWeightKg: 0,
         demandedByParts: [],
@@ -332,27 +325,24 @@ export function runFullMrp(options?: {
   // 4. Netting against On-Hand Stock, Consignment, Quarantined & Contracts
   const materialRows: MrpMaterialRow[] = [];
 
-  rawMap.forEach((req, matKey) => {
-    // 4.1. Match physical coils on factory floor
+  rawMap.forEach((req) => {
+    // 4.1. Match physical coils on factory floor by exact partCode or grade+width
     const matchingCoilsList = coils.filter(c => {
-      const matchGrade = c.materialGrade.toLowerCase().includes(req.grade.toLowerCase()) ||
-        req.grade.toLowerCase().includes(c.materialGrade.toLowerCase());
-      const matchThk = Math.abs(c.thicknessMm - req.thicknessMm) < 0.15;
-      return matchGrade && matchThk;
+      if (c.partCode === req.materialCode) return true;
+      if (req.unitCode !== 'KG') return false;
+      const matchGrade = c.materialGrade.toLowerCase().includes(req.grade.toLowerCase());
+      const matchWidth = !req.widthMm || c.widthMm === req.widthMm;
+      return matchGrade && matchWidth;
     });
 
-    // Stock quantities from coils
     let onHandConsignment = 0;
     let onHandOwned = 0;
     let onHandQuarantined = 0;
 
     matchingCoilsList.forEach(c => {
       const remainingKg = Math.max(0, c.receivedWeightKg - c.consumedWeightKg);
-      if (c.status === 'DEPLETED') {
-        // depleted coil has no remaining usable weight
-      } else {
-        // Coils received through Sapco delivery are consignment, otherwise factory owned
-        if (c.partCode.includes('FAC') || c.receiptNumber.includes('FAC')) {
+      if (c.status !== 'DEPLETED') {
+        if (c.partCode.includes('ALT') || c.coilNumber.includes('ALT')) {
           onHandOwned += remainingKg;
         } else {
           onHandConsignment += remainingKg;
@@ -360,12 +350,10 @@ export function runFullMrp(options?: {
       }
     });
 
-    // Also check raw stock balances from warehouse ledger if coils table didn't capture all
+    // Also check raw stock balances from warehouse ledger (especially for fasteners M6 nut & M6x20 bolt)
     const ledgerRaw = balances.filter(b => {
       if (b.warehouseId !== 'WH-RAW') return false;
-      const matchGrade = (b.materialGrade && req.grade && b.materialGrade.includes(req.grade)) ||
-        (b.partCode && b.partCode.includes(req.grade));
-      return matchGrade;
+      return b.partCode === req.materialCode;
     });
 
     if (matchingCoilsList.length === 0 && ledgerRaw.length > 0) {
@@ -375,35 +363,26 @@ export function runFullMrp(options?: {
         onHandQuarantined += lr.qualityBlockedQty || 0;
       });
     } else if (ledgerRaw.length > 0) {
-      // Even when coils match, capture any qualityBlockedQty from ledger balances
       ledgerRaw.forEach(lr => {
         onHandQuarantined += lr.qualityBlockedQty || 0;
       });
     }
 
-    // Also include any active QC Hold overrides placed by user in Inventory / Coils
+    // Include any active QC Hold overrides placed by user
     Object.values(serverQcHoldStore).forEach(hold => {
       if (!hold.isHeld) return;
-      const gradeMatch =
-        hold.materialGrade &&
-        req.grade &&
-        (hold.materialGrade.toLowerCase().includes(req.grade.toLowerCase()) ||
-          req.grade.toLowerCase().includes(hold.materialGrade.toLowerCase()));
-      const codeMatch =
-        hold.partCode &&
-        (hold.partCode === req.materialCode ||
-          (req.grade && hold.partCode.toLowerCase().includes(req.grade.toLowerCase())));
-      if (gradeMatch || codeMatch) {
+      const codeMatch = hold.partCode === req.materialCode;
+      if (codeMatch) {
         onHandQuarantined += Number(hold.heldWeightKg || hold.heldQty || 0);
       }
     });
 
-    // Active Reservations for this material grade / code
+    // Active Reservations for this material code
     const activeRes = activeReservationsStore.filter(r => {
       if (r.status !== 'ACTIVE') return false;
-      return r.partCode.includes(req.grade) || r.partName.includes(req.grade);
+      return r.partCode === req.materialCode;
     });
-    const reservedActive = activeRes.reduce((sum, r) => sum + r.quantityKg, 0);
+    const reservedActive = activeRes.reduce((sum, r) => sum + (req.unitCode === 'KG' ? r.quantityKg : r.quantity), 0);
 
     // Effective usable stock (ATP): (Owned + Consignment) - Reserved - Quarantined (QC Hold)
     const effectiveStock = includeConsignment ? (onHandOwned + onHandConsignment) : onHandOwned;
@@ -461,7 +440,7 @@ export function runFullMrp(options?: {
     }));
 
     materialRows.push({
-      materialId: `MAT-${matKey}`,
+      materialId: `MAT-${req.materialCode}`,
       materialCode: req.materialCode,
       materialName: req.materialName,
       materialGrade: req.grade,

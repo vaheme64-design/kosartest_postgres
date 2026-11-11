@@ -49,7 +49,7 @@ import { ManufacturingOrderTimelineModal } from './ManufacturingOrderTimelineMod
 import { MaterialRequirementProjectionView } from './MaterialRequirementProjectionView';
 import { EmptyState } from '../common/EmptyState';
 import { MetricTooltip } from '../common/MetricTooltip';
-import { getDynamicWorkDays, getCurrentJalaliDate, getJalaliMonthDays } from '../../utils/jalali';
+import { getDynamicWorkDays, getCurrentJalaliDate, getJalaliMonthDays, getTodayWorkDayIndex } from '../../utils/jalali';
 import { useErpRouter } from '../../context/RouterContext';
 import { PreMoWipInspectionModal } from '../workflow/PreMoWipInspectionModal';
 import { HighwayPartScenario } from '../workflow/FactoryHighwayWorkbench';
@@ -69,7 +69,7 @@ export interface ScheduledOpStep {
   machineName: string;
   dieCode: string;
   standardRatePerHour: number;
-  scheduledDayIndex: number; // 1 = شنبه, 2 = یکشنبه, 3 = دوشنبه, 4 = سه‌شنبه, 5 = چهارشنبه, 6 = پنج‌شنبه
+  scheduledDayIndex: number; // 1 = شنبه, 2 = یکشنبه, 3 = دوشنبه, 4 = سه‌شنبه, 5 = چهارشنبه, 6 = پنج‌شنبه, 7 = جمعه
   shiftName: 'شیفت صبح' | 'شیفت عصر' | 'شیفت شب';
   basePlannedQty: number;
   carriedOverQty: number; // Rolled forward from previous day
@@ -134,7 +134,7 @@ interface ErpProductionWorkbenchViewProps {
   onMoSelect?: (moId: string | null) => void;
 }
 
-const STORAGE_KEY_MULTI_OP_APS = 'kpims_aps_multi_part_op_schedule_v2';
+const STORAGE_KEY_MULTI_OP_APS = 'kpims_aps_ecu_schedule_v4';
 
 export const WORK_DAYS = getDynamicWorkDays();
 
@@ -152,9 +152,13 @@ export function calculateOpInputWip(item: MultiPartScheduleItem, opIdx: number):
   return Math.max(0, (prevOp?.completedGoodQty || 0) - (currentOp?.completedGoodQty || 0));
 }
 
-// Generate a realistic 20-part multi-operation factory schedule where each part has 3 to 5 OPs staggered across days
+// برنامه تولید یکپارچه فقط برای خانواده قطعه «براکت ضدسرقت رایانه موتور (ECU)» و زیرفرآیندهای آن
 export function buildInitial20PartsSchedule(): MultiPartScheduleItem[] {
+  const todayIdx = getTodayWorkDayIndex();
+  const nextDayIdx = todayIdx < 7 ? todayIdx + 1 : 1;
+
   const templates: Array<{
+    partId: string;
     code: string;
     name: string;
     car: string;
@@ -180,322 +184,55 @@ export function buildInitial20PartsSchedule(): MultiPartScheduleItem[] {
     }>;
   }> = [
     {
+      partId: 'PRT-WIP-ECU-MAIN',
       code: 'WIP-ECU-MAIN-BRK',
       name: 'صفحه براکت اصلی ضدسرقت رایانه موتور',
-      car: 'پژو ۲۰۶',
+      car: 'پژو ۲۰۶ / ۲۰۷',
       type: 'SUB_ASSEMBLY',
       parent: 'SAPCO-ASY-ECU-BRK-01',
       rawCode: 'RM-COIL-DC01A-2.0-1140',
-      rawName: 'رول ورق DC01A ضخامت 2 عرض 1140',
+      rawName: 'رول ورق روغنی DC01A ضخامت 2.0 عرض 1140 میلیمتر',
       weightKg: 0.95,
       target: 1500,
       opsConfig: [
-        { opNo: 10, title: 'برش رول و نواربری سایز کوچک', hall: 'سالن برش', machineCode: 'SHR-GUI-01', machineName: 'قیچی گیوتین ۶ متری ۱', dieCode: 'BLD-SHR-01', rate: 600, day: 1, shift: 'شیفت صبح', done: 1500, scrap: 8, wipAfter: 300 },
-        { opNo: 20, title: 'پرس بلنک‌زنی اولیه', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ضربه‌ای ۲۵۰ تن ۱', dieCode: 'DIE-ECU-BLK-01', rate: 350, day: 1, shift: 'شیفت صبح', done: 1200, scrap: 12, wipAfter: 350 },
-        { opNo: 30, title: 'پرس خم لبه استاندارد', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن خم ۱', dieCode: 'DIE-ECU-BND-02', rate: 300, day: 1, shift: 'شیفت عصر', done: 850, scrap: 5, wipAfter: 850 },
-        { opNo: 40, title: 'پانچ اول و پانچ دوم سوراخ‌کاری', hall: 'سالن پرس', machineCode: 'PRS-160T-02', machineName: 'پرس ۱۶۰ تن پانچ ۲', dieCode: 'DIE-ECU-PNC-03', rate: 300, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 50, title: 'پرس‌جوش ۱۵ عدد مهره جوشی M6', hall: 'سالن جوشکاری', machineCode: 'WLD-SPOT-01', machineName: 'پرس‌جوش مقاومتی ۱۰۰KVA', dieCode: 'JIG-ECU-NUT15', rate: 180, day: 2, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
+        { opNo: 10, title: 'برش رول و نواربری ورق DC01A ضخامت ۲', hall: 'سالن بلنکینگ و برش', machineCode: 'SLT-1250-01', machineName: 'خط رول‌بازکن و برش کویل ۱۲۵۰ میلیمتر', dieCode: 'DIE-ECU-BLK-01', rate: 600, day: todayIdx, shift: 'شیفت صبح', done: 1500, scrap: 8, wipAfter: 300 },
+        { opNo: 20, title: 'پرس بلنک‌زنی صفحه اصلی براکت ضدسرقت', hall: 'سالن پرس متوسط', machineCode: 'PRS-250-01', machineName: 'پرس مکانیکی کلاچ پنوماتیک ۲۵۰ تن', dieCode: 'DIE-ECU-BLK-01', rate: 350, day: todayIdx, shift: 'شیفت صبح', done: 1200, scrap: 12, wipAfter: 350 },
+        { opNo: 30, title: 'پرس خم لبه استاندارد صفحه اصلی', hall: 'سالن پرس متوسط', machineCode: 'PRS-250-01', machineName: 'پرس مکانیکی کلاچ پنوماتیک ۲۵۰ تن', dieCode: 'DIE-ECU-BND-02', rate: 300, day: todayIdx, shift: 'شیفت عصر', done: 850, scrap: 5, wipAfter: 150 },
+        { opNo: 40, title: 'پانچ اول و پانچ دوم سوراخ‌کاری شبکه', hall: 'سالن پرس متوسط', machineCode: 'PRS-250-01', machineName: 'پرس مکانیکی کلاچ پنوماتیک ۲۵۰ تن', dieCode: 'DIE-ECU-PNC-03', rate: 300, day: todayIdx, shift: 'شیفت عصر', done: 700, scrap: 3, wipAfter: 100 },
+        { opNo: 50, title: 'پرس‌جوش ۱۵ عدد مهره جوشی M6 روی صفحه اصلی', hall: 'سالن جوش و مونتاژ', machineCode: 'WLD-SPOT-01', machineName: 'دستگاه پرس‌جوش نقطه‌ای مقاومتی ۱۰۰KVA', dieCode: 'JIG-ECU-NUT15', rate: 180, day: nextDayIdx, shift: 'شیفت صبح', done: 600, scrap: 2, wipAfter: 600 },
       ],
     },
     {
+      partId: 'PRT-WIP-ECU-COMP',
       code: 'WIP-ECU-COMP-BRK',
       name: 'قطعه مکمل براکت ضدسرقت رایانه موتور',
-      car: 'پژو ۲۰۶',
+      car: 'پژو ۲۰۶ / ۲۰۷',
       type: 'SUB_ASSEMBLY',
       parent: 'SAPCO-ASY-ECU-BRK-01',
       rawCode: 'RM-COIL-DC01A-2.0-1140',
-      rawName: 'رول ورق DC01A ضخامت 2 عرض 1140 (یا 1000)',
+      rawName: 'رول ورق روغنی DC01A ضخامت 2.0 عرض 1140 میلیمتر',
       weightKg: 0.45,
       target: 1500,
       opsConfig: [
-        { opNo: 10, title: 'برش ورق از رول DC01A', hall: 'سالن برش', machineCode: 'SHR-GUI-01', machineName: 'قیچی گیوتین ۶ متری ۱', dieCode: 'BLD-SHR-01', rate: 700, day: 1, shift: 'شیفت صبح', done: 1500, scrap: 5, wipAfter: 400 },
-        { opNo: 20, title: 'پرس بلنک‌زنی مکمل', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن ۱', dieCode: 'DIE-CMP-BLK-01', rate: 400, day: 1, shift: 'شیفت عصر', done: 1100, scrap: 6, wipAfter: 200 },
-        { opNo: 30, title: 'خم و پانچ یکپارچه مکمل', hall: 'سالن پرس', machineCode: 'PRS-160T-02', machineName: 'پرس ۱۶۰ تن ۲', dieCode: 'DIE-CMP-BP-02', rate: 350, day: 1, shift: 'شیفت عصر', done: 900, scrap: 4, wipAfter: 900 },
-        { opNo: 40, title: 'پرس‌جوش ۲ عدد پیچ پایه 6*20', hall: 'سالن جوشکاری', machineCode: 'WLD-SPOT-02', machineName: 'پرس‌جوش مقاومتی ۲', dieCode: 'JIG-CMP-BLT2', rate: 280, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
+        { opNo: 10, title: 'برش ورق از رول DC01A ضخامت ۲', hall: 'سالن بلنکینگ و برش', machineCode: 'SLT-1250-01', machineName: 'خط رول‌بازکن و برش کویل ۱۲۵۰ میلیمتر', dieCode: 'DIE-CMP-BLK-01', rate: 700, day: todayIdx, shift: 'شیفت صبح', done: 1500, scrap: 5, wipAfter: 400 },
+        { opNo: 20, title: 'پرس بلنک‌زنی قطعه مکمل براکت', hall: 'سالن پرس متوسط', machineCode: 'PRS-250-01', machineName: 'پرس مکانیکی کلاچ پنوماتیک ۲۵۰ تن', dieCode: 'DIE-CMP-BLK-01', rate: 400, day: todayIdx, shift: 'شیفت صبح', done: 1100, scrap: 6, wipAfter: 200 },
+        { opNo: 30, title: 'خم و پانچ یکپارچه قطعه مکمل', hall: 'سالن پرس متوسط', machineCode: 'PRS-250-01', machineName: 'پرس مکانیکی کلاچ پنوماتیک ۲۵۰ تن', dieCode: 'DIE-CMP-BP-02', rate: 350, day: todayIdx, shift: 'شیفت عصر', done: 900, scrap: 4, wipAfter: 200 },
+        { opNo: 40, title: 'پرس‌جوش ۲ عدد پیچ پایه 6*20 روی مکمل', hall: 'سالن جوش و مونتاژ', machineCode: 'WLD-SPOT-01', machineName: 'دستگاه پرس‌جوش نقطه‌ای مقاومتی ۱۰۰KVA', dieCode: 'JIG-CMP-BLT2', rate: 280, day: nextDayIdx, shift: 'شیفت صبح', done: 700, scrap: 1, wipAfter: 700 },
       ],
     },
     {
+      partId: 'PRT-FGD-ECU-BRK',
       code: 'SAPCO-ASY-ECU-BRK-01',
-      name: 'مجموعه کامل براکت ضدسرقت رایانه موتور (محصول نهایی)',
-      car: 'پژو ۲۰۶',
+      name: 'مجموعه براکت ضدسرقت رایانه موتور با پوشش رنگ کاتافورز ED',
+      car: 'پژو ۲۰۶ / ۲۰۷',
       type: 'FINISHED_PRODUCT',
-      rawCode: 'WIP-ECU-MAIN+COMP',
-      rawName: 'صفحه اصلی + مکمل جوشی',
-      weightKg: 1.45,
+      rawCode: 'WIP-ECU-MAIN-BRK + WIP-ECU-COMP-BRK',
+      rawName: 'صفحه براکت اصلی + قطعه مکمل جوشی',
+      weightKg: 1.48,
       target: 1500,
       opsConfig: [
-        { opNo: 10, title: 'مونتاژ و جوش CO2 اتصال صفحه اصلی و مکمل', hall: 'سالن جوشکاری', machineCode: 'WLD-CO2-ST01', machineName: 'کابین جوش CO2 شماره ۱', dieCode: 'FIX-CO2-ECU', rate: 160, day: 2, shift: 'شیفت عصر', done: 600, scrap: 3, wipAfter: 200 },
-        { opNo: 20, title: 'کنترل ابعادی با فیکسچر کنترلی', hall: 'سالن کیفیت', machineCode: 'QC-GAUGE-01', machineName: 'ایستگاه گیج کنترلی ۱', dieCode: 'GGE-ECU-01', rate: 300, day: 3, shift: 'شیفت صبح', done: 400, scrap: 2, wipAfter: 100 },
-        { opNo: 30, title: 'پوشش رنگ کاتافورز (ED) و بسته‌بندی نهایی', hall: 'سالن رنگ', machineCode: 'PNT-ED-LINE1', machineName: 'خط رنگ کاتافورز ED', dieCode: 'HNG-ED-01', rate: 400, day: 3, shift: 'شیفت عصر', done: 300, scrap: 0, wipAfter: 300 },
-      ],
-    },
-    {
-      code: 'WIP-TARA-BRK-LARGE',
-      name: 'براکت تارا بزرگ (نیمه‌ساخته)',
-      car: 'تارا',
-      type: 'SUB_ASSEMBLY',
-      parent: 'SAPCO-ASY-TARA-BRK-01',
-      rawCode: 'RM-COIL-DC01A-2.0-1140',
-      rawName: 'رول ورق DC01A ضخامت 2 عرض 1140',
-      weightKg: 0.65,
-      target: 1200,
-      opsConfig: [
-        { opNo: 10, title: 'برش نوار ورق DC01A', hall: 'سالن برش', machineCode: 'SHR-GUI-02', machineName: 'قیچی گیوتین ۲', dieCode: 'BLD-SHR-02', rate: 600, day: 1, shift: 'شیفت صبح', done: 1200, scrap: 4, wipAfter: 200 },
-        { opNo: 20, title: 'بلنک و فرم‌دهی اولیه تارا بزرگ', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-TAR-LG1', rate: 320, day: 1, shift: 'شیفت عصر', done: 1000, scrap: 8, wipAfter: 300 },
-        { opNo: 30, title: 'پانچ و دوربری نهایی', hall: 'سالن پرس', machineCode: 'PRS-160T-03', machineName: 'پرس ۱۶۰ تن ۳', dieCode: 'DIE-TAR-LG2', rate: 320, day: 2, shift: 'شیفت صبح', done: 700, scrap: 3, wipAfter: 700 },
-        { opNo: 40, title: 'پرس‌جوش ۸ عدد مهره M6', hall: 'سالن جوشکاری', machineCode: 'WLD-SPOT-03', machineName: 'پرس‌جوش ۳', dieCode: 'JIG-TAR-NUT8', rate: 220, day: 2, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'WIP-TARA-BRK-SMALL',
-      name: 'براکت تارا کوچک (نیمه‌ساخته)',
-      car: 'تارا',
-      type: 'SUB_ASSEMBLY',
-      parent: 'SAPCO-ASY-TARA-BRK-01',
-      rawCode: 'RM-COIL-DC01A-2.0-1140',
-      rawName: 'رول ورق DC01A ضخامت 2 عرض 1140',
-      weightKg: 0.35,
-      target: 1200,
-      opsConfig: [
-        { opNo: 10, title: 'برش ورق تارا کوچک', hall: 'سالن برش', machineCode: 'SHR-GUI-02', machineName: 'قیچی گیوتین ۲', dieCode: 'BLD-SHR-02', rate: 750, day: 1, shift: 'شیفت صبح', done: 1200, scrap: 2, wipAfter: 300 },
-        { opNo: 20, title: 'بلنک، خم و پانچ تارا کوچک', hall: 'سالن پرس', machineCode: 'PRS-160T-03', machineName: 'پرس ۱۶۰ تن ۳', dieCode: 'DIE-TAR-SM1', rate: 380, day: 1, shift: 'شیفت عصر', done: 900, scrap: 5, wipAfter: 900 },
-        { opNo: 30, title: 'پرس‌جوش ۱۲ عدد مهره M6', hall: 'سالن جوشکاری', machineCode: 'WLD-SPOT-03', machineName: 'پرس‌جوش ۳', dieCode: 'JIG-TAR-NUT12', rate: 200, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-ASY-TARA-BRK-01',
-      name: 'مجموعه براکت تارا با پوشش کاتافورز ED (محصول نهایی)',
-      car: 'تارا',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'WIP-TARA-LG+SM',
-      rawName: 'براکت بزرگ + کوچک تارا',
-      weightKg: 1.05,
-      target: 1200,
-      opsConfig: [
-        { opNo: 10, title: 'مونتاژ و جوش CO2 براکت بزرگ و کوچک تارا', hall: 'سالن جوشکاری', machineCode: 'WLD-CO2-ST02', machineName: 'کابین جوش CO2 شماره ۲', dieCode: 'FIX-CO2-TARA', rate: 180, day: 2, shift: 'شیفت عصر', done: 500, scrap: 2, wipAfter: 100 },
-        { opNo: 20, title: 'عملیات شستشو و رنگ کاتافورز ED', hall: 'سالن رنگ', machineCode: 'PNT-ED-LINE1', machineName: 'خط رنگ کاتافورز ED', dieCode: 'HNG-ED-02', rate: 400, day: 3, shift: 'شیفت صبح', done: 400, scrap: 0, wipAfter: 0 },
-        { opNo: 30, title: 'کنترل نهایی و بسته‌بندی پالت ساپکو', hall: 'سالن کیفیت', machineCode: 'PCK-ST-01', machineName: 'ایستگاه بسته‌بندی ۱', dieCode: 'STD-PACK', rate: 500, day: 3, shift: 'شیفت عصر', done: 400, scrap: 0, wipAfter: 400 },
-      ],
-    },
-    {
-      code: 'SAPCO-SEAT-BACK-LH',
-      name: 'اسکلت پشت صندلی چپ (قالب مشترک چپ/راست)',
-      car: 'پژو پارس / ۴۰۵',
-      type: 'SHARED_MOLD_PAIR',
-      rawCode: 'RM-COIL-DC04-1.2-1250',
-      rawName: 'رول ورق کشش عمیق DC04 ضخامت 1.2',
-      weightKg: 2.1,
-      target: 1000,
-      opsConfig: [
-        { opNo: 10, title: 'برش کویل DC04 ضخامت ۱.۲', hall: 'سالن برش', machineCode: 'SHR-SLT-01', machineName: 'خط برش عرضی ۱', dieCode: 'BLD-SLT-01', rate: 500, day: 1, shift: 'شیفت صبح', done: 1000, scrap: 6, wipAfter: 200 },
-        { opNo: 20, title: 'کشش عمیق مشترک (تولید همزمان چپ و راست)', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس هیدرولیک ۸۰۰ تن', dieCode: 'DIE-SEAT-LHRH-G1', rate: 200, day: 1, shift: 'شیفت صبح', done: 800, scrap: 10, wipAfter: 150 },
-        { opNo: 30, title: 'دوربری و تفکیک چپ/راست (Trim & Split)', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن ۲', dieCode: 'DIE-SEAT-TRM2', rate: 220, day: 1, shift: 'شیفت عصر', done: 650, scrap: 4, wipAfter: 650 },
-        { opNo: 40, title: 'پانچ نهایی و کالیبراسیون لبه صندلی چپ', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ۲۵۰ تن ۱', dieCode: 'DIE-SEAT-CAL3', rate: 250, day: 2, shift: 'شیفت صبح', done: 500, scrap: 2, wipAfter: 500 },
-      ],
-    },
-    {
-      code: 'SAPCO-SEAT-BACK-RH',
-      name: 'اسکلت پشت صندلی راست (قالب مشترک چپ/راست)',
-      car: 'پژو پارس / ۴۰۵',
-      type: 'SHARED_MOLD_PAIR',
-      rawCode: 'RM-COIL-DC04-1.2-1250',
-      rawName: 'رول ورق کشش عمیق DC04 ضخامت 1.2',
-      weightKg: 2.1,
-      target: 1000,
-      opsConfig: [
-        { opNo: 10, title: 'تغذیه از بلنک مشترک DC04', hall: 'سالن برش', machineCode: 'SHR-SLT-01', machineName: 'خط برش عرضی ۱', dieCode: 'BLD-SLT-01', rate: 500, day: 1, shift: 'شیفت صبح', done: 1000, scrap: 6, wipAfter: 200 },
-        { opNo: 20, title: 'کشش عمیق مشترک (خروجی همزمان راست)', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس هیدرولیک ۸۰۰ تن', dieCode: 'DIE-SEAT-LHRH-G1', rate: 200, day: 1, shift: 'شیفت صبح', done: 800, scrap: 8, wipAfter: 150 },
-        { opNo: 30, title: 'دوربری و تفکیک قطعه راست', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن ۲', dieCode: 'DIE-SEAT-TRM2', rate: 220, day: 1, shift: 'شیفت عصر', done: 650, scrap: 3, wipAfter: 650 },
-        { opNo: 40, title: 'پانچ نهایی و کالیبراسیون لبه صندلی راست', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-SEAT-CAL4', rate: 250, day: 2, shift: 'شیفت صبح', done: 500, scrap: 2, wipAfter: 500 },
-      ],
-    },
-    {
-      code: 'SAPCO-ENG-CRADLE-01',
-      name: 'رام زیر موتور تقویت‌شده (پلتفرم دنا پلاس)',
-      car: 'دنا پلاس',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST37-3.0-1250',
-      rawName: 'رول ورق سیاه ST37 ضخامت 3mm',
-      weightKg: 4.8,
-      target: 800,
-      opsConfig: [
-        { opNo: 10, title: 'برش ورق ضخیم ۳ میلی‌متر', hall: 'سالن برش', machineCode: 'SHR-HVY-01', machineName: 'گیوتین سنگین ۱', dieCode: 'BLD-HVY-01', rate: 400, day: 1, shift: 'شیفت صبح', done: 800, scrap: 5, wipAfter: 200 },
-        { opNo: 20, title: 'فرم‌دهی سنگین رام زیر موتور', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس هیدرولیک ۸۰۰ تن', dieCode: 'DIE-CRD-FRM1', rate: 180, day: 1, shift: 'شیفت عصر', done: 600, scrap: 6, wipAfter: 200 },
-        { opNo: 30, title: 'پانچ جاپیچ‌های شاسی', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن ۲', dieCode: 'DIE-CRD-PNC2', rate: 220, day: 2, shift: 'شیفت صبح', done: 400, scrap: 2, wipAfter: 400 },
-        { opNo: 40, title: 'جوشکاری رباتیک CO2 بوش‌ها و رنگ', hall: 'سالن جوشکاری', machineCode: 'WLD-ROB-01', machineName: 'ربات جوش CO2 شماره ۱', dieCode: 'JIG-CRD-ROB', rate: 140, day: 3, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-BAT-TRAY-01',
-      name: 'مجموعه سینی زیر باتری ضداسید',
-      car: 'پژو ۲۰۷',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST14-1.5-1000',
-      rawName: 'رول ورق روغنی ST14 ضخامت 1.5',
-      weightKg: 1.35,
-      target: 2000,
-      opsConfig: [
-        { opNo: 10, title: 'بلنک‌زنی از کویل ST14', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ۲۵۰ تن ۱', dieCode: 'DIE-BAT-BLK1', rate: 450, day: 1, shift: 'شیفت صبح', done: 1800, scrap: 10, wipAfter: 400 },
-        { opNo: 20, title: 'کشش و فرم لبه سینی باتری', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-BAT-DRW2', rate: 350, day: 1, shift: 'شیفت عصر', done: 1400, scrap: 8, wipAfter: 400 },
-        { opNo: 30, title: 'پانچ شبکه‌های تهویه و سوراخ‌کاری', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن ۱', dieCode: 'DIE-BAT-PNC3', rate: 380, day: 2, shift: 'شیفت صبح', done: 1000, scrap: 4, wipAfter: 300 },
-        { opNo: 40, title: 'پرس‌جوش پایه نگهدارنده و رنگ ED', hall: 'سالن جوشکاری', machineCode: 'WLD-SPOT-01', machineName: 'پرس‌جوش ۱۰۰KVA', dieCode: 'JIG-BAT-WLD', rate: 300, day: 2, shift: 'شیفت عصر', done: 700, scrap: 2, wipAfter: 700 },
-      ],
-    },
-    {
-      code: 'SAPCO-BPLR-REINF-LH',
-      name: 'تقویتی ستون وسط چپ (B-Pillar LH)',
-      car: 'تارا',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST14-1.5-1000',
-      rawName: 'ورق ST14 ضخامت 1.5',
-      weightKg: 3.2,
-      target: 900,
-      opsConfig: [
-        { opNo: 10, title: 'برش ذوزنقه‌ای بلنک ستون', hall: 'سالن برش', machineCode: 'SHR-GUI-01', machineName: 'قیچی گیوتین ۱', dieCode: 'BLD-BPL-01', rate: 400, day: 1, shift: 'شیفت صبح', done: 900, scrap: 3, wipAfter: 300 },
-        { opNo: 20, title: 'کشش قالب اول ستون وسط', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس ۸۰۰ تن', dieCode: 'DIE-BPL-D1', rate: 200, day: 1, shift: 'شیفت عصر', done: 600, scrap: 5, wipAfter: 600 },
-        { opNo: 30, title: 'دوربری لیزری / قالبی و پانچ', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن', dieCode: 'DIE-BPL-TRM', rate: 220, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'خم نهایی و کنترل گیج سه‌بعدی', hall: 'سالن کیفیت', machineCode: 'QC-CMM-01', machineName: 'ایستگاه CMM', dieCode: 'GGE-BPL-LH', rate: 250, day: 3, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-BPLR-REINF-RH',
-      name: 'تقویتی ستون وسط راست (B-Pillar RH)',
-      car: 'تارا',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST14-1.5-1000',
-      rawName: 'ورق ST14 ضخامت 1.5',
-      weightKg: 3.2,
-      target: 900,
-      opsConfig: [
-        { opNo: 10, title: 'برش ذوزنقه‌ای بلنک ستون راست', hall: 'سالن برش', machineCode: 'SHR-GUI-01', machineName: 'قیچی گیوتین ۱', dieCode: 'BLD-BPL-01', rate: 400, day: 1, shift: 'شیفت صبح', done: 900, scrap: 4, wipAfter: 300 },
-        { opNo: 20, title: 'کشش قالب اول ستون راست', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس ۸۰۰ تن', dieCode: 'DIE-BPL-D2', rate: 200, day: 1, shift: 'شیفت عصر', done: 600, scrap: 4, wipAfter: 600 },
-        { opNo: 30, title: 'دوربری و پانچ ستون راست', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن', dieCode: 'DIE-BPL-TRM2', rate: 220, day: 2, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'خم نهایی و تحویل به انبار', hall: 'سالن کیفیت', machineCode: 'QC-CMM-01', machineName: 'ایستگاه CMM', dieCode: 'GGE-BPL-RH', rate: 250, day: 3, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-PEDAL-BRK-01',
-      name: 'مجموعه پدال ترمز و کلاچ تقویتی',
-      car: 'پژو ۲۰۶',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST37-3.0-1250',
-      rawName: 'ورق ST37 ضخامت 3',
-      weightKg: 1.85,
-      target: 1600,
-      opsConfig: [
-        { opNo: 10, title: 'بلنک‌زنی بازویی پدال', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ۲۵۰ تن ۱', dieCode: 'DIE-PDL-01', rate: 380, day: 1, shift: 'شیفت صبح', done: 1600, scrap: 8, wipAfter: 400 },
-        { opNo: 20, title: 'خم طرفین و فرم پدال', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن ۱', dieCode: 'DIE-PDL-02', rate: 320, day: 1, shift: 'شیفت عصر', done: 1200, scrap: 5, wipAfter: 1200 },
-        { opNo: 30, title: 'جوش CO2 لوله محور و کفشک پدال', hall: 'سالن جوشکاری', machineCode: 'WLD-CO2-ST01', machineName: 'کابین جوش CO2 شماره ۱', dieCode: 'JIG-PDL-CO2', rate: 200, day: 2, shift: 'شیفت صبح', done: 600, scrap: 2, wipAfter: 600 },
-      ],
-    },
-    {
-      code: 'SAPCO-RAD-SUP-UP',
-      name: 'تراورس بالای رادیاتور (رام بالا)',
-      car: 'سمند سورن پلاس',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-DC01A-1.0-1000',
-      rawName: 'ورق DC01A ضخامت 1.0',
-      weightKg: 2.4,
-      target: 1100,
-      opsConfig: [
-        { opNo: 10, title: 'برش نوار طولی رام رادیاتور', hall: 'سالن برش', machineCode: 'SHR-GUI-02', machineName: 'قیچی گیوتین ۲', dieCode: 'BLD-RAD-01', rate: 500, day: 1, shift: 'شیفت صبح', done: 1100, scrap: 3, wipAfter: 250 },
-        { opNo: 20, title: 'فرم‌دهی کانالی رام بالا', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن', dieCode: 'DIE-RAD-FRM', rate: 260, day: 1, shift: 'شیفت عصر', done: 850, scrap: 4, wipAfter: 850 },
-        { opNo: 30, title: 'پانچ جا قفل کاپوت و پایه‌ها', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-RAD-PNC', rate: 280, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'جوش نقطه‌ای براکت قفل و رنگ ED', hall: 'سالن جوشکاری', machineCode: 'WLD-SPOT-02', machineName: 'پرس‌جوش ۲', dieCode: 'JIG-RAD-SPOT', rate: 220, day: 3, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-EXH-SHLD-01',
-      name: 'سپر حرارتی اگزوز گالوانیزه',
-      car: 'پژو ۲۰۷',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-DX51D-0.8-1000',
-      rawName: 'ورق گالوانیزه DX51D ضخامت 0.8',
-      weightKg: 0.75,
-      target: 2400,
-      opsConfig: [
-        { opNo: 10, title: 'بلنک و امباسینگ عایق حرارتی', hall: 'سالن پرس', machineCode: 'PRS-160T-02', machineName: 'پرس ۱۶۰ تن ۲', dieCode: 'DIE-EXH-01', rate: 550, day: 1, shift: 'شیفت صبح', done: 2000, scrap: 15, wipAfter: 500 },
-        { opNo: 20, title: 'فرم‌دهی منحنی تونل اگزوز', hall: 'سالن پرس', machineCode: 'PRS-160T-03', machineName: 'پرس ۱۶۰ تن ۳', dieCode: 'DIE-EXH-02', rate: 450, day: 1, shift: 'شیفت عصر', done: 1500, scrap: 8, wipAfter: 500 },
-        { opNo: 30, title: 'پانچ نهایی و بسته‌بندی کارتن', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن ۱', dieCode: 'DIE-EXH-03', rate: 500, day: 2, shift: 'شیفت صبح', done: 1000, scrap: 2, wipAfter: 1000 },
-      ],
-    },
-    {
-      code: 'SAPCO-DOOR-HNG-UP',
-      name: 'لولای درب جلو بالا (مجموعه فورج و ورق)',
-      car: 'دنا پلاس',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST37-4.0-600',
-      rawName: 'ورق ضخیم ST37 ضخامت 4mm',
-      weightKg: 0.9,
-      target: 3000,
-      opsConfig: [
-        { opNo: 10, title: 'بلنک سنگین پایه لولا', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ۲۵۰ تن ۱', dieCode: 'DIE-HNG-01', rate: 500, day: 1, shift: 'شیفت صبح', done: 2500, scrap: 12, wipAfter: 700 },
-        { opNo: 20, title: 'خم U شکل و کالیبره لولا', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-HNG-02', rate: 420, day: 1, shift: 'شیفت عصر', done: 1800, scrap: 6, wipAfter: 1800 },
-        { opNo: 30, title: 'پانچ و برقوکاری محور پین لولا', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن ۱', dieCode: 'DIE-HNG-03', rate: 380, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'پرس پین و بوش برنجی لولا', hall: 'سالن جوشکاری', machineCode: 'ASM-PRS-01', machineName: 'پرس مونتاژ پین ۱', dieCode: 'FIX-HNG-PIN', rate: 350, day: 2, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-SHOCK-TOW-LH',
-      name: 'کاسه سرکمک فنر جلو چپ',
-      car: 'پژو ۲۰۶',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-DC04-2.5-1000',
-      rawName: 'ورق کشش DC04 ضخامت 2.5',
-      weightKg: 2.25,
-      target: 1000,
-      opsConfig: [
-        { opNo: 10, title: 'بلنک گرد کاسه کمک‌فنر', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ۲۵۰ تن ۱', dieCode: 'DIE-SHK-BLK', rate: 450, day: 1, shift: 'شیفت صبح', done: 1000, scrap: 5, wipAfter: 200 },
-        { opNo: 20, title: 'کشش عمیق مرحله اول کاسه کمک', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس ۸۰۰ تن', dieCode: 'DIE-SHK-DR1', rate: 220, day: 1, shift: 'شیفت عصر', done: 800, scrap: 9, wipAfter: 800 },
-        { opNo: 30, title: 'کشش مرحله دوم و فرم نشیمنگاه', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن', dieCode: 'DIE-SHK-DR2', rate: 240, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'پانچ ۳ سوراخ پیچ سرکمک و دوربری', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-SHK-PNC', rate: 280, day: 2, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-SHOCK-TOW-RH',
-      name: 'کاسه سرکمک فنر جلو راست',
-      car: 'پژو ۲۰۶',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-DC04-2.5-1000',
-      rawName: 'ورق کشش DC04 ضخامت 2.5',
-      weightKg: 2.25,
-      target: 1000,
-      opsConfig: [
-        { opNo: 10, title: 'بلنک گرد کاسه کمک راست', hall: 'سالن پرس', machineCode: 'PRS-250T-01', machineName: 'پرس ۲۵۰ تن ۱', dieCode: 'DIE-SHK-BLK', rate: 450, day: 1, shift: 'شیفت صبح', done: 1000, scrap: 4, wipAfter: 200 },
-        { opNo: 20, title: 'کشش عمیق مرحله اول کاسه راست', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس ۸۰۰ تن', dieCode: 'DIE-SHK-DR1R', rate: 220, day: 1, shift: 'شیفت عصر', done: 800, scrap: 7, wipAfter: 800 },
-        { opNo: 30, title: 'کشش مرحله دوم کاسه راست', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن', dieCode: 'DIE-SHK-DR2R', rate: 240, day: 2, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'پانچ و دوربری کاسه راست', hall: 'سالن پرس', machineCode: 'PRS-250T-02', machineName: 'پرس ۲۵۰ تن ۲', dieCode: 'DIE-SHK-PNCR', rate: 280, day: 3, shift: 'شیفت صبح', done: 0, scrap: 0, wipAfter: 0 },
-      ],
-    },
-    {
-      code: 'SAPCO-JACK-BRK-01',
-      name: 'براکت تکیه‌گاه جک رکابی خودرو',
-      car: 'تارا',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-DC01A-2.0-1140',
-      rawName: 'ورق DC01A ضخامت 2.0',
-      weightKg: 0.55,
-      target: 2500,
-      opsConfig: [
-        { opNo: 10, title: 'برش و بلنک براکت جک', hall: 'سالن پرس', machineCode: 'PRS-160T-01', machineName: 'پرس ۱۶۰ تن ۱', dieCode: 'DIE-JCK-01', rate: 500, day: 1, shift: 'شیفت صبح', done: 2500, scrap: 10, wipAfter: 500 },
-        { opNo: 20, title: 'خم دوبل تقویتی رکاب', hall: 'سالن پرس', machineCode: 'PRS-160T-02', machineName: 'پرس ۱۶۰ تن ۲', dieCode: 'DIE-JCK-02', rate: 420, day: 1, shift: 'شیفت عصر', done: 2000, scrap: 6, wipAfter: 500 },
-        { opNo: 30, title: 'پانچ و تحویل به انبار محصول', hall: 'سالن پرس', machineCode: 'PRS-160T-03', machineName: 'پرس ۱۶۰ تن ۳', dieCode: 'DIE-JCK-03', rate: 450, day: 2, shift: 'شیفت صبح', done: 1500, scrap: 3, wipAfter: 1500 },
-      ],
-    },
-    {
-      code: 'SAPCO-BUMP-BEAM-FR',
-      name: 'تیر عرضی سپر جلو (جاذب ضربه)',
-      car: 'سمند سورن پلاس',
-      type: 'FINISHED_PRODUCT',
-      rawCode: 'RM-COIL-ST37-2.5-1250',
-      rawName: 'ورق ST37 ضخامت 2.5',
-      weightKg: 5.4,
-      target: 750,
-      opsConfig: [
-        { opNo: 10, title: 'برش طولی ورق تیر سپر', hall: 'سالن برش', machineCode: 'SHR-HVY-01', machineName: 'گیوتین سنگین ۱', dieCode: 'BLD-BMP-01', rate: 350, day: 1, shift: 'شیفت صبح', done: 750, scrap: 4, wipAfter: 150 },
-        { opNo: 20, title: 'فرم‌دهی پروفیل امگا تیر سپر', hall: 'سالن پرس سنگین', machineCode: 'PRS-800T-G1', machineName: 'پرس ۸۰۰ تن', dieCode: 'DIE-BMP-OMG', rate: 180, day: 1, shift: 'شیفت عصر', done: 600, scrap: 5, wipAfter: 600 },
-        { opNo: 30, title: 'پانچ و خم قوس سپر', hall: 'سالن پرس سنگین', machineCode: 'PRS-400T-G2', machineName: 'پرس ۴۰۰ تن', dieCode: 'DIE-BMP-ARC', rate: 200, day: 2, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
-        { opNo: 40, title: 'جوش CO2 قوطی‌های جاذب ضربه چپ و راست', hall: 'سالن جوشکاری', machineCode: 'WLD-ROB-01', machineName: 'ربات جوش CO2', dieCode: 'JIG-BMP-ROB', rate: 150, day: 3, shift: 'شیفت عصر', done: 0, scrap: 0, wipAfter: 0 },
+        { opNo: 10, title: 'مونتاژ و جوش CO2 اتصال صفحه اصلی و قطعه مکمل', hall: 'سالن جوش و مونتاژ', machineCode: 'WLD-SPOT-01', machineName: 'کابین جوش CO2 و مونتاژ ۱', dieCode: 'JIG-ECU-CO2-ASY', rate: 160, day: todayIdx, shift: 'شیفت عصر', done: 600, scrap: 3, wipAfter: 100 },
+        { opNo: 20, title: 'پوشش رنگ کاتافورز (ED) و بسته‌بندی نهایی پالت ساپکو', hall: 'سالن جوش و مونتاژ', machineCode: 'WLD-SPOT-01', machineName: 'خط رنگ کاتافورز ED و بسته‌بندی', dieCode: 'JIG-ECU-CO2-ASY', rate: 300, day: nextDayIdx, shift: 'شیفت عصر', done: 500, scrap: 0, wipAfter: 500 },
       ],
     },
   ];
@@ -509,7 +246,7 @@ export function buildInitial20PartsSchedule(): MultiPartScheduleItem[] {
       const status: ScheduledOpStep['status'] =
         oc.done >= tpl.target
           ? 'COMPLETED'
-          : oc.done > 0 && oc.day === 1
+          : oc.done > 0
           ? 'IN_PROGRESS'
           : 'PLANNED';
 
@@ -534,7 +271,7 @@ export function buildInitial20PartsSchedule(): MultiPartScheduleItem[] {
         wipBufferAfterOp: oc.wipAfter,
         isFinalOp: isFinal,
         warehouseReceiptDocNumber:
-          isFinal && oc.done > 0 ? `RCV-FG-${1040 + idx}` : undefined,
+          isFinal && oc.done > 0 ? `DOC-REC-ECU-${101 + idx}` : undefined,
         status,
       };
     });
@@ -543,8 +280,8 @@ export function buildInitial20PartsSchedule(): MultiPartScheduleItem[] {
 
     return {
       id: `MPS-ITEM-${idx + 1}`,
-      orderCode: `MO-1404-${2001 + idx}`,
-      partId: `PRT-${idx + 1}`,
+      orderCode: idx === 0 ? 'MO-ECU-MAIN-01' : idx === 1 ? 'MO-ECU-COMP-01' : 'MO-ECU-ASY-01',
+      partId: tpl.partId,
       partCode: tpl.code,
       partName: tpl.name,
       carModel: tpl.car,
@@ -602,7 +339,7 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
     if (onModuleTabChange) onModuleTabChange(tab);
   };
 
-  // Master Schedule State (20+ Parts, each with 3 to 5 staggered OPs)
+  // Master Schedule State (Anti-Theft ECU Bracket family & any dynamically added parts/routings)
   const [scheduleItems, setScheduleItems] = useState<MultiPartScheduleItem[]>(() => {
     try {
       const saved = window.localStorage.getItem(STORAGE_KEY_MULTI_OP_APS);
@@ -616,11 +353,150 @@ export const ErpProductionWorkbenchView: React.FC<ErpProductionWorkbenchViewProp
     return buildInitial20PartsSchedule();
   });
 
+  // Synchronize scheduleItems with live Master Data (parts & routings) whenever parts or routings are updated
+  useEffect(() => {
+    if (!parts || parts.length === 0) return;
+    setScheduleItems(prev => {
+      const todayIdx = getTodayWorkDayIndex();
+      let changed = false;
+
+      // 1. Update names, weights, and routing OPs of existing scheduled items if edited in Master Data
+      const updated = prev.map(item => {
+        const matchedPart = parts.find(p => p.id === item.partId || p.code === item.partCode);
+        const matchedRouting = routings.find(
+          r => r.partId === item.partId || (matchedPart && r.partId === matchedPart.id)
+        );
+        if (!matchedPart && !matchedRouting) return item;
+
+        const nextItem = { ...item };
+        if (matchedPart) {
+          if (
+            nextItem.partName !== matchedPart.name ||
+            nextItem.partCode !== matchedPart.code ||
+            (matchedPart.weightPerUnitKg && nextItem.unitWeightKg !== matchedPart.weightPerUnitKg)
+          ) {
+            nextItem.partName = matchedPart.name;
+            nextItem.partCode = matchedPart.code;
+            if (matchedPart.weightPerUnitKg) nextItem.unitWeightKg = matchedPart.weightPerUnitKg;
+            changed = true;
+          }
+        }
+
+        if (matchedRouting && matchedRouting.operations && matchedRouting.operations.length > 0) {
+          // Sync operation titles, machines, dies, and newly added OPs from Master Data Routing
+          const syncedOps: ScheduledOpStep[] = matchedRouting.operations.map((step, sIdx) => {
+            const existingOp = nextItem.ops.find(o => o.opNo === step.stepNumber);
+            const machineObj = machines.find(m => m.id === step.machineId);
+            const isFinal = sIdx === matchedRouting.operations.length - 1;
+            const rateFromCycle = step.standardCycleTimeSec > 0 ? Math.round(3600 / step.standardCycleTimeSec) : 300;
+            if (existingOp) {
+              return {
+                ...existingOp,
+                opTitle: step.stepName || existingOp.opTitle,
+                machineCode: machineObj?.code || existingOp.machineCode,
+                machineName: step.machineName || machineObj?.name || existingOp.machineName,
+                dieCode: step.dieMoldId || existingOp.dieCode,
+                standardRatePerHour: rateFromCycle || existingOp.standardRatePerHour,
+                isFinalOp: isFinal,
+              };
+            }
+            changed = true;
+            return {
+              opId: `OP-SYNC-${matchedRouting.id}-${step.stepNumber}`,
+              opNo: step.stepNumber,
+              opCode: step.stepCode || `OP${step.stepNumber}`,
+              opTitle: step.stepName,
+              stationHall: machineObj?.location || 'سالن پرس',
+              machineCode: machineObj?.code || step.machineId || 'PRS-250-01',
+              machineName: step.machineName || machineObj?.name || 'ایستگاه کاری',
+              dieCode: step.dieMoldId || 'DIE-STD',
+              standardRatePerHour: rateFromCycle,
+              scheduledDayIndex: todayIdx,
+              shiftName: 'شیفت صبح',
+              basePlannedQty: nextItem.weeklyTargetQty,
+              carriedOverQty: 0,
+              effectiveTargetQty: nextItem.weeklyTargetQty,
+              completedGoodQty: 0,
+              scrapQty: 0,
+              wipBufferBeforeOp: 0,
+              wipBufferAfterOp: 0,
+              isFinalOp: isFinal,
+              status: 'PLANNED',
+            };
+          });
+
+          if (syncedOps.length !== nextItem.ops.length) {
+            changed = true;
+          }
+          nextItem.ops = syncedOps;
+        }
+
+        return nextItem;
+      });
+
+      // 2. If user created a new WIP or FINISHED_GOOD part with a routing in Master Data, add it to schedule automatically
+      routings.forEach(rtg => {
+        const part = parts.find(p => p.id === rtg.partId);
+        if (!part) return;
+        const alreadyExists = updated.some(i => i.partId === part.id || i.partCode === part.code);
+        if (!alreadyExists && rtg.operations && rtg.operations.length > 0) {
+          changed = true;
+          const targetQty = 1000;
+          const newOps: ScheduledOpStep[] = rtg.operations.map((step, sIdx) => {
+            const machineObj = machines.find(m => m.id === step.machineId);
+            const rateFromCycle = step.standardCycleTimeSec > 0 ? Math.round(3600 / step.standardCycleTimeSec) : 300;
+            return {
+              opId: `OP-NEW-${rtg.id}-${step.stepNumber}`,
+              opNo: step.stepNumber,
+              opCode: step.stepCode || `OP${step.stepNumber}`,
+              opTitle: step.stepName,
+              stationHall: machineObj?.location || 'سالن پرس',
+              machineCode: machineObj?.code || step.machineId || 'PRS-250-01',
+              machineName: step.machineName || machineObj?.name || 'ایستگاه کاری',
+              dieCode: step.dieMoldId || 'DIE-STD',
+              standardRatePerHour: rateFromCycle,
+              scheduledDayIndex: todayIdx,
+              shiftName: 'شیفت صبح',
+              basePlannedQty: targetQty,
+              carriedOverQty: 0,
+              effectiveTargetQty: targetQty,
+              completedGoodQty: 0,
+              scrapQty: 0,
+              wipBufferBeforeOp: sIdx === 0 ? targetQty : 0,
+              wipBufferAfterOp: 0,
+              isFinalOp: sIdx === rtg.operations.length - 1,
+              status: 'PLANNED',
+            };
+          });
+
+          updated.push({
+            id: `MPS-ITEM-${updated.length + 1}`,
+            orderCode: `MO-${part.code}`,
+            partId: part.id,
+            partCode: part.code,
+            partName: part.name,
+            carModel: part.carModel || 'پژو ۲۰۶ / ۲۰۷',
+            partType: part.category === 'FINISHED_GOOD' ? 'FINISHED_PRODUCT' : 'SUB_ASSEMBLY',
+            rawMaterialCode: 'RM-COIL-DC01A-2.0-1140',
+            rawMaterialName: 'رول ورق DC01A',
+            unitWeightKg: part.weightPerUnitKg || 1.0,
+            weeklyTargetQty: targetQty,
+            rawMaterialIssuedKg: Math.round(targetQty * (part.weightPerUnitKg || 1.0)),
+            warehouseReceivedQty: 0,
+            ops: newOps,
+          });
+        }
+      });
+
+      return changed ? updated : prev;
+    });
+  }, [parts, routings, machines]);
+
   // Filters & Search for Scalability (when data is large)
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedCarFilter, setSelectedCarFilter] = useState<string>('ALL');
   const [selectedHallFilter, setSelectedHallFilter] = useState<string>('ALL');
-  const [selectedDayFilter, setSelectedDayFilter] = useState<number>(1); // Default شنبه (امروز)
+  const [selectedDayFilter, setSelectedDayFilter] = useState<number>(() => getTodayWorkDayIndex()); // Default امروز واقعی
   const [selectedShiftFilter, setSelectedShiftFilter] = useState<string>('ALL');
   const [currentPage, setCurrentPage] = useState<number>(1);
   const pageSize = 10;

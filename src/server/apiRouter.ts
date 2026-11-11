@@ -175,136 +175,67 @@ let contractsStore: SapcoContract[] = [...INITIAL_SAPCO_CONTRACTS];
 let reservationsStore: InventoryReservation[] = [...INITIAL_INVENTORY_RESERVATIONS];
 let auditLogsStore: AuditRecord[] = [...INITIAL_AUDIT_LOGS];
 
-// Enhanced Physical Coils & Multi-Contract Allocation Store
+// Enhanced Physical Coils & Multi-Contract Allocation Store (Exclusively Anti-Theft ECU Bracket Coils)
 export const INITIAL_PHYSICAL_COILS: PhysicalCoil[] = [
   {
-    id: 'COIL-PHYS-01',
-    coilId: 'COIL-1403-0498',
-    coilPackNumber: 'CP-1001',
-    partId: 'PRT-RAW-001',
-    partCode: 'SAPCO-COIL-DC04-0.8',
-    partName: 'کویل ورق روغنی کشش عمیق DC04 ضخامت 0.8mm ساپکو',
-    materialGrade: 'DC04',
-    heatNumber: 'HT-MOB-98241',
-    thicknessMm: 0.8,
-    widthMm: 1250,
-    originalWeightKg: 14200,
-    remainingWeightKg: 14200,
+    id: 'COIL-PHYS-ECU-01',
+    coilId: 'COIL-ECU-001',
+    coilPackNumber: 'MOB-DC01A-2.0-1140-A',
+    partId: 'PRT-RAW-ECU-COIL',
+    partCode: 'RM-COIL-DC01A-2.0-1140',
+    partName: 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm (ابعاد ۲×۱۱۴۰)',
+    materialGrade: 'DC01A',
+    heatNumber: 'HT-DC01A-9921',
+    thicknessMm: 2.0,
+    widthMm: 1140,
+    originalWeightKg: 10500,
+    remainingWeightKg: 8500,
     warehouseId: 'WH-RAW',
     warehouseName: 'انبار مرکزی رول و ورق مواد اولیه',
     warehouseLocationCode: 'LOC-RAW-A1',
     ownership: 'SAPCO_SUPPLIER_OWNED',
     qualityStatus: 'AVAILABLE',
-    physicalStatus: 'AVAILABLE',
+    physicalStatus: 'PARTIALLY_ISSUED',
     supplierName: 'ساپکو (ایران‌خودرو)',
-    receiptDate: '2024-10-01T07:00:00.000Z',
+    receiptDate: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
     allocations: [
       {
-        contractId: 'CNT-SAPCO-1403-Q3',
-        contractNumber: 'CNT-SAPCO-1403-Q3',
-        coilId: 'COIL-PHYS-01',
-        allocatedWeightKg: 14200,
+        contractId: 'CNT-SAPCO-ECU-BRK',
+        contractNumber: 'CNT-SAPCO-ECU-BRK',
+        coilId: 'COIL-PHYS-ECU-01',
+        allocatedWeightKg: 8500,
         ownership: 'SAPCO_SUPPLIER_OWNED',
       },
     ],
   },
   {
-    id: 'COIL-PHYS-02',
-    coilId: 'COIL-1403-0501',
-    coilPackNumber: 'CP-1002',
-    partId: 'PRT-RAW-002',
-    partCode: 'SAPCO-COIL-ST14-1.0',
-    partName: 'کویل ورق روغنی ST14 ضخامت 1.0mm فولاد مبارکه / ساپکو',
-    materialGrade: 'ST14',
-    heatNumber: 'HT-MOB-77103',
-    thicknessMm: 1.0,
+    id: 'COIL-PHYS-ECU-02',
+    coilId: 'COIL-ECU-002',
+    coilPackNumber: 'MOB-DC01A-2.0-1000-ALT',
+    partId: 'PRT-RAW-ECU-ALT',
+    partCode: 'RM-SHT-DC01A-2.0-1000',
+    partName: 'ورق شیت روغنی DC01A ضخامت 2mm ابعاد ۲×۱۰۰۰ (ورق آلترناتیو)',
+    materialGrade: 'DC01A',
+    heatNumber: 'HT-DC01A-9945',
+    thicknessMm: 2.0,
     widthMm: 1000,
-    originalWeightKg: 12500,
-    remainingWeightKg: 12500,
+    originalWeightKg: 3200,
+    remainingWeightKg: 3200,
     warehouseId: 'WH-RAW',
     warehouseName: 'انبار مرکزی رول و ورق مواد اولیه',
     warehouseLocationCode: 'LOC-RAW-A2',
-    ownership: 'SAPCO_SUPPLIER_OWNED',
+    ownership: 'COMPANY_OWNED',
     qualityStatus: 'AVAILABLE',
     physicalStatus: 'AVAILABLE',
-    supplierName: 'ساپکو (ایران‌خودرو)',
-    receiptDate: '2024-10-01T07:00:00.000Z',
+    supplierName: 'فولاد مبارکه (ورق آلترناتیو مجاز)',
+    receiptDate: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(),
     allocations: [
       {
-        contractId: 'CNT-SAPCO-1403-Q4-TARA',
-        contractNumber: 'CNT-SAPCO-1403-Q4-TARA',
-        coilId: 'COIL-PHYS-02',
-        allocatedWeightKg: 12500,
-        ownership: 'SAPCO_SUPPLIER_OWNED',
-      },
-    ],
-  },
-  {
-    id: 'COIL-PHYS-03',
-    coilId: 'COIL-1403-0520',
-    coilPackNumber: 'CP-1003',
-    partId: 'PRT-RAW-001',
-    partCode: 'SAPCO-COIL-DC04-0.8',
-    partName: 'کویل ورق روغنی کشش عمیق DC04 ضخامت 0.8mm ساپکو',
-    materialGrade: 'DC04',
-    heatNumber: 'HT-MOB-99410',
-    thicknessMm: 0.8,
-    widthMm: 1250,
-    originalWeightKg: 13800,
-    remainingWeightKg: 13800,
-    warehouseId: 'WH-RAW',
-    warehouseName: 'انبار مرکزی رول و ورق مواد اولیه',
-    warehouseLocationCode: 'LOC-RAW-A1',
-    ownership: 'SAPCO_SUPPLIER_OWNED',
-    qualityStatus: 'AVAILABLE',
-    physicalStatus: 'AVAILABLE',
-    supplierName: 'ساپکو (ایران‌خودرو)',
-    receiptDate: '2024-10-15T09:00:00.000Z',
-    allocations: [
-      {
-        contractId: 'CNT-SAPCO-1403-Q3',
-        contractNumber: 'CNT-SAPCO-1403-Q3',
-        coilId: 'COIL-PHYS-03',
-        allocatedWeightKg: 13800,
-        ownership: 'SAPCO_SUPPLIER_OWNED',
-      },
-    ],
-  },
-  {
-    id: 'COIL-PHYS-04',
-    coilId: 'COIL-1403-DUAL-01',
-    coilPackNumber: 'CP-1004',
-    partId: 'PRT-RAW-001',
-    partCode: 'SAPCO-COIL-DC04-0.8',
-    partName: 'کویل ورق روغنی کشش عمیق DC04 ضخامت 0.8mm ساپکو',
-    materialGrade: 'DC04',
-    heatNumber: 'HT-MOB-11024',
-    thicknessMm: 0.8,
-    widthMm: 1250,
-    originalWeightKg: 2000,
-    remainingWeightKg: 2000,
-    warehouseId: 'WH-RAW',
-    warehouseName: 'انبار مرکزی رول و ورق مواد اولیه',
-    warehouseLocationCode: 'LOC-RAW-A3',
-    ownership: 'SAPCO_SUPPLIER_OWNED',
-    qualityStatus: 'AVAILABLE',
-    physicalStatus: 'AVAILABLE',
-    supplierName: 'ساپکو (ایران‌خودرو)',
-    receiptDate: '2024-10-25T11:00:00.000Z',
-    allocations: [
-      {
-        contractId: 'CNT-SAPCO-1403-Q3',
-        contractNumber: 'CNT-SAPCO-1403-Q3',
-        coilId: 'COIL-PHYS-04',
-        allocatedWeightKg: 1200,
-        ownership: 'SAPCO_SUPPLIER_OWNED',
-      },
-      {
-        contractId: 'CNT-SAPCO-1403-Q4-TARA',
-        contractNumber: 'CNT-SAPCO-1403-Q4-TARA',
-        coilId: 'COIL-PHYS-04',
-        allocatedWeightKg: 800,
-        ownership: 'SAPCO_SUPPLIER_OWNED',
+        contractId: 'CNT-SAPCO-ECU-BRK',
+        contractNumber: 'CNT-SAPCO-ECU-BRK',
+        coilId: 'COIL-PHYS-ECU-02',
+        allocatedWeightKg: 3200,
+        ownership: 'COMPANY_OWNED',
       },
     ],
   },
@@ -404,8 +335,39 @@ let importBatchesStore: ImportBatchSummary[] = [];
 
 export const apiRouter = Router();
 
-// Middleware to parse JSON
+function syncErpRuntimeStores() {
+  if (INITIAL_PARTS !== partsStore) {
+    INITIAL_PARTS.splice(0, INITIAL_PARTS.length, ...partsStore);
+  }
+  if (INITIAL_MACHINES !== machinesStore) {
+    INITIAL_MACHINES.splice(0, INITIAL_MACHINES.length, ...machinesStore);
+  }
+  if (INITIAL_ROUTINGS !== routingsStore) {
+    INITIAL_ROUTINGS.splice(0, INITIAL_ROUTINGS.length, ...routingsStore);
+  }
+  if (INITIAL_DIES_MOLDS !== diesStore) {
+    INITIAL_DIES_MOLDS.splice(0, INITIAL_DIES_MOLDS.length, ...diesStore);
+  }
+  if (INITIAL_SAPCO_COILS !== coilsStore) {
+    INITIAL_SAPCO_COILS.splice(0, INITIAL_SAPCO_COILS.length, ...coilsStore);
+  }
+  if (INITIAL_INVENTORY_DOCUMENTS !== inventoryDocsStore) {
+    INITIAL_INVENTORY_DOCUMENTS.splice(0, INITIAL_INVENTORY_DOCUMENTS.length, ...inventoryDocsStore);
+  }
+  if (INITIAL_SAPCO_CONTRACTS !== contractsStore) {
+    INITIAL_SAPCO_CONTRACTS.splice(0, INITIAL_SAPCO_CONTRACTS.length, ...contractsStore);
+  }
+  if (INITIAL_INVENTORY_RESERVATIONS !== reservationsStore) {
+    INITIAL_INVENTORY_RESERVATIONS.splice(0, INITIAL_INVENTORY_RESERVATIONS.length, ...reservationsStore);
+  }
+}
+
+// Middleware to keep all ERP modules (Master Data, Inventory, MRP, APS, Reports) in real-time sync
 apiRouter.use((req, res, next) => {
+  syncErpRuntimeStores();
+  res.on('finish', () => {
+    syncErpRuntimeStores();
+  });
   next();
 });
 
@@ -1589,11 +1551,10 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   clearCustomerOrdersAndPlans();
   clearProductionWipData();
 
-  // Also clean SQLite / Prisma database records if connected
+  // Also clean PostgreSQL / Prisma database records if connected
   try {
     const prisma = getPrismaClient();
     if (prisma) {
-      await prisma.$executeRawUnsafe('PRAGMA foreign_keys = OFF;').catch(() => {});
       await prisma.productionScrap.deleteMany({}).catch(() => {});
       await prisma.machineAssignment.deleteMany({}).catch(() => {});
       await prisma.productionReport.deleteMany({}).catch(() => {});
@@ -1616,7 +1577,6 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
       await prisma.materialContract.deleteMany({}).catch(() => {});
       await prisma.materialLot.deleteMany({}).catch(() => {});
       await prisma.stockBalance.deleteMany({}).catch(() => {});
-      await prisma.$executeRawUnsafe('PRAGMA foreign_keys = ON;').catch(() => {});
     }
   } catch (dbErr) {
     console.warn('Prisma tables wipe notice:', dbErr);
@@ -4862,24 +4822,8 @@ apiRouter.post('/ai/command', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/ai/ping', async (req: Request, res: Response) => {
-  try {
-    const { provider, endpointUrl } = req.body;
-    if (provider === 'OLLAMA') {
-      const url = endpointUrl || 'http://localhost:11434';
-      const check = await fetch(`${url.replace(/\/+$/, '')}/api/tags`, { method: 'GET' });
-      if (check.ok) {
-        const data = await check.json();
-        const models = (data.models || []).map((m: any) => m.name);
-        return res.json({ success: true, message: 'ارتباط با Ollama لوکال برقرار است.', models });
-      } else {
-        return res.json({ success: false, message: `پاسخ Ollama با کد وضعیت ${check.status}` });
-      }
-    }
-    return res.json({ success: true, message: 'موتور هوش مصنوعی آماده است.' });
-  } catch (err: any) {
-    return res.json({ success: false, message: `عدم برقراری ارتباط: ${err.message}` });
-  }
+apiRouter.post('/ai/ping', async (_req: Request, res: Response) => {
+  return res.json({ success: true, message: 'موتور پردازشگر هوشمند کارخانه آماده است.' });
 });
 
 // =========================================================================
@@ -6058,51 +6002,78 @@ apiRouter.get('/erp-services/work-orders', async (_req: Request, res: Response) 
     console.warn('⚠️ Notice: PostgreSQL database query for work-orders failed. Serving fallback sample orders:', error instanceof Error ? error.message : error);
     res.json({
       success: true,
-      count: 2,
+      count: 3,
       data: [
         {
-          id: 'wo-fallback-1001',
+          id: 'wo-ecu-asy-01',
           orderNumber: 'WO-1404-1001',
-          plannedQuantity: 2500,
-          completedQuantity: 1600,
-          scrapQuantity: 24,
+          plannedQuantity: 1500,
+          completedQuantity: 600,
+          scrapQuantity: 12,
           status: 'IN_PROGRESS',
           startDate: new Date().toISOString(),
           endDate: new Date(Date.now() + 86400000 * 5).toISOString(),
           item: {
-            id: 'item-ecu-01',
-            code: 'PRT-ECU-BRK-01',
-            name: 'مجموعه براکت ECU پژو ۲۰۶',
+            id: 'PRT-FGD-ECU-BRK',
+            code: 'SAPCO-ASY-ECU-BRK-01',
+            name: 'مجموعه براکت ضدسرقت رایانه موتور (ECU)',
             type: 'FINISHED_GOOD',
-            carModel: 'پژو ۲۰۶',
+            carModel: 'پژو ۲۰۶ / ۲۰۷',
             unit: 'PCS',
             routingOperations: [
-              { id: 'op10', opNumber: 10, opCode: 'OP10', opName: 'برش و نواربری اولیه', workCenter: { code: 'SHR-01', name: 'گیوتین خط برش' } },
-              { id: 'op20', opNumber: 20, opCode: 'OP20', opName: 'کشش عمیق هیدرولیک', workCenter: { code: 'PRS-800T-01', name: 'پرس ۸۰۰ تن هیدرولیک' } },
-              { id: 'op30', opNumber: 30, opCode: 'OP30', opName: 'خم‌کاری با قالب پروگرسیو', workCenter: { code: 'PRS-400T-01', name: 'پرس ۴۰۰ تن ضربه‌ای' } },
-              { id: 'op40', opNumber: 40, opCode: 'OP40', opName: 'پرس‌جوش مقاومتی نقطه‌ای', workCenter: { code: 'WLD-SPOT-01', name: 'ایستگاه جوش نقطه‌ای' } },
+              { id: 'op10', opNumber: 10, opCode: 'OP10', opName: 'برش رول و نواربری ورق DC01A', workCenter: { code: 'SLT-1250-01', name: 'خط رول‌بازکن و برش کویل ۱۲۵۰' } },
+              { id: 'op20', opNumber: 20, opCode: 'OP20', opName: 'پرس بلنک‌زنی صفحه اصلی و مکمل', workCenter: { code: 'PRS-250-01', name: 'پرس مکانیکی ۲۵۰ تن' } },
+              { id: 'op30', opNumber: 30, opCode: 'OP30', opName: 'پرس خم لبه و پانچ سوراخ‌کاری', workCenter: { code: 'PRS-250-01', name: 'پرس مکانیکی ۲۵۰ تن' } },
+              { id: 'op40', opNumber: 40, opCode: 'OP40', opName: 'پرس‌جوش مهره M6 و پیچ M6x20 + جوش CO2', workCenter: { code: 'WLD-SPOT-01', name: 'ایستگاه پرس‌جوش و کابین CO2' } },
             ],
           },
         },
         {
-          id: 'wo-fallback-1002',
-          orderNumber: 'WO-1404-1002',
-          plannedQuantity: 1800,
-          completedQuantity: 450,
+          id: 'wo-ecu-main-01',
+          orderNumber: 'MO-ECU-MAIN-01',
+          plannedQuantity: 1500,
+          completedQuantity: 850,
           scrapQuantity: 8,
           status: 'IN_PROGRESS',
           startDate: new Date().toISOString(),
-          endDate: new Date(Date.now() + 86400000 * 6).toISOString(),
+          endDate: new Date(Date.now() + 86400000 * 4).toISOString(),
           item: {
-            id: 'item-tara-02',
-            code: 'IKCO-TARA-BPIL-02',
-            name: 'مجموعه تقویتی ستون وسط تارا',
-            type: 'FINISHED_GOOD',
-            carModel: 'تارا',
+            id: 'PRT-WIP-ECU-MAIN',
+            code: 'WIP-ECU-MAIN-BRK',
+            name: 'صفحه براکت اصلی ضدسرقت رایانه موتور',
+            type: 'SEMI_FINISHED',
+            carModel: 'پژو ۲۰۶ / ۲۰۷',
             unit: 'PCS',
             routingOperations: [
-              { id: 'top10', opNumber: 10, opCode: 'OP10', opName: 'بلنکینگ اولیه', workCenter: { code: 'PRS-400T-01', name: 'پرس ۴۰۰ تن' } },
-              { id: 'top20', opNumber: 20, opCode: 'OP20', opName: 'کشش هیدرولیک', workCenter: { code: 'PRS-800T-01', name: 'پرس ۸۰۰ تن هیدرولیک' } },
+              { id: 'mop10', opNumber: 10, opCode: 'OP10', opName: 'برش رول ورق DC01A', workCenter: { code: 'SLT-1250-01', name: 'خط برش کویل ۱۲۵۰' } },
+              { id: 'mop20', opNumber: 20, opCode: 'OP20', opName: 'پرس بلنک‌زنی صفحه اصلی', workCenter: { code: 'PRS-250-01', name: 'پرس ۲۵۰ تن' } },
+              { id: 'mop30', opNumber: 30, opCode: 'OP30', opName: 'پرس خم لبه استاندارد', workCenter: { code: 'PRS-250-01', name: 'پرس ۲۵۰ تن' } },
+              { id: 'mop40', opNumber: 40, opCode: 'OP40', opName: 'پانچ اول و دوم سوراخ‌کاری', workCenter: { code: 'PRS-250-01', name: 'پرس ۲۵۰ تن' } },
+              { id: 'mop50', opNumber: 50, opCode: 'OP50', opName: 'پرس‌جوش ۱۵ عدد مهره جوشی M6', workCenter: { code: 'WLD-SPOT-01', name: 'پرس‌جوش ۱۰۰KVA' } },
+            ],
+          },
+        },
+        {
+          id: 'wo-ecu-comp-01',
+          orderNumber: 'MO-ECU-COMP-01',
+          plannedQuantity: 1500,
+          completedQuantity: 900,
+          scrapQuantity: 5,
+          status: 'IN_PROGRESS',
+          startDate: new Date().toISOString(),
+          endDate: new Date(Date.now() + 86400000 * 4).toISOString(),
+          item: {
+            id: 'PRT-WIP-ECU-COMP',
+            code: 'WIP-ECU-COMP-BRK',
+            name: 'قطعه مکمل براکت ضدسرقت رایانه موتور',
+            type: 'SEMI_FINISHED',
+            carModel: 'پژو ۲۰۶ / ۲۰۷',
+            unit: 'PCS',
+            routingOperations: [
+              { id: 'cop10', opNumber: 10, opCode: 'OP10', opName: 'برش ورق از رول DC01A', workCenter: { code: 'SLT-1250-01', name: 'خط برش کویل ۱۲۵۰' } },
+              { id: 'cop20', opNumber: 20, opCode: 'OP20', opName: 'پرس بلنک‌زنی قطعه مکمل', workCenter: { code: 'PRS-250-01', name: 'پرس ۲۵۰ تن' } },
+              { id: 'cop30', opNumber: 30, opCode: 'OP30', opName: 'خم و پانچ یکپارچه مکمل', workCenter: { code: 'PRS-250-01', name: 'پرس ۲۵۰ تن' } },
+              { id: 'cop40', opNumber: 40, opCode: 'OP40', opName: 'پرس‌جوش ۲ عدد پیچ پایه M6x20', workCenter: { code: 'WLD-SPOT-01', name: 'پرس‌جوش ۱۰۰KVA' } },
             ],
           },
         },
