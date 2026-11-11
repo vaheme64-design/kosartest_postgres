@@ -1,0 +1,1645 @@
+// =========================================================================
+// KPIMS (Kosar Production & Inventory Management System)
+// Complete Relational Database Schema (PostgreSQL + Prisma ORM)
+// =========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =========================================================================
+// ENUMS
+// =========================================================================
+
+enum PartCategory {
+  RAW_MATERIAL   // مواد اولیه (کویل ورق، شیت، مقاطع، لوله)
+  WIP_PART       // کار در جریان ساخت (بلنک، پوسته فرم‌خورده، قطعه مرحله‌ای)
+  FINISHED_GOOD  // محصول نهایی آماده تحویل به خودروساز (ساپکو/ایران‌خودرو/سایپا)
+  CONSUMABLE     // مواد مصرفی خط تولید (سیم جوش، رنگ، چسب، ساچمه)
+}
+
+enum ProcessType {
+  SHEARING     // برش و نواربری ورق
+  BLANKING     // بلنکینگ و پولک‌زنی
+  DRAWING      // کشش عمیق و شکل‌دهی هیدرولیک
+  PUNCH_FORM   // پانچ، سوراخ‌کاری و فرم‌دهی
+  BENDING      // خم‌کاری با پرس برک یا قالب خم
+  TRIMMING     // دوربری و پلیسه‌گیری
+  SPOT_WELD    // پرس‌جوش مقاومتی نقطه‌ای
+  CO2_WELD     // جوشکاری تحت گاز محافظ CO2
+  PAINT        // فسفاته و رنگ کاتافورز (ED)
+  ASSEMBLY     // مونتاژ، هِمینگ و پرچ‌کاری
+}
+
+enum MachineType {
+  HYDRAULIC_PRESS     // پرس هیدرولیک (کشش سنگین و فرم‌دهی)
+  MECHANICAL_PRESS    // پرس مکانیکی لنگ/اکستریک (بلنکینگ و ضربه‌ای سریع)
+  PRESS_BRAKE         // پرس برک CNC خم‌کاری
+  SHEARING_MACHINE    // قیچی گیوتین و خط نواربری
+  SPOT_WELDER         // دستگاه جوش نقطه‌ای و پرس‌جوش
+  CO2_WELDING_CELL    // سلول جوشکاری رباتیک یا دستی CO2
+  PAINT_LINE          // خط شستشو و رنگ کاتافورز
+  ASSEMBLY_BENCH      // ایستگاه مونتاژ و کنترل نهایی
+}
+
+enum MachineStatus {
+  ACTIVE       // آماده به کار و در حال تولید
+  MAINTENANCE  // در حال تعمیر و نگهداری برنامه‌ریزی شده (PM)
+  BREAKDOWN    // توقف اضطراری به علت خرابی مکانیکی/برقی
+  IDLE         // آماده به کار اما فاقد برنامه تولید
+}
+
+enum DieType {
+  BLANKING_DIE      // قالب برش و بلنک اولیه
+  DRAWING_DIE       // قالب کشش عمیق پوسته
+  FORMING_DIE       // قالب فرم و اصلاح هندسی
+  TRIMMING_DIE      // قالب دوربری لبه‌های اضافه
+  PIERCING_DIE      // قالب سوراخ‌کاری دقیق
+  PROGRESSIVE_DIE   // قالب پروگرسیو چند مرحله‌ای پیوسته
+  COMPOUND_DIE      // قالب مرکب همزمان برش و سوراخ‌کاری
+}
+
+enum DieStatus {
+  READY             // آماده تحویل و نصب در پرس
+  ON_MACHINE        // روی پرس نصب شده و در حال تولید
+  MAINTENANCE       // در کارگاه قالب‌سازی جهت پولیش، تیزکاری یا تعویض سنبه
+  CALIBRATION       // در حال اندازه‌برداری CMM و کنترل ابعادی
+  RETIRED           // از رده خارج به دلیل استهلاک کامل
+}
+
+enum WarehouseType {
+  RAW_MATERIALS     // انبار رول و شیت ورق ساپکو
+  WIP               // انبار پای خط و پای کار سالن پرس و جوش
+  FINISHED_GOODS    // انبار محصولات نهایی بسته‌بندی شده
+  SCRAP             // انبار ضایعات آهن و پرت ورق
+  TOOLING_DIES      // انبار و قفسه‌های نگهداری قالب‌های پرس
+}
+
+enum DocumentStatus {
+  DRAFT       // پیش‌نویس (قابل ویرایش)
+  CONFIRMED   // تایید نهایی شده (غیرقابل تغییر ساختاری)
+  CLOSED      // بسته شده و مختومه
+  CANCELLED   // لغو شده پیش از ثبت نهایی
+}
+
+enum PostingStatus {
+  UNPOSTED    // سند موقت، هنوز در کاردکس و موجودی ثبت نشده
+  POSTED      // ثبت قطعی در کاردکس و گردش موجودی (غیرقابل ویرایش یا حذف)
+  REVERSED    // ابطال شده به موجب سند برگشتی/اصلاحی
+}
+
+enum InventoryDocType {
+  RECEIPT          // رسید انبار (ورود کالا از تامین‌کننده/ساپکو)
+  ISSUE            // حواله انبار (خروج کالا برای خط تولید یا فروش)
+  WIP_TRANSFER     // حواله انتقال بین انبارهای پای کار و سالن‌ها
+  RETURN           // برگشت از خط تولید به انبار یا برگشت به ساپکو
+  SCRAP            // سند ثبت ضایعات و افت کیفی
+  COUNT_ADJUSTMENT // تعدیل کسری یا مازاد انبارگردانی
+  INITIAL_BALANCE  // ثبت موجودی اول دوره
+}
+
+enum DocReferenceType {
+  SAPCO_COIL           // رسید کلاف ورق ساپکو
+  CUSTOMER_ORDER       // سفارش فروش خودروساز
+  MANUFACTURING_ORDER  // دستور ساخت و حواله مواد اولیه
+  SCRAP_REPORT         // گزارش ضایعات سالن تولید
+  PHYSICAL_COUNT       // برگه شمارش انبارگردانی
+  MANUAL               // سند دستی با تایید مدیر
+}
+
+enum TransactionType {
+  INBOUND         // ورود به انبار (+)
+  OUTBOUND        // خروج از انبار (-)
+  TRANSFER_OUT    // خروج انتقالی به انبار دیگر (-)
+  TRANSFER_IN     // ورود انتقالی از انبار دیگر (+)
+  ADJUSTMENT_POS  // تعدیل مثبت مازاد انبارگردانی (+)
+  ADJUSTMENT_NEG  // تعدیل منفی کسری انبارگردانی (-)
+}
+
+enum OrderLineStatus {
+  PENDING              // در انتظار برنامه‌ریزی
+  IN_PRODUCTION        // در فرآیند تولید
+  PARTIALLY_FULFILLED  // تحویل جزیی انجام شده
+  COMPLETED            // تحویل کامل شده
+  CANCELLED            // لغو شده
+}
+
+enum PlanStatus {
+  DRAFT       // پیش‌نویس برنامه تولید
+  APPROVED    // تایید مدیریت و ابلاغ به سالن
+  IN_PROGRESS // در دست تولید
+  COMPLETED   // خاتمه یافته
+  CANCELLED   // ابطال شده
+}
+
+enum PlanLineStatus {
+  PLANNED      // برنامه‌ریزی شده
+  RELEASED     // تبدیل به دستور ساخت
+  IN_PROGRESS  // در حال اجرا در خطوط
+  COMPLETED    // تولید کامل
+  CANCELLED    // لغو شده
+}
+
+enum MOStatus {
+  PLANNED      // صادر شده
+  RELEASED     // ابلاغ به سالن و تخصیص متریال
+  IN_PROGRESS  // در حال تولید روی پرس‌ها
+  SUSPENDED    // توقف موقت به علت نقص متریال یا قالب
+  COMPLETED    // تولید سهمیه تکمیل شده
+  CLOSED       // مختومه و حسابداری صنعتی ثبت شده
+  CANCELLED    // لغو شده
+}
+
+enum ProductionOpStatus {
+  PENDING      // منتظر اتمام عملیات قبلی
+  READY        // آماده اجرا
+  IN_PROGRESS  // در حال اجرا
+  COMPLETED    // به پایان رسیده
+  SKIPPED      // رد شده با مجوز مهندسی
+}
+
+enum ScrapReason {
+  TEAR_CRACK                // پارگی و ترک در کشش
+  WRINKLING                 // چروک‌افتادگی در بلنک
+  DIMENSIONAL_OUT_OF_SPEC   // خارج از تلرانس نقشه مهندسی
+  BURR_HIGH                 // پلیسه بیش از حد مجاز برش
+  SURFACE_SCRATCH           // خط و خش و زدگی سطح ورق
+  MATERIAL_DEFECT           // عیب متالورژیکی ورق (ناخالصی فولادساز)
+  SETUP_SCRAP               // ضایعات تنظیم و ستاپ قالب
+  MACHINE_MALFUNCTION       // عیب پرس، عدم هم‌راستایی، افت فشار روغن
+  OTHER                     // سایر موارد
+}
+
+enum TransferStatus {
+  DISPATCHED   // ارسال شده از سالن مبدا
+  RECEIVED     // تایید دریافت در سالن مقصد
+  REJECTED     // عودت داده شده به علت عدم تطابق
+  CANCELLED    // ابطال شده
+}
+
+enum AssignmentStatus {
+  SCHEDULED    // زمان‌بندی شده
+  ACTIVE       // در حال اجرا روی دستگاه
+  COMPLETED    // پایان یافته
+  CANCELLED    // لغو شده
+}
+
+enum ReservationStatus {
+  ACTIVE       // رزرو فعال جهت دستور کار
+  CONSUMED     // مصرف قطعی در تولید
+  RELEASED     // لغو رزرو و برگشت به موجودی آزاد
+  EXPIRED      // منقضی شده
+}
+
+enum LotStatus {
+  AVAILABLE    // آماده مصرف
+  IN_USE       // در حال نواربری یا پای پرس
+  CONSUMED     // مصرف کامل شده
+  QUARANTINE   // قرنطینه آزمایشگاه متالورژی
+  REJECTED     // عدم انطباق کیفی و برگشت به ساپکو
+}
+
+enum ContractStatus {
+  DRAFT        // پیش‌نویس قرارداد
+  ACTIVE       // فعال و در جریان تحویل
+  FULFILLED    // اتمام ظرفیت وزنی قرارداد
+  EXPIRED      // پایان مهلت زمانی
+  TERMINATED   // فسخ شده
+}
+
+enum ContractTxType {
+  RECEIPT      // دریافت محموله رول ساپکو
+  RETURN       // مرجوعی محموله معیوب
+  ADJUSTMENT   // اصلاحیه وزنی باسکول
+}
+
+enum RouteStatus {
+  DRAFT        // پیش‌نویس مهندسی محصول
+  ACTIVE       // نسخه اجرایی معتبر
+  OBSOLETE     // منسوخ شده
+}
+
+// =========================================================================
+// 1. MASTER DATA ENTITIES (اطلاعات پایه)
+// =========================================================================
+
+// واحدهای سنجش و اندازه‌گیری
+model UnitOfMeasure {
+  id          String   @id @default(uuid())
+  code        String   @unique // KG, PCS, M, MM, TON, ROLL
+  name        String   // کیلوگرم, عدد, متر, میلیمتر, تن, کلاف
+  symbol      String   // kg, pcs, m, mm, t, roll
+  isBase      Boolean  @default(false)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  parts                   Part[]
+  inventoryDocLines       InventoryDocumentLine[]
+  inventoryTransactions  InventoryTransaction[]
+  productionTransfers     ProductionTransfer[]
+
+  @@map("units_of_measure")
+}
+
+// متریال و گریدهای فولاد خام (ورق‌های ساپکو و فولاد مبارکه)
+model Material {
+  id                   String   @id @default(uuid())
+  code                 String   @unique // e.g. MAT-DC04, MAT-ST14, MAT-DX51D
+  name                 String   // ورق روغنی DC04 کشش عمیق
+  grade                String   // DC04, ST12, ST14, DX51D, ST37
+  standard             String?  // EN 10130, DIN 1623
+  densityKgM3          Decimal  @default(7850) // چگالی فولاد (kg/m3)
+  tensileStrengthMpa   Decimal?  // استحکام کششی
+  yieldStrengthMpa     Decimal?  // نقطه تسلیم
+  elongationPercent    Decimal?  // درصد ازدیاد طول
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  parts                Part[]
+  materialLots         MaterialLot[]
+  materialContracts    MaterialContract[]
+  physicalCoils        PhysicalCoil[]
+
+  @@map("materials")
+}
+
+// کاتالوگ قطعات خودرویی (مواد اولیه، قطعات نیمه‌ساخته WIP، محصول نهایی)
+model Part {
+  id                   String        @id @default(uuid())
+  partNumber           String        @unique // e.g. IKCO-206-BRK01, SAPCO-COIL-DC04
+  name                 String        // براکت اتصال رام جلو پژو ۲۰۶
+  category             PartCategory
+  unitId               String
+  unit                 UnitOfMeasure @relation(fields: [unitId], references: [id])
+  materialId           String?
+  material             Material?     @relation(fields: [materialId], references: [id])
+  thicknessMm          Decimal? // ضخامت ورق (میلیمتر)
+  weightNetKg          Decimal       @default(0) // وزن خالص قطعه (کیلوگرم)
+  weightGrossKg        Decimal       @default(0) // وزن ناخالص/بلنک مصرفی (کیلوگرم)
+  customerPartNumber   String?       // کد عظام یا ساپکو قطعه
+  carModel             String?       // پژو ۲۰۶، ۲۰۷، تارا، دنا پلاس، شاهین، کوییک
+  minSafetyStock       Decimal       @default(0) // حداقل موجودی اطمینان
+  maxStock             Decimal?
+  leadTimeDays         Int           @default(1)
+  active               Boolean       @default(true)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  routes               PartRoute[]
+  dies                 Die[]
+  customerOrderLines   CustomerOrderLine[]
+  productionPlanLines  ProductionPlanLine[]
+  manufacturingOrders  ManufacturingOrder[]
+  inventoryDocLines    InventoryDocumentLine[]
+  transactions         InventoryTransaction[]
+  reservations         InventoryReservation[]
+  stockBalances        StockBalance[]
+  materialLots         MaterialLot[]
+  productionTransfers  ProductionTransfer[]
+  physicalCoils        PhysicalCoil[]
+  attributeValues      ItemAttributeValue[]
+  trackingProfile      ItemTrackingProfile?
+
+  @@index([category, active])
+  @@index([carModel])
+  @@map("parts")
+}
+
+// عملیات‌های استاندارد تولید
+model Operation {
+  id                           String             @id @default(uuid())
+  code                         String             @unique // OP-BLANK, OP-DRAW, OP-BEND, OP-TRIM, OP-SPOT-WELD
+  name                         String             // بلنکینگ اولیه، کشش پوسته، خم‌کاری، دوربری، جوش نقطه‌ای
+  processType                  ProcessType
+  standardLaborCostPerHour     Decimal?
+  standardMachineCostPerHour   Decimal?
+  active                       Boolean            @default(true)
+  createdAt                    DateTime           @default(now())
+  updatedAt                    DateTime           @updatedAt
+
+  routeOperations              RouteOperation[]
+  machineCapabilities          MachineCapability[]
+  productionOperations         ProductionOperation[]
+
+  @@map("operations")
+}
+
+// مسیرهای تولید قطعه با پشتیبانی از نسخه (Route Versioning)
+model PartRoute {
+  id             String           @id @default(uuid())
+  partId         String
+  part           Part             @relation(fields: [partId], references: [id])
+  version        String           @default("V1.0") // نسخه مسیر تولید
+  status         RouteStatus      @default(ACTIVE)
+  effectiveFrom  DateTime         @default(now())
+  effectiveTo    DateTime?
+  isDefault      Boolean          @default(true)
+  notes          String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  operations           RouteOperation[]
+  manufacturingOrders  ManufacturingOrder[]
+
+  @@unique([partId, version])
+  @@index([partId, status])
+  @@map("part_routes")
+}
+
+// ترتیب و مشخصات عملیات‌های داخل مسیر تولید
+model RouteOperation {
+  id                   String          @id @default(uuid())
+  routeId              String
+  route                PartRoute       @relation(fields: [routeId], references: [id], onDelete: Cascade)
+  operationId          String
+  operation            Operation       @relation(fields: [operationId], references: [id])
+  stepNumber           Int             // 10, 20, 30, 40...
+  stepCode             String          // OP10_BLANK, OP20_DRAW
+  stepName             String          // شرح عملیات در مسیر
+  machineId            String?
+  machine              Machine?        @relation(fields: [machineId], references: [id])
+  dieId                String?
+  die                  Die?            @relation(fields: [dieId], references: [id])
+  setupTimeMin         Int             @default(30) // زمان ستاپ و بستن قالب (دقیقه)
+  standardCycleTimeSec Int             @default(45) // زمان سیکل استاندارد هر ضرب (ثانیه)
+  scrapNormPercent     Decimal         @default(1.5) // ضایعات مجاز درصدی استاندارد
+  transferBatchQty     Decimal         @default(100) // اندازه بسته انتقال به مرحله بعد
+
+  productionOperations ProductionOperation[]
+
+  @@unique([routeId, stepNumber])
+  @@map("route_operations")
+}
+
+// ماشین‌آلات و خطوط پرس
+model Machine {
+  id                   String          @id @default(uuid())
+  code                 String          @unique // e.g. PRS-800-01, PRS-400-02, BRK-CNC-01
+  name                 String          // پرس هیدرولیک ۸۰۰ تن کشش
+  machineType          MachineType
+  tonnageCapacity      Decimal? // تناژ اسمی پرس (تن)
+  bolsterLengthMm      Decimal? // طول میز کار پرس (میلیمتر)
+  bolsterWidthMm       Decimal? // عرض میز کار پرس (میلیمتر)
+  strokeLengthMm       Decimal? // کورس ضربه پرس (میلیمتر)
+  maxStrokesPerMinute  Int?            // حداکثر ضرب در دقیقه (SPM)
+  shutHeightMm         Decimal? // ارتفاع بسته (Shut Height)
+  hallLocation         String          @default("سالن پرس سنگین") // سالن استقرار
+  status               MachineStatus   @default(ACTIVE)
+  active               Boolean         @default(true)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  capabilities         MachineCapability[]
+  dieCompatibilities   MachineDieCompatibility[]
+  routeOperations      RouteOperation[]
+  machineAssignments   MachineAssignment[]
+  productionReports    ProductionReport[]
+  plannedOperations    ProductionOperation[]
+
+  @@index([machineType, status])
+  @@map("machines")
+}
+
+// ماتریس قابلیت‌های هر دستگاه (انجام فرایندها و محدودیت‌های ضخامت و تناژ)
+model MachineCapability {
+  id                   String     @id @default(uuid())
+  machineId            String
+  machine              Machine    @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  operationId          String
+  operation            Operation  @relation(fields: [operationId], references: [id])
+  maxTonnage           Decimal?
+  minThicknessMm       Decimal?
+  maxThicknessMm       Decimal?
+  efficiencyFactor     Decimal    @default(1.0) // ضریب راندمان
+  isPreferred          Boolean    @default(false)
+  notes                String?
+
+  @@unique([machineId, operationId])
+  @@map("machine_capabilities")
+}
+
+// قالب‌ها و ابزارهای فرم‌دهی و پرس (Dies & Tooling)
+model Die {
+  id                          String          @id @default(uuid())
+  code                        String          @unique // e.g. DIE-206-BRK-OP10, DIE-206-BRK-OP20
+  name                        String          // قالب سنبه ماتریس کشش پوسته براکت
+  partId                      String
+  part                        Part            @relation(fields: [partId], references: [id])
+  dieType                     DieType
+  tonnageRequired             Decimal // تناژ پرس مورد نیاز
+  shutHeightMm                Decimal? // ارتفاع بسته قالب
+  upperWeightKg               Decimal? // وزن لنگه بالا
+  lowerWeightKg               Decimal? // وزن لنگه پایین
+  totalWeightKg               Decimal?
+  totalStrokeTarget           Int             @default(200000) // عمر استاندارد قالب برحسب ضرب
+  currentStrokes              Int             @default(0)      // کارکرد ضرب تجمیعی
+  lastMaintenanceStrokes      Int             @default(0)      // ضرب در آخرین تعمیرات PM
+  strokesBetweenSharpening    Int             @default(25000)  // دوره تیزکاری سنبه ماتریس
+  status                      DieStatus       @default(READY)
+  storageLocation             String?         // ردیف و پالت در انبار قالب
+  active                      Boolean         @default(true)
+  createdAt                   DateTime        @default(now())
+  updatedAt                   DateTime        @updatedAt
+
+  machineCompatibilities      MachineDieCompatibility[]
+  routeOperations             RouteOperation[]
+  productionReports           ProductionReport[]
+  plannedOperations           ProductionOperation[]
+
+  @@index([partId, status])
+  @@map("dies")
+}
+
+// ماتریس سازگاری قالب با پرس‌ها (Machine-Die Compatibility)
+model MachineDieCompatibility {
+  id                   String   @id @default(uuid())
+  machineId            String
+  machine              Machine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  dieId                String
+  die                  Die      @relation(fields: [dieId], references: [id], onDelete: Cascade)
+  isOptimal            Boolean  @default(true)
+  adapterPlateRequired Boolean  @default(false) // نیاز به صفحه واسط روبند
+  adapterPlateCode     String?
+  clampingType         String?  // هیدرولیک، پیچ روبند T، مگنت
+  setupDifficulty      String?  // LOW, MEDIUM, HIGH
+  notes                String?
+
+  @@unique([machineId, dieId])
+  @@map("machine_die_compatibilities")
+}
+
+// انبارها
+model Warehouse {
+  id             String        @id @default(uuid())
+  code           String        @unique // WH-RAW, WH-WIP-STAMP, WH-WIP-WELD, WH-FINISHED, WH-SCRAP
+  name           String        // انبار کویل و ورق ساپکو, انبار کار در جریان پرس...
+  type           WarehouseType
+  address        String?
+  managerName    String?
+  active         Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  locations                WarehouseLocation[]
+  sourceInventoryDocs      InventoryDocument[]    @relation("SourceWarehouse")
+  targetInventoryDocs      InventoryDocument[]    @relation("TargetWarehouse")
+  inventoryTransactions   InventoryTransaction[]
+  stockBalances            StockBalance[]
+  inventoryReservations    InventoryReservation[]
+  fromTransfers            ProductionTransfer[]   @relation("FromWarehouse")
+  toTransfers              ProductionTransfer[]   @relation("ToWarehouse")
+  physicalCoils            PhysicalCoil[]
+
+  @@map("warehouses")
+}
+
+// موقعیت‌های فیزیکی داخل انبار (راهرو، قفسه، طبقه، پالت)
+model WarehouseLocation {
+  id             String    @id @default(uuid())
+  warehouseId    String
+  warehouse      Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  code           String    // LOC-A-01-01
+  aisle          String?   // راهرو
+  rack           String?   // قفسه
+  shelf          String?   // طبقه
+  bin            String?   // بافت یا پالت
+  maxCapacityKg  Decimal?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+
+  inventoryDocLines        InventoryDocumentLine[] @relation("Location")
+  targetInventoryDocLines  InventoryDocumentLine[] @relation("TargetLocation")
+  inventoryTransactions   InventoryTransaction[]
+  stockBalances            StockBalance[]
+  materialLots             MaterialLot[]
+  physicalCoils            PhysicalCoil[]
+
+  @@unique([warehouseId, code])
+  @@map("warehouse_locations")
+}
+
+// شیفت‌های کاری کارخانه
+model Shift {
+  id               String   @id @default(uuid())
+  code             String   @unique // SHIFT-MORN, SHIFT-EVE, SHIFT-NIGHT
+  name             String   // شیفت صبح، شیفت عصر، شیفت شب
+  startTime        String   // "07:00"
+  endTime          String   // "15:30"
+  breakDurationMin Int      @default(60)
+  productiveHours  Decimal  @default(7.5)
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+
+  productionReports   ProductionReport[]
+  machineAssignments  MachineAssignment[]
+
+  @@map("shifts")
+}
+
+// مشتریان و تامین‌کنندگان (ساپکو، ایران خودرو، سایپا)
+model Customer {
+  id               String   @id @default(uuid())
+  code             String   @unique // CUST-SAPCO, CUST-IKCO, CUST-SAIPA
+  name             String   // ساپکو (طراحی مهندسی و تامین قطعات ایران خودرو)
+  commercialCode   String?
+  nationalId       String?
+  economicCode     String?
+  phone            String?
+  contactPerson    String?
+  address          String?
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  customerOrders     CustomerOrder[]
+  materialContracts  MaterialContract[]
+
+  @@map("customers")
+}
+
+// =========================================================================
+// 2. PRODUCTION DATA ENTITIES (داده‌های برنامه‌ریزی و تولید)
+// =========================================================================
+
+// سفارش‌های مشتری / برنامه‌های تحویل ساپکو
+model CustomerOrder {
+  id                      String         @id @default(uuid())
+  orderNumber             String         @unique // e.g. CO-1403-0901
+  customerId              String
+  customer                Customer       @relation(fields: [customerId], references: [id])
+  orderDate               DateTime
+  requestedDeliveryDate   DateTime
+  customerContractNumber  String?        // شماره قرارداد یا برنامه ساپکو
+  documentStatus          DocumentStatus @default(DRAFT)
+  notes                   String?
+  totalAmount             Decimal?
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+
+  orderLines              CustomerOrderLine[]
+  planLines               ProductionPlanLine[]
+  reservations            InventoryReservation[]
+
+  @@index([customerId, documentStatus])
+  @@map("customer_orders")
+}
+
+// ردیف‌های سفارش مشتری
+model CustomerOrderLine {
+  id               String           @id @default(uuid())
+  orderId          String
+  order            CustomerOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  partId           String
+  part             Part             @relation(fields: [partId], references: [id])
+  lineNumber       Int
+  orderedQty       Decimal
+  deliveredQty     Decimal          @default(0)
+  unitPrice        Decimal?
+  requestedDate    DateTime
+  status           OrderLineStatus  @default(PENDING)
+
+  @@unique([orderId, lineNumber])
+  @@index([partId, status])
+  @@map("customer_order_lines")
+}
+
+// برنامه کلان و هفتگی تولید (Production Plan)
+model ProductionPlan {
+  id                 String       @id @default(uuid())
+  planNumber         String       @unique // e.g. PLN-1403-W42
+  title              String       // برنامه تولید هفتگی قطعات پرسی تارا و ۲۰۶
+  startDate          DateTime
+  endDate            DateTime
+  status             PlanStatus   @default(DRAFT)
+  approvedByUserId   String?
+  approvedAt         DateTime?
+  notes              String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  planLines            ProductionPlanLine[]
+  manufacturingOrders  ManufacturingOrder[]
+
+  @@index([status, startDate])
+  @@map("production_plans")
+}
+
+// ردیف‌های برنامه تولید
+model ProductionPlanLine {
+  id                 String             @id @default(uuid())
+  planId             String
+  plan               ProductionPlan     @relation(fields: [planId], references: [id], onDelete: Cascade)
+  partId             String
+  part               Part               @relation(fields: [partId], references: [id])
+  customerOrderId    String?
+  customerOrder      CustomerOrder?     @relation(fields: [customerOrderId], references: [id])
+  plannedQty         Decimal
+  producedQty        Decimal            @default(0)
+  plannedStartDate   DateTime
+  plannedEndDate     DateTime
+  priority           Int                @default(1) // 1: عادی, 2: فوری, 3: بحرانی خط ساپکو
+  status             PlanLineStatus     @default(PLANNED)
+
+  manufacturingOrders ManufacturingOrder[]
+
+  @@index([partId, status])
+  @@map("production_plan_lines")
+}
+
+// دستور ساخت کارگاهی / کارت سفارش تولید (Manufacturing Order / Work Order)
+model ManufacturingOrder {
+  id                   String          @id @default(uuid())
+  moNumber             String          @unique // e.g. MO-1403-1082
+  partId               String
+  part                 Part            @relation(fields: [partId], references: [id])
+  routeId              String
+  route                PartRoute       @relation(fields: [routeId], references: [id])
+  planId               String?
+  plan                 ProductionPlan? @relation(fields: [planId], references: [id])
+  planLineId           String?
+  planLine             ProductionPlanLine? @relation(fields: [planLineId], references: [id])
+  targetQty            Decimal // تعداد کل سفارش
+  completedQty         Decimal         @default(0) // تعداد سالم نهایی
+  scrapQty             Decimal         @default(0) // تعداد کل ضایعات
+  scheduledStartDate   DateTime
+  scheduledEndDate     DateTime
+  actualStartDate      DateTime?
+  actualEndDate        DateTime?
+  priority             Int             @default(1)
+  status               MOStatus        @default(PLANNED)
+  notes                String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  operations           ProductionOperation[]
+  reports              ProductionReport[]
+  transfers            ProductionTransfer[]
+  reservations         InventoryReservation[]
+  transactions         InventoryTransaction[]
+
+  @@index([partId, status])
+  @@index([scheduledStartDate, scheduledEndDate])
+  @@map("manufacturing_orders")
+}
+
+// عملیات‌های اجرایی دستور ساخت روی خط تولید
+model ProductionOperation {
+  id                   String              @id @default(uuid())
+  manufacturingOrderId String
+  manufacturingOrder   ManufacturingOrder  @relation(fields: [manufacturingOrderId], references: [id], onDelete: Cascade)
+  operationId          String
+  operation            Operation           @relation(fields: [operationId], references: [id])
+  routeOperationId     String?
+  routeOperation       RouteOperation?     @relation(fields: [routeOperationId], references: [id])
+  stepNumber           Int                 // 10, 20, 30...
+  plannedMachineId     String?
+  plannedMachine       Machine?            @relation(fields: [plannedMachineId], references: [id])
+  plannedDieId         String?
+  plannedDie           Die?                @relation(fields: [plannedDieId], references: [id])
+  plannedQty           Decimal
+  inputQty             Decimal             @default(0)
+  outputGoodQty        Decimal             @default(0)
+  outputScrapQty       Decimal             @default(0)
+  status               ProductionOpStatus  @default(PENDING)
+  startDate            DateTime?
+  endDate              DateTime?
+
+  reports              ProductionReport[]
+  assignments          MachineAssignment[]
+  scraps               ProductionScrap[]
+
+  @@unique([manufacturingOrderId, stepNumber])
+  @@index([status])
+  @@map("production_operations")
+}
+
+// گزارش ثبت عملکرد شیفت و تولید روزانه
+model ProductionReport {
+  id                      String               @id @default(uuid())
+  reportNumber            String               @unique // e.g. PR-1403-1102-01
+  manufacturingOrderId    String
+  manufacturingOrder      ManufacturingOrder   @relation(fields: [manufacturingOrderId], references: [id])
+  productionOperationId   String
+  productionOperation     ProductionOperation  @relation(fields: [productionOperationId], references: [id])
+  machineId               String
+  machine                 Machine              @relation(fields: [machineId], references: [id])
+  dieId                   String?
+  die                     Die?                 @relation(fields: [dieId], references: [id])
+  shiftId                 String
+  shift                   Shift                @relation(fields: [shiftId], references: [id])
+  operatorUserId          String?
+  operatorUser            User?                @relation("ReportOperator", fields: [operatorUserId], references: [id])
+  supervisorUserId        String?
+  supervisorUser          User?                @relation("ReportSupervisor", fields: [supervisorUserId], references: [id])
+  reportDate              DateTime             // تاریخ شیفت کاری (UTC)
+  strokeCounterStart      Int?                 // شمارنده ضرب اول شیفت
+  strokeCounterEnd        Int?                 // شمارنده ضرب پایان شیفت
+  goodQuantity            Decimal // تعداد سالم
+  scrapQuantity           Decimal              @default(0) // تعداد ضایعات
+  reworkQuantity          Decimal              @default(0) // تعداد دوباره‌کاری
+  runTimeMinutes          Int                  @default(0) // دقایق کار مفید
+  downtimeMinutes         Int                  @default(0) // دقایق توقف پرس
+  downtimeReason          String?              // علت توقف (خرابی قالب، تعویض رول، نقص برق)
+  notes                   String?
+  documentStatus          DocumentStatus       @default(CONFIRMED)
+  postingStatus           PostingStatus        @default(POSTED)
+  createdAt               DateTime             @default(now())
+
+  scraps                  ProductionScrap[]
+  inventoryTransactions  InventoryTransaction[]
+
+  @@index([manufacturingOrderId, reportDate])
+  @@index([machineId, reportDate])
+  @@map("production_reports")
+}
+
+// ریز ضایعات تولیدی به تفکیک علت مهندسی
+model ProductionScrap {
+  id                      String              @id @default(uuid())
+  productionReportId      String
+  productionReport        ProductionReport    @relation(fields: [productionReportId], references: [id], onDelete: Cascade)
+  productionOperationId   String
+  productionOperation     ProductionOperation @relation(fields: [productionOperationId], references: [id])
+  scrapReason             ScrapReason
+  quantity                Decimal // تعداد قطعه ضایعاتی
+  weightKg                Decimal // وزن ضایعات آهن (کیلوگرم)
+  isRecoverable           Boolean             @default(false)    // آیا قابل بازیافت یا بلنک قطعه کوچکتراست؟
+  notes                   String?
+  createdAt               DateTime            @default(now())
+
+  @@index([productionReportId])
+  @@index([scrapReason])
+  @@map("production_scraps")
+}
+
+// حواله‌های انتقال نیمه‌ساخته (WIP Transfers) بین مراحل تولید
+model ProductionTransfer {
+  id                      String             @id @default(uuid())
+  transferNumber          String             @unique // TRF-1403-0801
+  manufacturingOrderId    String
+  manufacturingOrder      ManufacturingOrder @relation(fields: [manufacturingOrderId], references: [id])
+  partId                  String
+  part                    Part               @relation(fields: [partId], references: [id])
+  fromStageOperationId    String?
+  toStageOperationId      String?
+  fromWarehouseId         String
+  fromWarehouse           Warehouse          @relation("FromWarehouse", fields: [fromWarehouseId], references: [id])
+  toWarehouseId           String
+  toWarehouse             Warehouse          @relation("ToWarehouse", fields: [toWarehouseId], references: [id])
+  quantity                Decimal
+  unitId                  String
+  unit                    UnitOfMeasure      @relation(fields: [unitId], references: [id])
+  dispatchedByUserId      String?
+  dispatchedAt            DateTime           @default(now())
+  receivedByUserId        String?
+  receivedAt              DateTime?
+  status                  TransferStatus     @default(DISPATCHED)
+  inventoryDocId          String?
+  notes                   String?
+
+  @@index([partId, status])
+  @@map("production_transfers")
+}
+
+// تخصیص و نوبت‌دهی دستگاه و اپراتور (Machine Assignments)
+model MachineAssignment {
+  id                      String              @id @default(uuid())
+  machineId               String
+  machine                 Machine             @relation(fields: [machineId], references: [id])
+  productionOperationId   String
+  productionOperation     ProductionOperation @relation(fields: [productionOperationId], references: [id])
+  shiftId                 String
+  shift                   Shift               @relation(fields: [shiftId], references: [id])
+  assignedDate            DateTime
+  assignedOperatorId      String?
+  assignedOperator        User?               @relation("OperatorAssignments", fields: [assignedOperatorId], references: [id])
+  status                  AssignmentStatus    @default(SCHEDULED)
+  notes                   String?
+  createdAt               DateTime            @default(now())
+
+  @@index([machineId, assignedDate, shiftId])
+  @@map("machine_assignments")
+}
+
+// =========================================================================
+// 3. INVENTORY DATA ENTITIES (داده‌های انبارداری و زنجیره تامین ساپکو)
+// =========================================================================
+
+// اسناد انبار (سربرگ رسید، حواله، جابجایی و انبارگردانی)
+model InventoryDocument {
+  id                 String            @id @default(uuid())
+  documentNumber     String            @unique // e.g. DOC-REC-1403-001
+  documentType       InventoryDocType
+  documentDate       DateTime
+  documentStatus     DocumentStatus    @default(DRAFT)
+  postingStatus      PostingStatus     @default(UNPOSTED)
+  warehouseId        String
+  warehouse          Warehouse         @relation("SourceWarehouse", fields: [warehouseId], references: [id])
+  targetWarehouseId  String?
+  targetWarehouse    Warehouse?        @relation("TargetWarehouse", fields: [targetWarehouseId], references: [id])
+  referenceType      DocReferenceType?
+  referenceNumber    String?           // شماره بارنامه ساپکو یا دستور تولید
+  createdByUserId    String
+  createdByUser      User              @relation("DocCreator", fields: [createdByUserId], references: [id])
+  postedByUserId     String?
+  postedAt           DateTime?
+  isReversed         Boolean           @default(false)
+  reversalOfId       String?           @unique // ارجاع به سند ابطال‌شده
+  notes              String?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+
+  lines              InventoryDocumentLine[]
+  transactions       InventoryTransaction[]
+
+  @@index([documentType, documentDate])
+  @@index([warehouseId, postingStatus])
+  @@map("inventory_documents")
+}
+
+// ردیف‌های اقلام سند انبار
+model InventoryDocumentLine {
+  id                 String             @id @default(uuid())
+  documentId         String
+  document           InventoryDocument  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  lineNumber         Int
+  partId             String
+  part               Part               @relation(fields: [partId], references: [id])
+  materialLotId      String?
+  materialLot        MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  locationId         String?
+  location           WarehouseLocation? @relation("Location", fields: [locationId], references: [id])
+  targetLocationId   String?
+  targetLocation     WarehouseLocation? @relation("TargetLocation", fields: [targetLocationId], references: [id])
+  quantity           Decimal
+  unitId             String
+  unit               UnitOfMeasure      @relation(fields: [unitId], references: [id])
+  weightKg           Decimal // وزن متناظر به کیلوگرم
+  unitCost           Decimal?
+  notes              String?
+
+  @@unique([documentId, lineNumber])
+  @@index([partId, materialLotId])
+  @@map("inventory_document_lines")
+}
+
+// کاردکس غیرقابل دستکاری و تراکنش‌های رسمی انبار (Immutable Transaction Ledger)
+model InventoryTransaction {
+  id                      String             @id @default(uuid())
+  transactionNumber       String             @unique // e.g. TRX-1403-0001
+  documentId              String?
+  document                InventoryDocument? @relation(fields: [documentId], references: [id])
+  documentLineId          String?
+  partId                  String
+  part                    Part               @relation(fields: [partId], references: [id])
+  materialLotId           String?
+  materialLot             MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  warehouseId             String
+  warehouse               Warehouse          @relation(fields: [warehouseId], references: [id])
+  locationId              String?
+  location                WarehouseLocation? @relation(fields: [locationId], references: [id])
+  transactionType         TransactionType
+  quantity                Decimal // مقدار مطلق
+  quantitySigned          Decimal // مقدار با علامت (مثبت ورودی، منفی خروجی)
+  unitId                  String
+  unit                    UnitOfMeasure      @relation(fields: [unitId], references: [id])
+  weightKg                Decimal // وزن مطلق به کیلوگرم
+  weightKgSigned          Decimal // وزن با علامت (کیلوگرم)
+  balanceAfter            Decimal? // مانده مقداری پس از تراکنش
+  balanceKgAfter          Decimal? // مانده وزنی پس از تراکنش
+  transactionDate         DateTime           // زمان وقوع به UTC
+  postingStatus           PostingStatus      @default(POSTED)
+  isReversal              Boolean            @default(false)
+  reversalOfTrxId         String?            // ارجاع به تراکنش معکوس‌شده
+  createdByUserId         String
+  createdByUser           User               @relation("TxCreator", fields: [createdByUserId], references: [id])
+  productionReportId      String?
+  productionReport        ProductionReport?  @relation(fields: [productionReportId], references: [id])
+  manufacturingOrderId    String?
+  manufacturingOrder      ManufacturingOrder? @relation(fields: [manufacturingOrderId], references: [id])
+  createdAt               DateTime           @default(now())
+
+  @@index([partId, warehouseId, transactionDate])
+  @@index([warehouseId, transactionDate])
+  @@index([materialLotId])
+  @@map("inventory_transactions")
+}
+
+// رزرو مواد و قطعات برای دستورات ساخت یا سفارشات فروش
+model InventoryReservation {
+  id                 String             @id @default(uuid())
+  reservationNumber  String             @unique // RES-1403-001
+  partId             String
+  part               Part               @relation(fields: [partId], references: [id])
+  warehouseId        String
+  warehouse          Warehouse          @relation(fields: [warehouseId], references: [id])
+  materialLotId      String?
+  materialLot        MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  reservedForMOId    String?
+  reservedForMO      ManufacturingOrder? @relation(fields: [reservedForMOId], references: [id])
+  reservedForCOId    String?
+  reservedForCO      CustomerOrder?     @relation(fields: [reservedForCOId], references: [id])
+  quantity           Decimal
+  weightKg           Decimal
+  status             ReservationStatus  @default(ACTIVE)
+  validUntil         DateTime?
+  createdByUserId    String
+  createdByUser      User               @relation("ReservationCreator", fields: [createdByUserId], references: [id])
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@index([partId, warehouseId, status])
+  @@map("inventory_reservations")
+}
+
+// مانده موجودی تجمیعی فیزیکی و قابل دسترس (Stock Balances Snapshot)
+model StockBalance {
+  id                   String             @id @default(uuid())
+  partId               String
+  part                 Part               @relation(fields: [partId], references: [id])
+  warehouseId          String
+  warehouse            Warehouse          @relation(fields: [warehouseId], references: [id])
+  locationId           String?
+  location             WarehouseLocation? @relation(fields: [locationId], references: [id])
+  materialLotId        String?
+  materialLot          MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  quantityOnHand       Decimal            @default(0) // موجودی فیزیکی
+  quantityReserved     Decimal            @default(0) // مقدار رزرو شده
+  quantityAvailable    Decimal            @default(0) // مقدار آزاد = موجودی منهای رزرو
+  weightKgOnHand       Decimal            @default(0) // وزن فیزیکی (کیلوگرم)
+  weightKgReserved     Decimal            @default(0) // وزن رزرو شده (کیلوگرم)
+  weightKgAvailable    Decimal            @default(0) // وزن آزاد (کیلوگرم)
+  lastTransactionAt    DateTime?
+  updatedAt            DateTime           @updatedAt
+
+  @@unique([partId, warehouseId, locationId, materialLotId])
+  @@index([partId, warehouseId])
+  @@map("stock_balances")
+}
+
+// رول‌ها، کلاف‌های ورق ساپکو و بچ‌های متریال (Material Lots & Coils)
+model MaterialLot {
+  id                     String             @id @default(uuid())
+  lotNumber              String             @unique // e.g. COIL-SAP-1403-0498
+  materialId             String
+  material               Material           @relation(fields: [materialId], references: [id])
+  partId                 String?
+  part                   Part?              @relation(fields: [partId], references: [id])
+  supplierContractId     String?
+  supplierContract       MaterialContract?  @relation(fields: [supplierContractId], references: [id])
+  heatNumber             String?            // شماره ذوب فولاد مبارکه
+  coilSerialNumber       String?            // شماره سریال کلاف سازنده
+  thicknessMm            Decimal // ضخامت واقعی اندازه‌گیری شده
+  widthMm                Decimal // عرض رول
+  lengthMm               Decimal?
+  initialWeightKg        Decimal // وزن اولیه ورودی باسکول
+  remainingWeightKg      Decimal // مانده وزن فعلی رول
+  warehouseLocationId    String?
+  warehouseLocation      WarehouseLocation? @relation(fields: [warehouseLocationId], references: [id])
+  status                 LotStatus          @default(AVAILABLE)
+  receivedDate           DateTime
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  inventoryDocLines      InventoryDocumentLine[]
+  transactions           InventoryTransaction[]
+  reservations           InventoryReservation[]
+  stockBalances          StockBalance[]
+  contractTransactions   MaterialContractTransaction[]
+  physicalCoils          PhysicalCoil[]
+
+  @@index([materialId, status])
+  @@index([heatNumber])
+  @@map("material_lots")
+}
+
+// سهمیه‌ها و قراردادهای تامین ورق ساپکو (SAPCO Material Contracts)
+model MaterialContract {
+  id                      String             @id @default(uuid())
+  contractNumber          String             @unique // e.g. CNT-SAPCO-1403-M10
+  supplierCustomerId      String
+  supplierCustomer        Customer           @relation(fields: [supplierCustomerId], references: [id])
+  title                   String             // سهمیه سه ماهه سوم ورق DC04 خودرو تارا
+  materialId              String
+  material                Material           @relation(fields: [materialId], references: [id])
+  totalAllocatedWeightKg  Decimal // کل تناژ تخصیصی سهمیه ساپکو
+  receivedWeightKg        Decimal            @default(0) // تناژ دریافت شده تا کنون
+  startDate               DateTime
+  endDate                 DateTime
+  status                  ContractStatus     @default(ACTIVE)
+  notes                   String?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+
+  materialLots            MaterialLot[]
+  transactions            MaterialContractTransaction[]
+  contractCoilAllocations ContractCoilAllocation[]
+  commercialLines         ContractCommercialLine[]
+
+  @@index([supplierCustomerId, status])
+  @@map("material_contracts")
+}
+
+// تراکنش‌ها و حواله‌های تحویل سهمیه قرارداد ساپکو
+model MaterialContractTransaction {
+  id               String            @id @default(uuid())
+  contractId       String
+  contract         MaterialContract  @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  lotId            String?
+  lot              MaterialLot?      @relation(fields: [lotId], references: [id])
+  transactionType  ContractTxType
+  weightKg         Decimal
+  waybillNumber    String?           // شماره بارنامه رسمی حمل ساپکو
+  receiptDate      DateTime
+  notes            String?
+  createdAt        DateTime          @default(now())
+
+  @@index([contractId, receiptDate])
+  @@map("material_contract_transactions")
+}
+
+// =========================================================================
+// 4. CONTROL DATA ENTITIES (کاربران، نقش‌ها، سطوح دسترسی و ممیزی)
+// =========================================================================
+
+// کاربران سیستم
+model User {
+  id             String    @id @default(uuid())
+  username       String    @unique
+  email          String    @unique
+  fullName       String    // نام و نام خانوادگی
+  personnelCode  String?   @unique // کد پرسنلی کارخانه
+  passwordHash   String?
+  roleId         String
+  role           Role      @relation(fields: [roleId], references: [id])
+  active         Boolean   @default(true)
+  lastLoginAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  createdDocuments       InventoryDocument[]    @relation("DocCreator")
+  createdTransactions   InventoryTransaction[] @relation("TxCreator")
+  createdReservations    InventoryReservation[] @relation("ReservationCreator")
+  operatorReports        ProductionReport[]     @relation("ReportOperator")
+  supervisorReports      ProductionReport[]     @relation("ReportSupervisor")
+  machineAssignments     MachineAssignment[]    @relation("OperatorAssignments")
+  auditLogs              AuditLog[]
+
+  @@map("users")
+}
+
+// نقش‌های کاربری (مدیر، برنامه‌ریزی، انبار، QC، سرپرست سالن، اپراتور)
+model Role {
+  id             String    @id @default(uuid())
+  name           String    @unique // ADMIN, PRODUCTION_MANAGER, WAREHOUSE_KEEPER, QC_INSPECTOR, LINE_SUPERVISOR, OPERATOR
+  displayName    String    // مدیر ارشد، مدیر برنامه‌ریزی و تولید، سرپرست انبار، بازرس کنترل کیفیت، سرپرست خط و شیفت پرس، اپراتور
+  description    String?
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+
+  users          User[]
+  permissions    RolePermission[]
+
+  @@map("roles")
+}
+
+// مجوزها و دسترسی‌های ریز سیستم
+model Permission {
+  id             String    @id @default(uuid())
+  code           String    @unique // e.g. PARTS_READ, PARTS_WRITE, INVENTORY_POST, INVENTORY_REVERSE, MO_RELEASE, REPORT_SUBMIT, AUDIT_VIEW
+  module         String    // MASTER_DATA, PRODUCTION, INVENTORY, CONTROL
+  name           String    // شرح دسترسی
+  description    String?
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+// جدول رابط انتساب مجوز به نقش‌ها
+model RolePermission {
+  id             String     @id @default(uuid())
+  roleId         String
+  role           Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permissionId   String
+  permission     Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// لاگ ممیزی و رویدادنگاری تغییرات حساس
+model AuditLog {
+  id             String    @id @default(uuid())
+  userId         String?
+  user           User?     @relation(fields: [userId], references: [id])
+  action         String    // VOUCHER_POST, VOUCHER_REVERSE, MASTER_DATA_CREATE, MO_RELEASE, DIE_STATUS_CHANGE
+  entityName     String    // InventoryDocument, ManufacturingOrder, Part, Machine
+  entityId       String
+  oldValues      Json?
+  newValues      Json?
+  ipAddress      String?
+  userAgent      String?
+  timestamp      DateTime  @default(now()) // ذخیره‌سازی همواره بر حسب UTC
+
+  @@index([entityName, entityId])
+  @@index([userId, timestamp])
+  @@index([action, timestamp])
+  @@map("audit_logs")
+}
+
+// شمارنده‌های شماره اسناد یکتا و اتمیک (Document Sequences)
+model DocumentSequence {
+  id             String    @id @default(uuid())
+  code           String    @unique // e.g. "INV_DOC_REC_1403", "MO_1403", "TRX_1403", "PR_1403"
+  prefix         String    // "REC-1403-", "MO-1403-", "TRX-1403-"
+  currentValue   Int       @default(0)
+  step           Int       @default(1)
+  padding        Int       @default(4)
+  year           String?   // "1403"
+  updatedAt      DateTime  @updatedAt
+
+  @@map("document_sequences")
+}
+
+// تنظیمات و پارامترهای سیستمی
+model SystemSetting {
+  id             String    @id @default(uuid())
+  key            String    @unique // e.g. "DEFAULT_SCRAP_NORM_PERCENT", "SAPCO_SYNC_INTERVAL_MIN"
+  value          String
+  category       String    @default("GENERAL") // GENERAL, INVENTORY, PRODUCTION, INTEGRATION
+  description    String?
+  isEncrypted    Boolean   @default(false)
+  updatedAt      DateTime  @updatedAt
+
+  @@map("system_settings")
+}
+
+// =========================================================================
+// 5. PHYSICAL COILS & ENHANCED INVENTORY TRACEABILITY ENTITIES
+// =========================================================================
+
+// کلاف‌ها و رول‌های فیزیکی ورق با هویت مستقل از قراردادها (Physical Coils)
+model PhysicalCoil {
+  id                     String             @id @default(uuid())
+  coilId                 String             @unique // شناسه یکتای رول مانند COIL-1403-0101
+  coilPackNumber         String             // شماره پکینگ یا بسته‌بندی کلاف سازنده (قابل فیلتر و جستجو)
+  partId                 String?
+  part                   Part?              @relation(fields: [partId], references: [id])
+  materialId             String?
+  material               Material?          @relation(fields: [materialId], references: [id])
+  materialLotId          String?
+  materialLot            MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  heatNumber             String?            // شماره ذوب فولاد مبارکه / مبدأ
+  thicknessMm            Decimal // ضخامت واقعی (میلیمتر)
+  widthMm                Decimal // عرض رول (میلیمتر)
+  originalWeightKg       Decimal // وزن اولیه باسکول
+  remainingWeightKg      Decimal // مانده وزن فیزیکی فعلی
+  warehouseId            String
+  warehouse              Warehouse          @relation(fields: [warehouseId], references: [id])
+  warehouseLocationId    String?
+  warehouseLocation      WarehouseLocation? @relation(fields: [warehouseLocationId], references: [id])
+  ownership              String             @default("SAPCO_SUPPLIER_OWNED") // COMPANY_OWNED, SAPCO_SUPPLIER_OWNED, CUSTOMER_SUPPLIED, THIRD_PARTY_OWNED
+  qualityStatus          String             @default("AVAILABLE") // AVAILABLE, QUARANTINE, QUALITY_BLOCKED, REJECTED
+  physicalStatus         String             @default("AVAILABLE") // AVAILABLE, ISSUED, PARTIALLY_ISSUED, CONSUMED, RETURNED, BLOCKED
+  parentCoilId           String?            // ارجاع به رول مادر در صورت برش یا تفکیک باقیمانده
+  parentCoil             PhysicalCoil?      @relation("CoilSplits", fields: [parentCoilId], references: [id])
+  childCoils             PhysicalCoil[]     @relation("CoilSplits")
+  supplierName           String?            @default("ساپکو (ایران‌خودرو)")
+  receiptDate            DateTime           @default(now())
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  contractAllocations    ContractCoilAllocation[]
+  issueReturnRecords     CoilIssueReturnRecord[]
+
+  @@index([coilPackNumber])
+  @@index([warehouseId, physicalStatus])
+  @@index([heatNumber])
+  @@map("physical_coils")
+}
+
+// تخصیص سهمیه‌ها به کلاف‌های فیزیکی (چند قرارداد روی یک کلاف یا یک قرارداد روی چند کلاف)
+model ContractCoilAllocation {
+  id                 String           @id @default(uuid())
+  contractId         String
+  contract           MaterialContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  coilId             String
+  coil               PhysicalCoil     @relation(fields: [coilId], references: [id], onDelete: Cascade)
+  allocatedWeightKg  Decimal // وزن تخصیص‌یافته از این رول به این قرارداد
+  ownership          String           @default("SAPCO_SUPPLIER_OWNED") // مالکیت حقوقی متریال
+  sourceDocumentId   String?          // شماره سند ورود یا تخصیص
+  notes              String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@unique([contractId, coilId])
+  @@index([contractId])
+  @@index([coilId])
+  @@map("contract_coil_allocations")
+}
+
+// ردگیری حواله خروج جزئی و بازگشت کلاف به انبار (Partial Coil Issue & Return)
+model CoilIssueReturnRecord {
+  id                   String        @id @default(uuid())
+  coilId               String
+  coil                 PhysicalCoil  @relation(fields: [coilId], references: [id], onDelete: Cascade)
+  manufacturingOrderId String?       // شماره دستور ساخت مصرف‌کننده
+  documentNumber       String        // شماره حواله خروج یا رسید برگشتی
+  issuedWeightKg       Decimal // وزن ارسالی به پای خط
+  consumedWeightKg     Decimal       @default(0) // وزن خالص مصرف‌شده
+  returnedWeightKg     Decimal       @default(0) // وزن برگشت داده شده به انبار
+  outstandingWeightKg  Decimal // مانده در گردش پای خط (تحویل - برگشت - مصرف)
+  varianceWeightKg     Decimal       @default(0) // پرت، ضایعات یا افت وزنی باسکول
+  status               String        @default("ISSUED") // ISSUED, PARTIALLY_RETURNED, FULLY_RETURNED, CONSUMED
+  issuedAt             DateTime      @default(now())
+  returnedAt           DateTime?
+  notes                String?
+
+  @@index([coilId, status])
+  @@map("coil_issue_return_records")
+}
+
+// پروفایل نیازمندی‌های ردیابی اقلام و متریال (Item Tracking Profiles)
+model ItemTrackingProfile {
+  id                     String       @id @default(uuid())
+  itemCategory           PartCategory
+  partId                 String?      @unique
+  part                   Part?        @relation(fields: [partId], references: [id], onDelete: Cascade)
+  requiresCoilPack       Boolean      @default(false)
+  requiresCoilId         Boolean      @default(false)
+  requiresHeatNumber     Boolean      @default(false)
+  requiresBatchLot       Boolean      @default(false)
+  requiresExpirationDate Boolean      @default(false)
+  requiresActualWeight   Boolean      @default(false)
+  trackOwnership         Boolean      @default(true)
+  trackContract          Boolean      @default(true)
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@map("item_tracking_profiles")
+}
+
+// تعاریف ویژگی‌های سفارشی اقلام (Custom Attribute Definitions)
+model ItemAttributeDefinition {
+  id                   String    @id @default(uuid())
+  key                  String    @unique // e.g. "COIL_PACK_NO", "RUBBER_HARDNESS_SHORE", "SCREW_COATING"
+  displayName          String    // نام فارسی ویژگی
+  dataType             String    // TEXT, NUMBER, DATE, SELECT, BOOLEAN
+  isRequired           Boolean   @default(false)
+  isSearchable         Boolean   @default(true)
+  isReportable         Boolean   @default(true)
+  applicableCategories Json  // رده‌های قابل انتساب
+  validationRules      String?   // قوانین اعتبارسنجی
+  createdAt            DateTime  @default(now())
+
+  @@map("item_attribute_definitions")
+}
+
+// مقادیر ویژگی‌های اختصاصی قطعات و اقلام (Item Attribute Values)
+model ItemAttributeValue {
+  id             String    @id @default(uuid())
+  partId         String
+  part           Part      @relation(fields: [partId], references: [id], onDelete: Cascade)
+  attributeKey   String
+  textValue      String?
+  numberValue    Decimal?
+  dateValue      DateTime?
+  booleanValue   Boolean?
+  createdAt      DateTime  @default(now())
+
+  @@unique([partId, attributeKey])
+  @@map("item_attribute_values")
+}
+
+// ردیف‌های تعهدات تحویل محصول و سهمیه ورودی قراردادها (Contract Commercial Lines)
+model ContractCommercialLine {
+  id                      String           @id @default(uuid())
+  contractId              String
+  contract                MaterialContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  lineType                String           // CUSTOMER_SUPPLIED_MATERIAL, FINISHED_PRODUCT_DELIVERY, SUPPLIER_PURCHASE
+  partId                  String?
+  partCode                String
+  partName                String
+  contractQty             Decimal          @default(0)
+  contractWeightKg        Decimal          @default(0)
+  deliveredOrReceivedQty  Decimal          @default(0)
+  deliveredOrReceivedKg   Decimal          @default(0)
+  remainingQty            Decimal          @default(0)
+  remainingKg             Decimal          @default(0)
+  unit                    String           @default("KG")
+  notes                   String?
+  createdAt               DateTime         @default(now())
+
+  @@index([contractId, lineType])
+  @@map("contract_commercial_lines")
+}
+
+// الگوهای ذخیره‌شده گزارش‌ساز انبار (Customizable Saved Report Configurations)
+model SavedReportConfig {
+  id              String    @id @default(uuid())
+  name            String    // عنوان گزارش ذخیره‌شده
+  reportType      String    // COILS_SUMMARY, COIL_PACK_INQUIRY, CONTRACT_STOCK, WAREHOUSE_STOCK, OWNERSHIP_REPORT
+  selectedColumns Json  // ستون‌های انتخابی کاربر
+  groupBy Json  // ابعاد گروه‌بندی
+  filters         Json      // فیلترهای اعمال‌شده
+  sortBy          String?
+  sortOrder       String?   @default("asc")
+  createdById     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("saved_report_configs")
+}
+
+// دسته‌های واردات داده به سیستم (Import Batches & Idempotency Controls)
+model ImportBatch {
+  id             String              @id @default(uuid())
+  batchNumber    String              @unique // e.g. IMP-1403-0001
+  templateType   String              // ITEM_MASTER, COILS, CONTRACTS, INVENTORY_RECEIPTS, INVENTORY_ISSUES, INVENTORY_ADJUSTMENTS
+  status         String              @default("VALIDATING") // VALIDATING, IMPORTED, REJECTED, PARTIALLY_IMPORTED
+  totalRows      Int                 @default(0)
+  validRows      Int                 @default(0)
+  errorRows      Int                 @default(0)
+  importedBy     String              @default("مدیر سیستم")
+  importedAt     DateTime            @default(now())
+
+  errors         ImportErrorRecord[]
+
+  @@map("import_batches")
+}
+
+// لاگ خطاهای ردیفی فایل‌های ورودی اکسل و CSV (Import Error Records)
+model ImportErrorRecord {
+  id           String      @id @default(uuid())
+  batchId      String
+  batch        ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  rowNumber    Int
+  fieldName    String?
+  errorMessage String
+  rowData      Json?
+  createdAt    DateTime    @default(now())
+
+  @@index([batchId, rowNumber])
+  @@map("import_error_records")
+}
+
+// =========================================================================
+// 6. ENTERPRISE ZERO-HARDCODING, AUDIT TRAIL, DYNAMIC BOM & WORK ORDERS
+// =========================================================================
+
+// دسته‌بندی‌های اطلاعات پایه برای جلوگیری از هاردکد (Master Categories)
+model MasterCategory {
+  id          String       @id @default(uuid())
+  code        String       @unique // e.g. "UNIT_OF_MEASURE", "DOWNTIME_REASON", "QUALITY_CLASS", "SCRAP_REASON", "ITEM_TYPE"
+  name        String       // نام فارسی دسته‌بندی پایه
+  description String?      // توضیحات کاربردی
+  isSystem    Boolean      @default(false)
+  isDeleted   Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  items       MasterItem[]
+
+  @@map("master_categories")
+}
+
+// اقلام اطلاعات پایه و مقادیر داینامیک سیستم (Master Items)
+model MasterItem {
+  id           String         @id @default(uuid())
+  categoryId   String
+  category     MasterCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  code         String         // کد مقدار (e.g. "KG", "PCS", "DIE_BREAKDOWN", "COIL_CHANGE")
+  value        String         // مقدار/عنوان فارسی (e.g. "کیلوگرم", "عدد", "شکستگی یا گیر قالب")
+  orderIndex   Int            @default(0)
+  isActive     Boolean        @default(true)
+  metadata     Json?          // داده‌های متغیر جانبی
+  isDeleted    Boolean        @default(false)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  downtimeLogs DowntimeLog[]
+
+  @@unique([categoryId, code])
+  @@index([categoryId, isActive])
+  @@map("master_items")
+}
+
+// لاگ ردیابی و ممیزی رویدادهای سازمانی (Enterprise Audit Trail & Change Log)
+model ActionLog {
+  id         String   @id @default(uuid())
+  entityName String   // نام جدول یا موجودیت (e.g. "Item", "WorkOrder", "BomComponent")
+  entityId   String   // شناسه رکورد تغییریافته
+  actionType String   // CREATE, UPDATE, DELETE, RELEASE, STATUS_CHANGE, HOLD, RECOVERY
+  oldValues  Json?    // مقادیر قبلی فیلدها قبل از تغییر
+  newValues  Json?    // مقادیر جدید فیلدها پس از تغییر
+  reason     String   // توضیح اجباری کاربر (دلیل تغییر، توقف، لغو یا صدور)
+  userId     String?  // شناسه کاربر ثبت‌کننده
+  ipAddress  String?  // آدرس IP کاربر
+  userAgent  String?  // مشخصات مرورگر یا کلاینت
+  isDeleted  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([entityName, entityId])
+  @@index([actionType, createdAt])
+  @@map("action_logs")
+}
+
+// مدیریت داینامیک ساختار منوهای درختی سیستم (Dynamic Self-Referencing Menu Tree)
+model Menu {
+  id             String   @id @default(uuid())
+  title          String   // عنوان منو در نوار ناوبری (مثلا "ماتریس برنامه‌ریزی تولید")
+  path           String?  // مسیر داینامیک URL (مثلا "/production/matrix")
+  icon           String?  // نام آیکون Lucide
+  orderIndex     Int      @default(0) // ترتیب نمایش
+  permissionCode String?  // کد مجوز امنیتی لازم برای مشاهده
+  isActive       Boolean  @default(true)
+  isDeleted      Boolean  @default(false)
+
+  parentId       String?
+  parent         Menu?    @relation("MenuHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children       Menu[]   @relation("MenuHierarchy")
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([parentId, orderIndex])
+  @@map("menus")
+}
+
+// کاتالوگ جامع قطعات و اقلام مهندسی تولید (Items: Finished Goods, WIP, Raw Materials)
+model Item {
+  id             String             @id @default(uuid())
+  code           String             @unique // کد فنی کالا (e.g. "PRT-ECU-BRK-01", "WIP-ECU-BASE-10", "RM-COIL-DC04")
+  name           String             // نام کامل کالا (e.g. "مجموعه براکت ضدسرقت رایانه موتور")
+  type           String             // نوع کالا: FINISHED_GOOD, SEMI_FINISHED, RAW_MATERIAL
+  carModel       String?            // مدل خودرو (پژو ۲۰۶، تارا، دنا پلاس)
+  unitId         String?            // شناسه واحد سنجش یا MasterItem
+  unit           String?            @default("PCS") // واحد شمارش
+  weightNetKg    Decimal?           // وزن خالص قطعه
+  weightGrossKg  Decimal?           // وزن ناخالص مصرفی
+  minSafetyStock Decimal            @default(0) // حداقل موجودی احتیاطی
+  isDeleted      Boolean            @default(false) // حذف منطقی Soft Delete
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  // روابط ساختار محصول (BOM)
+  bomParents     BomComponent[]     @relation("ParentItem")
+  bomChildren    BomComponent[]     @relation("ChildItem")
+
+  // توالی عملیات مهندسی روتینگ
+  routingOperations RoutingOperation[]
+
+  // دستور کارهای ساخت
+  workOrders     WorkOrder[]
+
+  @@index([type, isDeleted])
+  @@index([code])
+  @@map("items")
+}
+
+// ساختار شکست محصول و ارتباط والد و فرزندی چندسطحی (Multi-Level Bill of Materials)
+model BomComponent {
+  id           String   @id @default(uuid())
+  parentItemId String
+  parentItem   Item     @relation("ParentItem", fields: [parentItemId], references: [id], onDelete: Cascade)
+  childItemId  String
+  childItem    Item     @relation("ChildItem", fields: [childItemId], references: [id], onDelete: Restrict)
+  quantity     Decimal  @default(1) // ضریب مصرف قطعه فرزند به ازای یک واحد والد
+  version      String   @default("1.0") // نسخه مهندسی BOM
+  scrapFactor  Decimal  @default(0) // درصد ضایعات پیش‌بینی‌شده
+  notes        String?  // یادداشت مهندسی
+  isDeleted    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([parentItemId, childItemId, version])
+  @@index([parentItemId])
+  @@index([childItemId])
+  @@map("bom_components")
+}
+
+// مراکز کاری، ماشین‌آلات و ایستگاه‌های تولید (Work Centers & Production Lines)
+model WorkCenter {
+  id                 String             @id @default(uuid())
+  code               String             @unique // کد ایستگاه یا پرس (e.g. "PRS-800T-01", "WLD-SPOT-02")
+  name               String             // نام کامل ایستگاه (e.g. "پرس ۸۰۰ تن هیدرولیک کشش")
+  hallLocation       String?            // سالن استقرار (سالن پرس سنگین، سالن جوشکاری، سالن رنگ)
+  capacityPerHour    Decimal?           // ظرفیت اسمی بر ساعت
+  status             String             @default("ACTIVE") // ACTIVE, MAINTENANCE, BREAKDOWN, IDLE
+  isDeleted          Boolean            @default(false)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  routingOperations  RoutingOperation[]
+  downtimeLogs       DowntimeLog[]
+
+  @@index([status, isDeleted])
+  @@map("work_centers")
+}
+
+// توالی عملیات ساخت و روتینگ قطعه با قفل تقدم و تاخر (Routing Operations & Precedence Locking)
+model RoutingOperation {
+  id              String             @id @default(uuid())
+  itemId          String
+  item            Item               @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  opNumber        Int                // شماره گام (10, 20, 30, 40...)
+  opCode          String             // کد عملیات (OP10, OP20)
+  opName          String             // شرح فرآیند (برش رول، بلنکینگ، کشش، خم، پانچ، پرس‌جوش)
+  workCenterId    String
+  workCenter      WorkCenter         @relation(fields: [workCenterId], references: [id], onDelete: Restrict)
+  requiresOpId    String?            // شناسه عملیات پیش‌نیاز جهت قفل تقدم جریان کار
+  requiresOp      RoutingOperation?  @relation("OperationPrecedence", fields: [requiresOpId], references: [id], onDelete: SetNull)
+  dependentOps    RoutingOperation[] @relation("OperationPrecedence")
+  setupTimeMin    Int                @default(0) // زمان ستاپ قالب (دقیقه)
+  cycleTimeSec    Int                @default(0) // زمان چرخه هر ضرب (ثانیه)
+  isDeleted       Boolean            @default(false)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  productionLogs  ProductionLog[]
+
+  @@unique([itemId, opNumber])
+  @@index([itemId])
+  @@index([workCenterId])
+  @@map("routing_operations")
+}
+
+// دستور کارهای کارگاهی تولید (Work Orders / Manufacturing Orders)
+model WorkOrder {
+  id                String          @id @default(uuid())
+  orderNumber       String          @unique // شماره یکتای دستور کار (e.g. "WO-1404-1001")
+  itemId            String
+  item              Item            @relation(fields: [itemId], references: [id], onDelete: Restrict)
+  plannedQuantity   Decimal         // تیراژ برنامه‌ریزی‌شده
+  completedQuantity Decimal         @default(0) // تیراژ سالم تولیدشده
+  scrapQuantity     Decimal         @default(0) // تیراژ ضایعات
+  status            String          @default("DRAFT") // DRAFT, RELEASED, IN_PROGRESS, COMPLETED, CANCELLED
+  startDate         DateTime        // تاریخ شروع برنامه‌ریزی‌شده
+  endDate           DateTime        // تاریخ پایان برنامه‌ریزی‌شده
+  actualStartDate   DateTime?       // تاریخ شروع واقعی
+  actualEndDate     DateTime?       // تاریخ پایان واقعی
+  notes             String?
+  isDeleted         Boolean         @default(false)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  productionLogs    ProductionLog[]
+
+  @@index([itemId, status])
+  @@index([startDate, endDate])
+  @@map("work_orders")
+}
+
+// ثبت کارکرد تولید، تیراژ سالم و ضایعات پای خط (Production & Scrap Floor Logs)
+model ProductionLog {
+  id            String           @id @default(uuid())
+  workOrderId   String
+  workOrder     WorkOrder        @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  operationId   String
+  operation     RoutingOperation @relation(fields: [operationId], references: [id], onDelete: Restrict)
+  goodQuantity  Decimal          @default(0) // تولید سالم تایید شده
+  scrapQuantity Decimal          @default(0) // ضایعات ثبت‌شده
+  operatorId    String?          // شناسه یا کد پرسنلی اپراتور
+  isApproved    Boolean          @default(false) // تاییدیه سرپرست شیفت/کیفیت
+  approvedBy    String?          // نام یا شناسه تاییدکننده
+  approvedAt    DateTime?        // زمان تایید
+  logDate       DateTime         @default(now()) // تاریخ ثبت کارکرد
+  shiftName     String?          // شیفت کاری (صبح، عصر، شب)
+  notes         String?
+  isDeleted     Boolean          @default(false)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([workOrderId, operationId])
+  @@index([logDate])
+  @@map("production_logs")
+}
+
+// ثبت وقایع و لاگ توقفات ماشین‌آلات و خطوط تولید (Work Center Downtime Logs)
+model DowntimeLog {
+  id               String      @id @default(uuid())
+  workCenterId     String
+  workCenter       WorkCenter  @relation(fields: [workCenterId], references: [id], onDelete: Restrict)
+  downtimeReasonId String
+  downtimeReason   MasterItem  @relation(fields: [downtimeReasonId], references: [id], onDelete: Restrict)
+  startTime        DateTime    // زمان شروع توقف
+  endTime          DateTime?   // زمان خاتمه توقف
+  durationMinutes  Int         @default(0) // مدت زمان توقف به دقیقه
+  operatorNotes    String?     // گزارش فنی یا تشریح علت اپراتور
+  isPlanned        Boolean     @default(false) // توقف برنامه‌ریزی‌شده یا اضطراری
+  isDeleted        Boolean     @default(false)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([workCenterId, startTime])
+  @@index([downtimeReasonId])
+  @@map("downtime_logs")
+}
+

@@ -1,0 +1,372 @@
+{
+  "entities": {
+    "Part": {
+      "title": "Part",
+      "description": "Automotive sheet metal parts, raw material coils/sheets, and sub-assemblies",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Unique part number e.g. IKCO-PRT-0206",
+          "minLength": 3,
+          "maxLength": 64
+        },
+        "name": {
+          "type": "string",
+          "description": "Persian title of the automotive sheet metal part",
+          "minLength": 3,
+          "maxLength": 150
+        },
+        "category": {
+          "type": "string",
+          "description": "Classification: RAW_MATERIAL, WIP_PART, FINISHED_GOOD",
+          "enum": ["RAW_MATERIAL", "WIP_PART", "FINISHED_GOOD"]
+        },
+        "unit": {
+          "type": "string",
+          "description": "Base unit of measure: KG for raw steel, PCS for parts",
+          "enum": ["KG", "PCS"]
+        },
+        "weightPerUnitKg": {
+          "type": "number",
+          "description": "Theoretical or measured weight in kilograms per unit"
+        },
+        "sapcoCode": {
+          "type": "string",
+          "description": "OEM or SAPCO supplier catalog reference code",
+          "maxLength": 64
+        },
+        "carModel": {
+          "type": "string",
+          "description": "Vehicle family e.g. Peugeot 206, Tara, Dena Plus, Shahin, Quick",
+          "maxLength": 64
+        },
+        "thicknessMm": {
+          "type": "number",
+          "description": "Sheet steel thickness in millimeters"
+        },
+        "materialGrade": {
+          "type": "string",
+          "description": "Steel standard grade e.g. ST12, ST14, DX51D, ST37",
+          "maxLength": 32
+        },
+        "minStock": {
+          "type": "number",
+          "description": "Minimum safety buffer quantity"
+        },
+        "maxStock": {
+          "type": "number",
+          "description": "Maximum factory storage quota"
+        },
+        "isDemo": {
+          "type": "boolean",
+          "description": "Flag to cleanly isolate sample seed data from actual factory data"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["code", "name", "category", "unit", "weightPerUnitKg"]
+    },
+    "Machine": {
+      "title": "Machine",
+      "description": "Heavy presses, shearers, benders, spot welders, and paint booths",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Machine asset code e.g. PRS-800-01",
+          "minLength": 3,
+          "maxLength": 32
+        },
+        "name": {
+          "type": "string",
+          "description": "Machine description in Persian",
+          "minLength": 3,
+          "maxLength": 100
+        },
+        "processType": {
+          "type": "string",
+          "description": "Primary manufacturing operation capability",
+          "enum": ["SHEARING", "BLANKING", "BENDING", "PUNCH_FORM", "SPOT_WELD", "CO2_WELD", "PAINT", "ASSEMBLY"]
+        },
+        "tonnage": {
+          "type": "number",
+          "description": "Mechanical or hydraulic nominal press tonnage"
+        },
+        "location": {
+          "type": "string",
+          "description": "Factory bay or hall location e.g. سالن پرس سنگین",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "description": "Operational readiness: ACTIVE, MAINTENANCE, IDLE",
+          "enum": ["ACTIVE", "MAINTENANCE", "IDLE"]
+        },
+        "operatorName": {
+          "type": "string",
+          "description": "Default line operator or technician",
+          "maxLength": 64
+        },
+        "isDemo": {
+          "type": "boolean",
+          "description": "Sample data indicator"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp"
+        }
+      },
+      "required": ["code", "name", "processType", "status"]
+    },
+    "Routing": {
+      "title": "Routing",
+      "description": "Sequential manufacturing routing and operations definition per part",
+      "type": "object",
+      "properties": {
+        "partId": {
+          "type": "string",
+          "description": "Target part document ID",
+          "maxLength": 128
+        },
+        "partCode": {
+          "type": "string",
+          "description": "Target part catalog code",
+          "maxLength": 64
+        },
+        "partName": {
+          "type": "string",
+          "description": "Target part Persian title",
+          "maxLength": 150
+        },
+        "version": {
+          "type": "string",
+          "description": "Engineering routing revision e.g. V1.2",
+          "maxLength": 16
+        },
+        "operations": {
+          "type": "string",
+          "description": "JSON string of sequential operations with machine, cycle time, scrap norm"
+        },
+        "isDemo": {
+          "type": "boolean",
+          "description": "Sample data indicator"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Revision timestamp"
+        }
+      },
+      "required": ["partId", "partCode", "operations"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Immutable ledger voucher for all inventory, production, scrap, and WIP movements",
+      "type": "object",
+      "properties": {
+        "voucherNumber": {
+          "type": "string",
+          "description": "Sequential formatted voucher ID e.g. VCH-1405-00129",
+          "minLength": 6,
+          "maxLength": 64
+        },
+        "voucherType": {
+          "type": "string",
+          "description": "Audit voucher category",
+          "enum": [
+            "OPENING_BALANCE",
+            "RECEIPT",
+            "ISSUE",
+            "PRODUCTION_OUTPUT",
+            "SCRAP",
+            "WIP_TRANSFER_DISPATCH",
+            "WIP_TRANSFER_RECEIPT",
+            "ADJUSTMENT"
+          ]
+        },
+        "partId": {
+          "type": "string",
+          "description": "Affected part identifier",
+          "maxLength": 128
+        },
+        "partCode": {
+          "type": "string",
+          "description": "Part code",
+          "maxLength": 64
+        },
+        "partName": {
+          "type": "string",
+          "description": "Part name",
+          "maxLength": 150
+        },
+        "stageId": {
+          "type": "string",
+          "description": "Stage or warehouse location code",
+          "maxLength": 64
+        },
+        "stageName": {
+          "type": "string",
+          "description": "Stage Persian title e.g. انبار مواد اولیه ساپکو, ایستگاه بلنکینگ, انبار محصول نهایی",
+          "maxLength": 100
+        },
+        "targetStageId": {
+          "type": "string",
+          "description": "Target stage for transfers",
+          "maxLength": 64
+        },
+        "targetStageName": {
+          "type": "string",
+          "description": "Target stage Persian title",
+          "maxLength": 100
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Transacted quantity in primary unit (positive or negative based on voucherType)"
+        },
+        "unit": {
+          "type": "string",
+          "description": "UOM: KG or PCS",
+          "enum": ["KG", "PCS"]
+        },
+        "quantityKg": {
+          "type": "number",
+          "description": "Equivalent weight in kilograms for steel tracking"
+        },
+        "referenceDoc": {
+          "type": "string",
+          "description": "Bill of lading, SAPCO invoice, or production order number",
+          "maxLength": 64
+        },
+        "operatorName": {
+          "type": "string",
+          "description": "Machine operator or warehouse registrar",
+          "maxLength": 64
+        },
+        "machineId": {
+          "type": "string",
+          "description": "Assigned production equipment",
+          "maxLength": 64
+        },
+        "shift": {
+          "type": "string",
+          "description": "Factory work shift: Morning, Evening, Night",
+          "maxLength": 32
+        },
+        "scrapReason": {
+          "type": "string",
+          "description": "Root cause failure: چروکیدگی, پارگی کشش, دفرمگی, ترک پانچ, پاشش جوش",
+          "maxLength": 100
+        },
+        "status": {
+          "type": "string",
+          "description": "Voucher state: CONFIRMED, REVERSED",
+          "enum": ["CONFIRMED", "REVERSED"]
+        },
+        "reversalOfVoucherId": {
+          "type": "string",
+          "description": "Origin voucher ID if this is an adjustment or reversal document",
+          "maxLength": 128
+        },
+        "notes": {
+          "type": "string",
+          "description": "Auditor or supervisor remarks",
+          "maxLength": 500
+        },
+        "createdByUid": {
+          "type": "string",
+          "description": "Auth UID of the user who signed the document",
+          "maxLength": 128
+        },
+        "createdByName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 100
+        },
+        "isDemo": {
+          "type": "boolean",
+          "description": "Sample data isolation flag"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable ledger timestamp"
+        }
+      },
+      "required": ["voucherNumber", "voucherType", "partId", "partCode", "stageId", "quantity", "unit", "status"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Factory user profile and role-based permissions",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address",
+          "maxLength": 128
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full name in Persian",
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "description": "Role: ADMIN, PRODUCTION_MANAGER, WAREHOUSE_KEEPER, QC_INSPECTOR, LINE_SUPERVISOR",
+          "enum": ["ADMIN", "PRODUCTION_MANAGER", "WAREHOUSE_KEEPER", "QC_INSPECTOR", "LINE_SUPERVISOR"]
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Account activation status"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "active"]
+    }
+  },
+  "firestore": {
+    "/parts/{partId}": {
+      "schema": { "$ref": "#/entities/Part" },
+      "description": "Automotive sheet metal parts catalog"
+    },
+    "/machines/{machineId}": {
+      "schema": { "$ref": "#/entities/Machine" },
+      "description": "Factory machines, presses, welding stations, and paint lines"
+    },
+    "/routings/{routingId}": {
+      "schema": { "$ref": "#/entities/Routing" },
+      "description": "Production routing definitions with stage operations"
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Immutable warehouse & WIP inventory transaction ledger vouchers"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User accounts and role-based access profiles"
+    }
+  }
+}

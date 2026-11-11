@@ -1,0 +1,159 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper Functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'vaheme64@gmail.com' ||
+        (request.auth.token.keys().hasAll(['email']) && request.auth.token.email == 'vaheme64@gmail.com')
+      );
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        isBootstrappedAdmin() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Entity Validation: Part
+    function isValidPart(data) {
+      return data.keys().hasAll(['code', 'name', 'category', 'unit', 'weightPerUnitKg']) &&
+             data.code is string && data.code.size() >= 2 && data.code.size() <= 64 &&
+             data.name is string && data.name.size() >= 2 && data.name.size() <= 150 &&
+             data.category in ['RAW_MATERIAL', 'WIP_PART', 'FINISHED_GOOD'] &&
+             data.unit in ['KG', 'PCS'] &&
+             data.weightPerUnitKg is number && data.weightPerUnitKg > 0;
+    }
+
+    // Entity Validation: Machine
+    function isValidMachine(data) {
+      return data.keys().hasAll(['code', 'name', 'processType', 'status']) &&
+             data.code is string && data.code.size() >= 2 && data.code.size() <= 32 &&
+             data.name is string && data.name.size() >= 2 && data.name.size() <= 100 &&
+             data.processType in ['SHEARING', 'BLANKING', 'BENDING', 'PUNCH_FORM', 'SPOT_WELD', 'CO2_WELD', 'PAINT', 'ASSEMBLY'] &&
+             data.status in ['ACTIVE', 'MAINTENANCE', 'IDLE'];
+    }
+
+    // Entity Validation: Routing
+    function isValidRouting(data) {
+      return data.keys().hasAll(['partId', 'partCode', 'operations']) &&
+             data.partId is string && data.partId.size() <= 128 &&
+             data.partCode is string && data.partCode.size() <= 64 &&
+             data.operations is string && data.operations.size() <= 50000;
+    }
+
+    // Entity Validation: Transaction (Ledger Entry)
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['voucherNumber', 'voucherType', 'partId', 'partCode', 'stageId', 'quantity', 'unit', 'status']) &&
+             data.voucherNumber is string && data.voucherNumber.size() >= 4 && data.voucherNumber.size() <= 64 &&
+             data.voucherType in ['OPENING_BALANCE', 'RECEIPT', 'ISSUE', 'PRODUCTION_OUTPUT', 'SCRAP', 'WIP_TRANSFER_DISPATCH', 'WIP_TRANSFER_RECEIPT', 'ADJUSTMENT'] &&
+             data.partId is string && data.partId.size() <= 128 &&
+             data.partCode is string && data.partCode.size() <= 64 &&
+             data.stageId is string && data.stageId.size() <= 64 &&
+             data.quantity is number &&
+             data.unit in ['KG', 'PCS'] &&
+             data.status in ['CONFIRMED', 'REVERSED'];
+    }
+
+    // Entity Validation: UserProfile
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'active']) &&
+             data.uid is string && data.uid.size() <= 128 &&
+             data.email is string && data.email.size() <= 128 &&
+             data.displayName is string && data.displayName.size() <= 100 &&
+             data.role in ['ADMIN', 'PRODUCTION_MANAGER', 'WAREHOUSE_KEEPER', 'QC_INSPECTOR', 'LINE_SUPERVISOR'] &&
+             data.active is bool;
+    }
+
+    // Collection: Parts
+    match /parts/{partId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(partId) && isValidPart(incoming());
+      allow update: if isSignedIn() && isValidId(partId) && isValidPart(incoming()) && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'weightPerUnitKg', 'thicknessMm', 'materialGrade', 'minStock', 'maxStock', 'carModel', 'sapcoCode', 'updatedAt', 'isDemo'])
+      );
+      allow delete: if isSignedIn() && isValidId(partId) && (isAdmin() || resource.data.isDemo == true);
+    }
+
+    // Collection: Machines
+    match /machines/{machineId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(machineId) && isValidMachine(incoming());
+      allow update: if isSignedIn() && isValidId(machineId) && isValidMachine(incoming()) && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'status', 'tonnage', 'location', 'operatorName', 'isDemo'])
+      );
+      allow delete: if isSignedIn() && isValidId(machineId) && (isAdmin() || resource.data.isDemo == true);
+    }
+
+    // Collection: Routings
+    match /routings/{routingId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(routingId) && isValidRouting(incoming());
+      allow update: if isSignedIn() && isValidId(routingId) && isValidRouting(incoming());
+      allow delete: if isSignedIn() && isValidId(routingId) && (isAdmin() || resource.data.isDemo == true);
+    }
+
+    // Collection: Transactions (Audit Ledger)
+    match /transactions/{transactionId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(transactionId) && isValidTransaction(incoming()) && (
+        incoming().createdByUid == request.auth.uid || isAdmin()
+      );
+      // Transactions are immutable audit records! Modifications are restricted strictly to reversal status flags
+      allow update: if isSignedIn() && isValidId(transactionId) && (
+        isAdmin() ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reversalOfVoucherId', 'notes'])
+      );
+      // Strictly forbid physical deletion of transactions to maintain audit ledger
+      // Allow only deletion of sample/demo records if isDemo == true
+      allow delete: if isSignedIn() && isValidId(transactionId) && (
+        resource.data.isDemo == true && isAdmin()
+      );
+    }
+
+    // Collection: Users
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) && (
+        request.auth.uid == userId || isAdmin()
+      );
+      allow update: if isSignedIn() && isValidId(userId) && isValidUserProfile(incoming()) && (
+        isAdmin() ||
+        (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['displayName']))
+      );
+      allow delete: if isSignedIn() && isAdmin();
+    }
+
+    // Admin bootstrap collection
+    match /admins/{adminId} {
+      allow read, write: if isBootstrappedAdmin();
+    }
+  }
+}
