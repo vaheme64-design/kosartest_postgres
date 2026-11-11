@@ -14,9 +14,10 @@
  *   Document Sequences, System Settings.
  */
 
-import { PrismaClient, PartCategory, ProcessType, MachineType, MachineStatus, DieType, DieStatus, WarehouseType, DocumentStatus, PostingStatus, InventoryDocType, DocReferenceType, TransactionType, OrderLineStatus, PlanStatus, PlanLineStatus, MOStatus, ProductionOpStatus, ScrapReason, TransferStatus, LotStatus, ContractStatus, ContractTxType, RouteStatus } from '@prisma/client';
+import { PartCategory, ProcessType, MachineType, MachineStatus, DieType, DieStatus, WarehouseType, DocumentStatus, PostingStatus, InventoryDocType, DocReferenceType, TransactionType, OrderLineStatus, PlanStatus, PlanLineStatus, MOStatus, ProductionOpStatus, ScrapReason, TransferStatus, LotStatus, ContractStatus, ContractTxType, RouteStatus } from '@prisma/client';
+import { getPrismaClient } from '../src/server/db/prisma';
 
-const prisma = new PrismaClient();
+const prisma = getPrismaClient();
 
 async function main() {
   console.log('🌱 Starting KPIMS Relational Database Seed...');

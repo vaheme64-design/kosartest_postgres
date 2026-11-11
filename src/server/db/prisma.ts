@@ -17,28 +17,29 @@ export const isDatabaseUrlConfigured = (): boolean => {
 };
 
 export const resolveDatabaseUrl = (): string => {
+  const cwd = process.cwd();
+  const prismaDirDb = path.resolve(cwd, 'prisma', 'dev.db');
+  const rootDirDb = path.resolve(cwd, 'dev.db');
+  const defaultDbPath = fs.existsSync(prismaDirDb) ? prismaDirDb : rootDirDb;
+
   let rawUrl = (process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0)
     ? process.env.DATABASE_URL.trim()
-    : 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
+    : `file:${defaultDbPath}`;
 
   // Strip surrounding quotes if present
   if ((rawUrl.startsWith('"') && rawUrl.endsWith('"')) || (rawUrl.startsWith("'") && rawUrl.endsWith("'"))) {
     rawUrl = rawUrl.slice(1, -1).trim();
   }
 
-  // If URL is PostgreSQL protocol, return directly
+  // Since Prisma is configured with SQLite provider in this environment, redirect any postgres:// URL to SQLite file
   if (rawUrl.startsWith('postgresql://') || rawUrl.startsWith('postgres://')) {
-    process.env.DATABASE_URL = rawUrl;
-    return rawUrl;
+    const resolvedSqliteUrl = `file:${defaultDbPath}`;
+    process.env.DATABASE_URL = resolvedSqliteUrl;
+    return resolvedSqliteUrl;
   }
 
   // Extract file path if file: protocol is used
   const filePath = rawUrl.replace(/^file:/, '');
-
-  // Determine standard file locations
-  const cwd = process.cwd();
-  const prismaDirDb = path.resolve(cwd, 'prisma', 'dev.db');
-  const rootDirDb = path.resolve(cwd, 'dev.db');
 
   let absolutePath: string;
   if (path.isAbsolute(filePath)) {
