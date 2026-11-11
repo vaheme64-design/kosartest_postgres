@@ -36,6 +36,12 @@ import {
   BookOpen,
   Disc,
   AlertTriangle,
+  ListTree,
+  FolderTree,
+  GitBranch,
+  Settings2,
+  Warehouse,
+  Car,
 } from 'lucide-react';
 import { UserRoleProfile } from '../types/inventory';
 import {
@@ -44,6 +50,7 @@ import {
   COLOR_THEMES,
 } from '../types/theme';
 import { InventorySubTab } from './inventory/InventoryModuleView';
+import { MasterSubSection } from './MasterDataHubView';
 
 const DYNAMIC_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   LayoutDashboard,
@@ -101,6 +108,7 @@ export interface SubModuleNavParams {
   productionModuleTab?: ProductionWorkbenchSubTab;
   planningSubTab?: PlanningSubTabKey;
   machineSubTab?: MachineSubTabKey;
+  masterSubSection?: MasterSubSection;
 }
 
 export interface SubModuleLink {
@@ -122,6 +130,7 @@ interface SidebarProps {
   activeProductionModuleTab?: ProductionWorkbenchSubTab;
   activePlanningSubTab?: PlanningSubTabKey;
   activeMachineSubTab?: MachineSubTabKey;
+  activeMasterSubSection?: MasterSubSection;
   layoutTemplate: ErpLayoutTemplate;
   colorTheme: ErpColorTheme;
   onTabChange: (tab: TabKey, navParams?: SubModuleNavParams | InventorySubTab) => void;
@@ -163,6 +172,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeProductionModuleTab,
   activePlanningSubTab,
   activeMachineSubTab,
+  activeMasterSubSection,
   layoutTemplate,
   colorTheme,
   onTabChange,
@@ -388,8 +398,99 @@ export const Sidebar: React.FC<SidebarProps> = ({
     []
   );
 
+  // 5. Master Data Sub-Modules (اطلاعات پایه و ساختار محصول مهندسی)
+  const masterDataSubModules: SubModuleLink[] = useMemo(
+    () => [
+      {
+        id: 'sub-mst-parts',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'PARTS' },
+        label: 'کاتالوگ قطعات و اقلام',
+        keywords: 'قطعه کالا محصول پارت نامبر کد فنی قطعات نیمه ساخته',
+        icon: Boxes,
+      },
+      {
+        id: 'sub-mst-bom',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'BOM' },
+        label: 'ساختار محصول و BOM پیشرفته',
+        keywords: 'درخت محصول چندسطحی bom انفجار مواد ضریب مصرف قطعات فرعی',
+        icon: ListTree,
+      },
+      {
+        id: 'sub-mst-tree',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'PRODUCT_STRUCTURE' },
+        label: 'نمودار درختی کالا',
+        keywords: 'گراف درختی ساختار محصول سلسله مراتب اجزا',
+        icon: FolderTree,
+      },
+      {
+        id: 'sub-mst-routings',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'ROUTINGS' },
+        label: 'مسیرهای ساخت و روتینگ',
+        keywords: 'مسیر ساخت توالی عملیات فرآیند تولید کارت روتینگ',
+        icon: GitBranch,
+      },
+      {
+        id: 'sub-mst-operations',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'OPERATIONS' },
+        label: 'عملیات‌های استاندارد تولید',
+        keywords: 'عملیات استاندارد ایستگاه زمان چرخه زمان ستاپ smed',
+        icon: Settings2,
+      },
+      {
+        id: 'sub-mst-machines',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'MACHINES' },
+        label: 'پرس‌ها و ماشین‌آلات',
+        keywords: 'پرس هیدرولیک ضربه ای تناژ میز پرس گیوتین خط برش دستگاه',
+        icon: Cpu,
+      },
+      {
+        id: 'sub-mst-dies',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'DIES' },
+        label: 'قالب‌ها و سنبه/ماتریس',
+        keywords: 'قالب کشش برش خم سنبه ماتریس سازگاری با پرس',
+        icon: Wrench,
+      },
+      {
+        id: 'sub-mst-halls',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'FACTORY_HALLS' },
+        label: 'سالن‌های استقرار و خطوط',
+        keywords: 'سالن تولید سالن پرس جوشکاری خط رنگ کاتافورز انبار مرکزی',
+        icon: Building,
+      },
+      {
+        id: 'sub-mst-warehouses',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'WAREHOUSES' },
+        label: 'انبارها و موقعیت‌ها',
+        keywords: 'انبار مواد قطعات ضایعات قفسه انبارداری',
+        icon: Warehouse,
+      },
+      {
+        id: 'sub-mst-carmodels',
+        tab: 'master_data',
+        navParams: { masterSubSection: 'CAR_MODELS' },
+        label: 'مدل‌های خودرو ساپکو',
+        keywords: 'مدل خودرو ایران خودرو سایپا پژو ۲۰۶ تارا دنا شاهین کوییک',
+        icon: Car,
+      },
+    ],
+    []
+  );
+
   const isSubItemActive = (sub: SubModuleLink) => {
     if (activeTab !== sub.tab) return false;
+    if (sub.tab === 'master_data') {
+      const target = sub.navParams?.masterSubSection || 'PARTS';
+      return activeMasterSubSection === target;
+    }
     if (sub.tab === 'inventory') {
       const target = sub.navParams?.inventorySubTab || sub.inventorySubTab;
       return activeInventorySubTab === target;
@@ -434,12 +535,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       {
         id: 'flat-master',
         tab: 'master_data' as TabKey,
+        defaultNavParams: { masterSubSection: 'PARTS' },
         label: 'اطلاعات پایه و BOM',
         flatLabel: 'اطلاعات پایه و BOM',
         keywords: 'اطلاعات پایه کالا قطعه ضخامت جنس ورق مسیر ساخت فرمول bom حداقل موجودی شیفت انبار مشتری ساختار درختی محصول',
         icon: ScrollText,
         count: toPersianDigits(partsCount),
         roles: ['ADMIN', 'PRODUCTION_MANAGER', 'WAREHOUSE_KEEPER'] as UserRoleProfile['role'][],
+        subModules: masterDataSubModules,
       },
       {
         id: 'flat-inventory',
@@ -522,6 +625,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       productionSubModules,
       planningSubModules,
       machineSubModules,
+      masterDataSubModules,
     ]
   );
 

@@ -30,6 +30,8 @@ import {
   Car,
   FolderTree,
   Copy,
+  Cpu,
+  Sparkles,
 } from 'lucide-react';
 import {
   Part,
@@ -66,6 +68,7 @@ export type MasterSubSection =
   | 'PARALLEL_FLOWS'
   | 'ROUTINGS'
   | 'OPERATIONS'
+  | 'FACTORY_HALLS'
   | 'WAREHOUSES'
   | 'UNITS'
   | 'SHIFTS'
@@ -197,6 +200,8 @@ interface MasterDataHubViewProps {
   operators: Operator[];
   halls: FactoryHall[];
   coils: SapcoCoilReceipt[];
+  initialSection?: MasterSubSection;
+  onSectionChange?: (sec: MasterSubSection) => void;
   onSavePart: (part: Partial<Part>) => Promise<{ success: boolean; message?: string; error?: string }>;
   onSaveRouting: (routing: Partial<Routing>) => Promise<{ success: boolean; message?: string; error?: string }>;
   onDeleteRouting: (id: string) => Promise<{ success: boolean; message?: string; error?: string }>;
@@ -205,6 +210,7 @@ interface MasterDataHubViewProps {
   onDeleteDie: (id: string) => Promise<{ success: boolean; message?: string; error?: string }>;
   onSaveOperator: (op: Partial<Operator>) => Promise<{ success: boolean; message?: string; error?: string }>;
   onSaveHall: (hall: Partial<FactoryHall>) => Promise<{ success: boolean; message?: string; error?: string }>;
+  onDeleteHall?: (id: string) => Promise<{ success: boolean; message?: string; error?: string }>;
   onDirectProduce: (partId: string) => void;
   onRefresh: () => Promise<void>;
   onNavigateToInventoryCoils?: () => void;
@@ -214,6 +220,8 @@ interface MasterDataHubViewProps {
 export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
   layoutTemplate,
   colorTheme,
+  initialSection,
+  onSectionChange,
   parts,
   routings,
   machines,
@@ -229,6 +237,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
   onDeleteDie,
   onSaveOperator,
   onSaveHall,
+  onDeleteHall,
   onDirectProduce,
   onRefresh,
   onNavigateToInventoryCoils,
@@ -243,6 +252,25 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
       : 'SEGMENTED_TABS'
   );
 
+  const [activeSection, setActiveSection] = useState<MasterSubSection>(
+    initialSection || (layoutTemplate === 'TABBED_WORKBENCH' ? 'RAW_MATERIALS' : 'HUB')
+  );
+
+  // Sync section when initialSection prop changes from external navigation or URL
+  useEffect(() => {
+    if (initialSection) {
+      setActiveSection(initialSection);
+      if (initialSection !== 'HUB') {
+        setViewMode('SEGMENTED_TABS');
+      }
+    }
+  }, [initialSection]);
+
+  const handleSelectSection = (sec: MasterSubSection) => {
+    setActiveSection(sec);
+    if (onSectionChange) onSectionChange(sec);
+  };
+
   // Sync automatically when user switches global template
   useEffect(() => {
     if (layoutTemplate === 'HUB_WORKSPACE') {
@@ -253,10 +281,6 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
       setActiveSection(prev => (prev === 'HUB' ? 'RAW_MATERIALS' : prev));
     }
   }, [layoutTemplate]);
-
-  const [activeSection, setActiveSection] = useState<MasterSubSection>(
-    layoutTemplate === 'TABBED_WORKBENCH' ? 'RAW_MATERIALS' : 'HUB'
-  );
 
   useEffect(() => {
     const handleContextual = (e: Event) => {
@@ -354,6 +378,36 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     active: true,
   });
 
+  // Factory Halls (سالن‌های تولید و استقرار) CRUD States
+  const [hallsList, setHallsList] = useState<FactoryHall[]>(halls || []);
+  const [hallSearch, setHallSearch] = useState('');
+  const [isHallModalOpen, setIsHallModalOpen] = useState(false);
+  const [editingHall, setEditingHall] = useState<FactoryHall | null>(null);
+  const [hallForm, setHallForm] = useState<Partial<FactoryHall>>({
+    code: '',
+    name: '',
+    type: 'STAMPING',
+    supervisorName: '',
+    capacityDesc: '',
+    description: '',
+    active: true,
+  });
+
+  // Dynamic Process Categories (دسته‌های فرآیندی پویا)
+  const [processCategories, setProcessCategories] = useState<Array<{ code: string; name: string; category?: string }>>([
+    { code: 'SHEARING', name: 'برشکاری و نواربری (Shearing)' },
+    { code: 'STAMPING', name: 'پرسکاری و کشش (Stamping / Drawing)' },
+    { code: 'BENDING', name: 'خم‌کاری و لبه‌زنی (Bending / Flanging)' },
+    { code: 'WELDING', name: 'جوش مقاومتی و CO2 (Welding)' },
+    { code: 'SURFACE_FINISH', name: 'رنگ و پوشش کاتافورز (ED Paint)' },
+    { code: 'QC_PACK', name: 'کنترل کیفی و بسته‌بندی (QC & Pack)' },
+    { code: 'ASSEMBLY', name: 'مونتاژ و هِمینگ مجموعه‌ها (Assembly)' },
+  ]);
+  const [isProcessCategoryModalOpen, setIsProcessCategoryModalOpen] = useState(false);
+  const [newCategoryCode, setNewCategoryCode] = useState('');
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [isWorkstationHelpOpen, setIsWorkstationHelpOpen] = useState(false);
+
   // Operations CRUD States
   const [operationsList, setOperationsList] = useState<OperationDefinition[]>([]);
   const [operationSearch, setOperationSearch] = useState('');
@@ -371,15 +425,24 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     active: true,
   });
 
+  // Sync hallsList with props if updated
+  useEffect(() => {
+    if (halls && halls.length > 0) {
+      setHallsList(halls);
+    }
+  }, [halls]);
+
   const loadDynamicMasterData = async () => {
     try {
-      const [wRes, uRes, cRes, sRes, cmRes, opRes] = await Promise.all([
+      const [wRes, uRes, cRes, sRes, cmRes, opRes, procRes, hallRes] = await Promise.all([
         fetch('/api/warehouses').then(r => r.json()).catch(() => ({ success: false })),
         fetch('/api/units').then(r => r.json()).catch(() => ({ success: false })),
         fetch('/api/customers').then(r => r.json()).catch(() => ({ success: false })),
         fetch('/api/shifts').then(r => r.json()).catch(() => ({ success: false })),
         fetch('/api/car-models').then(r => r.json()).catch(() => ({ success: false })),
         fetch('/api/operations').then(r => r.json()).catch(() => ({ success: false })),
+        fetch('/api/processes').then(r => r.json()).catch(() => ({ success: false })),
+        fetch('/api/halls').then(r => r.json()).catch(() => ({ success: false })),
       ]);
       if (wRes.success && wRes.data) setWarehousesList(wRes.data);
       if (uRes.success && uRes.data) setUnitsList(uRes.data);
@@ -387,6 +450,12 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
       if (sRes.success && sRes.data) setShiftsList(sRes.data);
       if (cmRes.success && cmRes.data) setCarModelsList(cmRes.data);
       if (opRes.success && opRes.data) setOperationsList(opRes.data);
+      if (procRes.success && procRes.data && procRes.data.length > 0) {
+        setProcessCategories(procRes.data);
+      }
+      if (hallRes.success && hallRes.data && hallRes.data.length > 0) {
+        setHallsList(hallRes.data);
+      }
     } catch (e) {
       console.error('Error loading dynamic master data:', e);
     }
@@ -612,6 +681,111 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     }
   };
 
+  // Factory Halls Handlers (مدیریت سالن‌های استقرار کارخانه)
+  const handleSaveHall = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!hallForm.code || !hallForm.name) {
+      alert('کد و نام سالن الزامی است.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/halls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(hallForm),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await loadDynamicMasterData();
+        await onRefresh();
+        setIsHallModalOpen(false);
+        setEditingHall(null);
+      } else {
+        alert(data.error || 'خطا در ثبت سالن');
+      }
+    } catch {
+      alert('خطای ارتباط با سرور هنگام ثبت سالن');
+    }
+  };
+
+  const handleDeleteHall = async (id: string) => {
+    if (!confirm('آیا از حذف این سالن تولید اطمینان دارید؟')) return;
+    try {
+      if (onDeleteHall) {
+        const res = await onDeleteHall(id);
+        if (res.success) {
+          await loadDynamicMasterData();
+          await onRefresh();
+          return;
+        }
+      }
+      const res = await fetch(`/api/halls/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        await loadDynamicMasterData();
+        await onRefresh();
+      } else {
+        alert(data.error || 'خطا در حذف سالن');
+      }
+    } catch {
+      alert('خطای ارتباط با سرور هنگام حذف سالن');
+    }
+  };
+
+  // Process Category Handlers (مدیریت دسته‌بندی‌های فرآیندی پویا)
+  const handleAddProcessCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCategoryCode.trim() || !newCategoryName.trim()) {
+      alert('کد و نام دسته فرآیندی الزامی است.');
+      return;
+    }
+    const cleanCode = newCategoryCode.trim().toUpperCase().replace(/\s+/g, '_');
+    try {
+      const res = await fetch('/api/processes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: cleanCode,
+          name: newCategoryName.trim(),
+          category: cleanCode,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setProcessCategories(prev => {
+          const exists = prev.some(p => p.code === cleanCode);
+          if (exists) {
+            return prev.map(p => (p.code === cleanCode ? { code: cleanCode, name: newCategoryName.trim() } : p));
+          }
+          return [...prev, { code: cleanCode, name: newCategoryName.trim() }];
+        });
+        setOperationForm(prev => ({ ...prev, category: cleanCode as any }));
+        setNewCategoryCode('');
+        setNewCategoryName('');
+        setIsProcessCategoryModalOpen(false);
+      } else {
+        alert(data.error || 'خطا در ثبت دسته فرآیندی');
+      }
+    } catch {
+      alert('خطای ارتباط با سرور');
+    }
+  };
+
+  const handleDeleteProcessCategory = async (code: string) => {
+    if (!confirm(`آیا از حذف دسته فرآیندی «${code}» اطمینان دارید؟`)) return;
+    try {
+      const res = await fetch(`/api/processes/${code}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        setProcessCategories(prev => prev.filter(p => p.code !== code));
+      } else {
+        alert(data.error || 'خطا در حذف دسته فرآیندی');
+      }
+    } catch {
+      alert('خطا در حذف دسته فرآیندی');
+    }
+  };
+
   // Hub Cards exactly matching Uploaded Image 1 (1_1da4846f.jpg)
   const hubCards: {
     id: MasterSubSection;
@@ -712,6 +886,13 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
       countBadge: `${toPersianDigits(dies.length)} قالب فعال`,
     },
     {
+      id: 'FACTORY_HALLS',
+      title: 'سالن‌های استقرار و خطوط',
+      description: 'تعریف و مدیریت سالن‌های پرس سنگین، سبک، جوشکاری، خط رنگ و انبارها',
+      icon: Building2,
+      countBadge: `${toPersianDigits(hallsList.length)} سالن تولید`,
+    },
+    {
       id: 'CAR_MODELS',
       title: 'مدل‌های خودرو و خانواده محصول',
       description: 'پژو ۲۰۶، ۲۰۷، تارا، دنا پلاس، شاهین، کوییک و ارتباط با خودروساز',
@@ -731,6 +912,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
     { id: 'OPERATIONS', label: 'عملیات' },
     { id: 'MACHINES', label: 'ماشین‌آلات' },
     { id: 'DIES', label: 'قالب‌ها' },
+    { id: 'FACTORY_HALLS', label: 'سالن‌های تولید' },
     { id: 'CAR_MODELS', label: 'مدل خودرو' },
     { id: 'WAREHOUSES', label: 'انبارها' },
     { id: 'CUSTOMERS', label: 'مشتریان' },
@@ -1150,6 +1332,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
           parts={parts}
           machines={machines}
           dies={dies}
+          operations={operationsList}
           onSaveRouting={onSaveRouting}
           onDeleteRouting={onDeleteRouting}
           onDirectProduce={onDirectProduce}
@@ -1164,7 +1347,7 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
           machines={machines}
           dies={dies}
           operators={operators}
-          halls={halls}
+          halls={hallsList}
           parts={parts}
           initialSubTab={activeSection === 'DIES' ? 'dies' : 'machines'}
           onSaveMachine={onSaveMachine}
@@ -1173,6 +1356,161 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
           onSaveOperator={onSaveOperator}
           onSaveHall={onSaveHall}
         />
+      )}
+
+      {/* 4.5 FACTORY HALLS (سالن‌های تولید و استقرار خطوط) */}
+      {activeSection === 'FACTORY_HALLS' && (
+        <div className={`bg-white border border-slate-200 rounded-2xl p-5 space-y-4 shadow-xs ${themeMeta.borderAccentClass}`}>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-slate-900">
+                  سالن‌های تولید و موقعیت‌های استقرار ماشین‌آلات (Factory Production Halls)
+                </h3>
+                <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                  {toPersianDigits(hallsList.length)} سالن تولید
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                تعریف، ویرایش و مدیریت سالن‌های پرس سنگین، پرس متوسط، جوشکاری رباتیک، خط رنگ کاتافورز ED، مونتاژ و انبارها
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingHall(null);
+                setHallForm({
+                  code: `HALL-${String(hallsList.length + 1).padStart(2, '0')}`,
+                  name: '',
+                  type: 'STAMPING',
+                  supervisorName: '',
+                  capacityDesc: '',
+                  description: '',
+                  active: true,
+                });
+                setIsHallModalOpen(true);
+              }}
+              className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold cursor-pointer text-white shadow-xs ${themeMeta.buttonPrimaryClass}`}
+            >
+              <Plus className="w-4 h-4" />
+              <span>تعریف سالن تولید جدید</span>
+            </button>
+          </div>
+
+          {/* Search Bar */}
+          <div className="relative max-w-md">
+            <Search className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              placeholder="جستجو در کد، نام سالن، سرپرست یا مشخصات..."
+              value={hallSearch}
+              onChange={e => setHallSearch(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl pr-9 pl-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:bg-white focus:border-amber-500 transition-colors"
+            />
+          </div>
+
+          {/* Halls Table */}
+          <div className="overflow-x-auto border border-slate-200 rounded-xl">
+            <table className="w-full text-right text-xs">
+              <thead className="bg-slate-50 text-slate-600 font-semibold border-b border-slate-200">
+                <tr>
+                  <th className="py-2.5 px-3 text-center">کد سالن</th>
+                  <th className="py-2.5 px-3">نام و عنوان سالن تولید</th>
+                  <th className="py-2.5 px-3">نوع فرآیند کارگاهی</th>
+                  <th className="py-2.5 px-3">سرپرست / مسئول سالن</th>
+                  <th className="py-2.5 px-3">ظرفیت و تجهیزات مستقر</th>
+                  <th className="py-2.5 px-3 text-center">پرس‌ها و ماشین‌های مستقر</th>
+                  <th className="py-2.5 px-3 text-center">وضعیت</th>
+                  <th className="py-2.5 px-3 text-center">عملیات</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-slate-800">
+                {hallsList
+                  .filter(h =>
+                    !hallSearch.trim() ||
+                    h.code.toLowerCase().includes(hallSearch.toLowerCase()) ||
+                    h.name.toLowerCase().includes(hallSearch.toLowerCase()) ||
+                    (h.supervisorName && h.supervisorName.toLowerCase().includes(hallSearch.toLowerCase())) ||
+                    (h.capacityDesc && h.capacityDesc.toLowerCase().includes(hallSearch.toLowerCase()))
+                  )
+                  .map(hall => {
+                    const machinesInHall = machines.filter(
+                      m => m.hallId === hall.id || m.location === hall.name || m.location?.includes(hall.name)
+                    );
+                    return (
+                      <tr key={hall.id} className="hover:bg-slate-50/70 transition-colors">
+                        <td className="py-3 px-3 text-center font-mono font-bold text-slate-900">
+                          <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200">
+                            {hall.code}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 font-bold text-slate-900">
+                          <div className="flex items-center gap-1.5">
+                            <Building2 className="w-4 h-4 text-amber-600 shrink-0" />
+                            <span>{hall.name}</span>
+                          </div>
+                          {hall.description && (
+                            <p className="text-[11px] text-slate-500 font-normal mt-0.5 line-clamp-1">
+                              {hall.description}
+                            </p>
+                          )}
+                        </td>
+                        <td className="py-3 px-3">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-100 text-slate-700">
+                            {hall.type === 'STAMPING' ? 'پرسکاری و کشش' :
+                             hall.type === 'WELDING' ? 'جوشکاری و مونتاژ' :
+                             hall.type === 'PAINT' ? 'خط رنگ و کاتافورز' :
+                             hall.type === 'ASSEMBLY' ? 'مونتاژ نهایی' : 'انبار و لجستیک'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-slate-700">
+                          {hall.supervisorName || 'تعیین‌نشده'}
+                        </td>
+                        <td className="py-3 px-3 text-slate-600 max-w-xs truncate" title={hall.capacityDesc}>
+                          {hall.capacityDesc || '—'}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-bold text-[11px] bg-blue-50 text-blue-700 border border-blue-200">
+                            <Cpu className="w-3 h-3 text-blue-500" />
+                            {toPersianDigits(machinesInHall.length)} ماشین
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            hall.active !== false ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'
+                          }`}>
+                            {hall.active !== false ? 'فعال' : 'غیرفعال'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingHall(hall);
+                                setHallForm({ ...hall });
+                                setIsHallModalOpen(true);
+                              }}
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors cursor-pointer"
+                            >
+                              ویرایش
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteHall(hall.id)}
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 transition-colors cursor-pointer"
+                            >
+                              حذف
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {/* 5. BOM (درخت محصول پیشرفته چندسطحی) */}
@@ -2569,7 +2907,18 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-700 font-semibold mb-1">دسته فرآیندی *</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-slate-700 font-semibold">دسته فرآیندی *</label>
+                    <button
+                      type="button"
+                      onClick={() => setIsProcessCategoryModalOpen(true)}
+                      className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-0.5 cursor-pointer bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200"
+                      title="تعریف و ویرایش دسته‌بندی‌های فرآیندی"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>مدیریت دسته‌ها</span>
+                    </button>
+                  </div>
                   <select
                     value={operationForm.category || 'STAMPING'}
                     onChange={e =>
@@ -2580,12 +2929,11 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                     }
                     className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white font-medium"
                   >
-                    <option value="SHEARING">برشکاری و نواربری (Shearing)</option>
-                    <option value="STAMPING">پرسکاری و کشش (Stamping / Drawing)</option>
-                    <option value="BENDING">خم‌کاری و لبه‌زنی (Bending / Flanging)</option>
-                    <option value="WELDING">جوش مقاومتی و CO2 (Welding)</option>
-                    <option value="SURFACE_FINISH">رنگ و پوشش کاتافورز (ED Paint)</option>
-                    <option value="QC_PACK">کنترل کیفی و بسته‌بندی (QC & Pack)</option>
+                    {processCategories.map(cat => (
+                      <option key={cat.code} value={cat.code}>
+                        {cat.name} ({cat.code})
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -2602,8 +2950,41 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">نوع ایستگاه کاری / دستگاه مورد استفاده *</label>
+              {/* Workstation Type Field with Persian Guidance & Rationale */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-700 font-semibold">نوع ایستگاه کاری / دستگاه مورد استفاده *</label>
+                  <button
+                    type="button"
+                    onClick={() => setIsWorkstationHelpOpen(!isWorkstationHelpOpen)}
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 px-2 py-0.5 rounded-md border border-amber-300 transition cursor-pointer"
+                    title="مشاهده راهنمای کارکرد این فیلد در MRP و ظرفیت‌سنجی"
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-600" />
+                    <span>کارکرد این فیلد چیه؟</span>
+                  </button>
+                </div>
+
+                {isWorkstationHelpOpen && (
+                  <div className="p-3 bg-amber-50/90 border border-amber-300 rounded-xl text-[11px] text-amber-950 space-y-1.5 leading-relaxed shadow-2xs">
+                    <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                      <span>کارکرد ایستگاه کاری در سیستم هوشمند برنامه‌ریزی تولید (MRP & Capacity Planning):</span>
+                    </div>
+                    <ul className="list-disc list-inside space-y-1 text-slate-700 pr-1">
+                      <li>
+                        <strong>تطبیق خودکار پرس با عملیات:</strong> سیستم مشخص می‌کند این مرحله روی کدام رده از دستگاه‌ها (پرس‌های هیدرولیک، پرس ضربه‌ای شولر، خط برش، پرس‌جوش یا خط رنگ) قابل اجراست.
+                      </li>
+                      <li>
+                        <strong>پایش تداخل ماشین‌آلات (Machine Overlaps):</strong> الگوریتم ظرفیت‌سنجی مانع برنامه‌ریزی همزمان دو دستور کار روی یک ایستگاه در شیفت یکسان می‌شود.
+                      </li>
+                      <li>
+                        <strong>محاسبه زمان راه‌اندازی (SMED):</strong> زمان تعویض قالب و آمادگی ایستگاه مستقیماً بر مبنای این ماشین محاسبه می‌گردد.
+                      </li>
+                    </ul>
+                  </div>
+                )}
+
                 <input
                   type="text"
                   required
@@ -2612,6 +2993,30 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                   onChange={e => setOperationForm({ ...operationForm, stationType: e.target.value })}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white"
                 />
+
+                {/* Quick Suggestion Pills */}
+                <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                  <span className="text-[10px] text-slate-400">پیشنهاد سریع:</span>
+                  {[
+                    'خط برش و نواربری رول',
+                    'پرس مکانیکی ضربه‌ای شولر ۴۰۰ تن',
+                    'پرس هیدرولیک کشش ۸۰۰ تن',
+                    'پرس ضربه‌ای ۲۵۰ تن کلاچ‌دار',
+                    'دستگاه پرس‌جوش مقاومتی M6/M8',
+                    'سلول رباتیک جوشکاری CO2',
+                    'خط فسفاته و رنگ کاتافورز ED',
+                    'ایستگاه مونتاژ و هِمینگ',
+                  ].map((st, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setOperationForm({ ...operationForm, stationType: st })}
+                      className="px-2 py-0.5 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-medium transition cursor-pointer"
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -2687,6 +3092,220 @@ export const MasterDataHubView: React.FC<MasterDataHubViewProps> = ({
                   className={`px-5 py-2 rounded-xl font-bold text-white cursor-pointer ${themeMeta.buttonPrimaryClass}`}
                 >
                   {editingOperation ? 'ثبت تغییرات عملیات' : 'ایجاد عملیات جدید'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 14. Factory Hall Modal (کشوی ثبت و ویرایش سالن تولید) */}
+      {isHallModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg p-5 shadow-xl text-right">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-amber-600" />
+                <span>{editingHall ? 'ویرایش شناسنامه سالن تولید' : 'تعریف سالن تولید و استقرار جدید'}</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsHallModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveHall} className="space-y-3.5 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">کد شناسایی سالن *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="مثلاً HALL-01 یا HALL-HEAVY"
+                    value={hallForm.code || ''}
+                    onChange={e => setHallForm({ ...hallForm, code: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-900 focus:outline-none focus:bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">نوع کاربری سالن *</label>
+                  <select
+                    value={hallForm.type || 'STAMPING'}
+                    onChange={e => setHallForm({ ...hallForm, type: e.target.value as any })}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white font-medium"
+                  >
+                    <option value="STAMPING">پرسکاری و فرم‌دهی (Stamping)</option>
+                    <option value="WELDING">جوشکاری و مونتاژ بدنه (Welding)</option>
+                    <option value="PAINT">رنگ و کاتافورز (Paint / ED)</option>
+                    <option value="ASSEMBLY">مونتاژ نهایی و هِمینگ (Assembly)</option>
+                    <option value="WAREHOUSE">انبار و پشتیبانی لجستیک (Warehouse)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">نام و عنوان کامل سالن تولید *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="مثلاً سالن پرس‌های سنگین (۸۰۰ و ۴۰۰ تن)، سالن جوشکاری رباتیک..."
+                  value={hallForm.name || ''}
+                  onChange={e => setHallForm({ ...hallForm, name: e.target.value })}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white font-medium"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">سرپرست / مسئول سالن</label>
+                <input
+                  type="text"
+                  placeholder="نام و نام خانوادگی سرپرست سالن..."
+                  value={hallForm.supervisorName || ''}
+                  onChange={e => setHallForm({ ...hallForm, supervisorName: e.target.value })}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">ظرفیت، تجهیزات و مشخصات فنی مستقر</label>
+                <input
+                  type="text"
+                  placeholder="مثلاً خطوط پرس شولر، جرثقیل سقفی ۲۰ تن، ایستگاه شستشو..."
+                  value={hallForm.capacityDesc || ''}
+                  onChange={e => setHallForm({ ...hallForm, capacityDesc: e.target.value })}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 font-semibold mb-1">توضیحات و نکات ایمنی سالن</label>
+                <textarea
+                  rows={2}
+                  placeholder="ملاحظات لجستیکی، ورودی و خروجی لیفتراک، انبارک پای خط..."
+                  value={hallForm.description || ''}
+                  onChange={e => setHallForm({ ...hallForm, description: e.target.value })}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:bg-white resize-none"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  type="checkbox"
+                  id="isHallActiveCheck"
+                  checked={hallForm.active !== false}
+                  onChange={e => setHallForm({ ...hallForm, active: e.target.checked })}
+                  className="w-4 h-4 text-emerald-600 rounded"
+                />
+                <label htmlFor="isHallActiveCheck" className="text-slate-800 font-medium">
+                  سالن فعال در برنامه‌ریزی تولید و تخصیص پرس‌ها
+                </label>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsHallModalOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  className={`px-5 py-2 rounded-xl font-bold text-white cursor-pointer ${themeMeta.buttonPrimaryClass}`}
+                >
+                  {editingHall ? 'ثبت تغییرات سالن' : 'ایجاد سالن جدید'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 15. Process Category Modal (مدیریت و تعریف دسته‌های فرآیندی) */}
+      {isProcessCategoryModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md p-5 shadow-xl text-right">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Settings2 className="w-4 h-4 text-indigo-600" />
+                <span>مدیریت دسته‌های فرآیندی کارخانه (Process Categories)</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsProcessCategoryModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Existing Categories List */}
+            <div className="space-y-1.5 max-h-52 overflow-y-auto mb-4 border border-slate-200 rounded-xl p-2 bg-slate-50/50">
+              {processCategories.map(cat => (
+                <div
+                  key={cat.code}
+                  className="flex items-center justify-between p-2 rounded-lg bg-white border border-slate-200/80 text-xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
+                      {cat.code}
+                    </span>
+                    <span className="font-medium text-slate-800">{cat.name}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteProcessCategory(cat.code)}
+                    className="text-rose-500 hover:text-rose-700 p-1 rounded hover:bg-rose-50 transition cursor-pointer"
+                    title="حذف دسته فرآیندی"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {/* Add New Category Form */}
+            <form onSubmit={handleAddProcessCategory} className="space-y-3 pt-2 border-t border-slate-100 text-xs">
+              <h4 className="font-bold text-slate-800 text-[11px]">+ تعریف دسته فرآیندی جدید:</h4>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-slate-600 font-medium mb-1">کد لاتین دسته *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="HYDRO_FORM"
+                    value={newCategoryCode}
+                    onChange={e => setNewCategoryCode(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 font-mono text-slate-900 uppercase focus:outline-none focus:bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-600 font-medium mb-1">عنوان فارسی دسته *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="هیدروفرمینگ لوله"
+                    value={newCategoryName}
+                    onChange={e => setNewCategoryName(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-slate-900 focus:outline-none focus:bg-white"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsProcessCategoryModalOpen(false)}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                >
+                  بستن
+                </button>
+                <button
+                  type="submit"
+                  className={`px-4 py-1.5 rounded-lg font-bold text-white cursor-pointer ${themeMeta.buttonPrimaryClass}`}
+                >
+                  افزودن دسته فرآیندی
                 </button>
               </div>
             </form>

@@ -36,6 +36,7 @@ import {
   ProcessType,
   PROCESS_DEFINITIONS,
   CarModel,
+  OperationDefinition,
 } from '../types/inventory';
 import { toPersianDigits, formatNumber } from '../utils/formatters';
 import { MasterDataDifferenceGuideModal } from './common/MasterDataDifferenceGuideModal';
@@ -47,6 +48,7 @@ interface RoutingsViewProps {
   parts: Part[];
   machines: Machine[];
   dies?: DieMold[];
+  operations?: OperationDefinition[];
   onSaveRouting: (routing: Partial<Routing>) => Promise<{ success: boolean; message?: string; error?: string }>;
   onDeleteRouting?: (id: string) => Promise<{ success: boolean; message?: string; error?: string }>;
   onDirectProduce?: (partId: string, stageId?: string, machineId?: string) => void;
@@ -59,6 +61,7 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
   parts,
   machines,
   dies = [],
+  operations = [],
   onSaveRouting,
   onDeleteRouting,
   onDirectProduce,
@@ -94,6 +97,66 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [isGuideModalOpen, setIsGuideModalOpen] = useState(false);
   const [isTraceabilityModalOpen, setIsTraceabilityModalOpen] = useState(false);
+
+  // Operations Library (from props or API)
+  const [operationsLibrary, setOperationsLibrary] = useState<OperationDefinition[]>(operations);
+  const [selectedMasterOpId, setSelectedMasterOpId] = useState<string>('');
+
+  useEffect(() => {
+    if (operations && operations.length > 0) {
+      setOperationsLibrary(operations);
+    } else {
+      fetch('/api/operations')
+        .then(r => r.json())
+        .then(data => {
+          if (data.success && Array.isArray(data.data)) {
+            setOperationsLibrary(data.data);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [operations]);
+
+  // Handle selecting a master operation from engineering library to auto-fill step fields
+  const handleSelectMasterOperation = (opId: string) => {
+    setSelectedMasterOpId(opId);
+    if (!opId) return;
+    const op = operationsLibrary.find(o => o.id === opId);
+    if (!op) return;
+
+    // Map Master Operation category to Routing ProcessType
+    let pType: ProcessType = 'PUNCH_FORM';
+    if (op.category === 'SHEARING') pType = 'BLANKING';
+    else if (op.category === 'STAMPING') pType = 'DRAWING';
+    else if (op.category === 'BENDING') pType = 'BENDING';
+    else if (op.category === 'WELDING') pType = 'SPOT_WELD';
+    else if (op.category === 'SURFACE_FINISH') pType = 'PAINT';
+    else if (op.category === 'QC_PACK') pType = 'ASSEMBLY';
+
+    // Auto-match workstation/press from machines if stationType matches
+    let matchedMachineId = stepData.machineId;
+    if (op.stationType && machines && machines.length > 0) {
+      const foundM = machines.find(m =>
+        m.name.includes(op.stationType) ||
+        m.code.includes(op.stationType) ||
+        (op.stationType.includes('پرس') && (m.processType === 'DRAWING' || m.processType === 'BLANKING' || m.processType === 'PUNCH_FORM')) ||
+        (op.stationType.includes('برش') && (m.processType === 'BLANKING' || m.processType === 'SHEARING')) ||
+        (op.stationType.includes('جوش') && (m.processType === 'SPOT_WELD' || m.processType === 'CO2_WELD'))
+      );
+      if (foundM) matchedMachineId = foundM.id;
+    }
+
+    setStepData(prev => ({
+      ...prev,
+      stepCode: op.code.startsWith('OP') ? op.code : `OP${prev.stepNumber || 10}_${op.code}`,
+      stepName: op.name,
+      processType: pType,
+      standardCycleTimeSec: op.cycleTimeSec || prev.standardCycleTimeSec || 12,
+      setupTimeMin: op.setupTimeMin || prev.setupTimeMin || 20,
+      description: op.description || prev.description || '',
+      machineId: matchedMachineId || prev.machineId,
+    }));
+  };
 
   // Quick Add Machine / Press Modal State
   const [isQuickMachineModalOpen, setIsQuickMachineModalOpen] = useState(false);
@@ -295,6 +358,7 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
       : 10;
 
     setEditingStepIndex(null);
+    setSelectedMasterOpId('');
     setStepData({
       stepNumber: nextStepNum,
       stepCode: `OP${nextStepNum}_FORM`,
@@ -315,6 +379,8 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
   const handleOpenEditStep = (step: OperationStep, index: number) => {
     setEditingStepIndex(index);
     setStepData({ ...step });
+    const matched = operationsLibrary.find(o => o.code === step.stepCode || o.name === step.stepName);
+    setSelectedMasterOpId(matched?.id || '');
     setFormError(null);
     setIsStepModalOpen(true);
   };
@@ -1100,6 +1166,49 @@ export const RoutingsView: React.FC<RoutingsViewProps> = ({
             )}
 
             <form onSubmit={handleSaveStep} className="space-y-3.5 text-xs">
+              {/* MASTER OPERATION LIBRARY SELECTOR */}
+              <div className="p-3 rounded-xl bg-orange-50/80 border border-orange-200/90 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-orange-950 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-orange-600" />
+                    <span>اتصال به عملیات استاندارد مهندسی (Master Operations Library)</span>
+                  </label>
+                  {selectedMasterOpId && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMasterOpId('')}
+                      className="text-[10px] text-orange-700 hover:text-orange-900 underline cursor-pointer"
+                    >
+                      قطع ارتباط
+                    </button>
+                  )}
+                </div>
+                <select
+                  value={selectedMasterOpId}
+                  onChange={e => handleSelectMasterOperation(e.target.value)}
+                  className="w-full bg-white border border-orange-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:border-orange-500 font-medium"
+                >
+                  <option value="">-- انتخاب از کاتالوگ عملیات تعریف‌شده در اطلاعات پایه (تکمیل خودکار) --</option>
+                  {operationsLibrary.map(op => (
+                    <option key={op.id} value={op.id}>
+                      [{op.code}] {op.name} — {op.stationType || op.category} (سیکل: {toPersianDigits(op.cycleTimeSec)}s، ستاپ: {toPersianDigits(op.setupTimeMin)}min)
+                    </option>
+                  ))}
+                </select>
+                {selectedMasterOpId ? (
+                  <p className="text-[10px] text-orange-800 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                    <span>
+                      عنوان، زمان چرخه ({toPersianDigits(stepData.standardCycleTimeSec || 0)} ثانیه)، زمان تعویض قالب ({toPersianDigits(stepData.setupTimeMin || 0)} دقیقه) و ایستگاه کاری خودکار از شناسنامه عملیات پایه بارگذاری شدند.
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-[10px] text-slate-500">
+                    با انتخاب یکی از عملیات استاندارد، فیلدهای فنی، زمان ستاپ و دستگاه منطبق به طور خودکار تکمیل می‌گردند.
+                  </p>
+                )}
+              </div>
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">شماره گام (Step Number) *</label>

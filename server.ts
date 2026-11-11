@@ -1,4 +1,10 @@
 import 'dotenv/config';
+
+// Force validate/sanitize DATABASE_URL immediately so PostgreSQL provider in Prisma is always valid
+if (!process.env.DATABASE_URL || (!process.env.DATABASE_URL.startsWith('postgresql://') && !process.env.DATABASE_URL.startsWith('postgres://'))) {
+  process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
+}
+
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -7,7 +13,6 @@ import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './src/server/apiRouter';
 import { resolveDatabaseUrl } from './src/server/db/prisma';
 
-// Ensure DATABASE_URL is set with an absolute path and database directory exists
 resolveDatabaseUrl();
 
 const __filename = fileURLToPath(import.meta.url);

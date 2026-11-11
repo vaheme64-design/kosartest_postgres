@@ -4,7 +4,7 @@ import { Sidebar, TabKey, SubModuleNavParams, MachineSubTabKey } from './compone
 import { DashboardView } from './components/DashboardView';
 import { TransactionsVouchersView } from './components/TransactionsVouchersView';
 import { InventoryModuleView, InventorySubTab } from './components/inventory/InventoryModuleView';
-import { MasterDataHubView } from './components/MasterDataHubView';
+import { MasterDataHubView, MasterSubSection } from './components/MasterDataHubView';
 import { MachinesView } from './components/MachinesView';
 import { UserManagementView } from './components/UserManagementView';
 import { SapcoMaterialsView } from './components/SapcoMaterialsView';
@@ -61,6 +61,9 @@ function AppContent() {
   const [activeMachineSubTab, setActiveMachineSubTab] = useState<MachineSubTabKey>(
     router.route.machineSubTab
   );
+  const [activeMasterSubSection, setActiveMasterSubSection] = useState<MasterSubSection>(
+    router.route.masterSubSection || 'PARTS'
+  );
 
   // Synchronize state when URL changes (Browser Back / Forward buttons or deep links)
   useEffect(() => {
@@ -70,6 +73,9 @@ function AppContent() {
     setActiveProductionModuleTab(router.route.productionModuleTab);
     setActivePlanningSubTab(router.route.planningSubTab);
     setActiveMachineSubTab(router.route.machineSubTab);
+    if (router.route.masterSubSection) {
+      setActiveMasterSubSection(router.route.masterSubSection);
+    }
   }, [router.route]);
 
   // Multi-Template & Color Theme Engine (Persisted in localStorage)
@@ -534,6 +540,7 @@ function AppContent() {
     if (navParams.productionModuleTab) setActiveProductionModuleTab(navParams.productionModuleTab);
     if (navParams.planningSubTab) setActivePlanningSubTab(navParams.planningSubTab);
     if (navParams.machineSubTab) setActiveMachineSubTab(navParams.machineSubTab);
+    if (navParams.masterSubSection) setActiveMasterSubSection(navParams.masterSubSection);
     router.navigate({
       tab,
       inventorySubTab: navParams.inventorySubTab,
@@ -541,6 +548,7 @@ function AppContent() {
       productionModuleTab: navParams.productionModuleTab,
       planningSubTab: navParams.planningSubTab,
       machineSubTab: navParams.machineSubTab,
+      masterSubSection: navParams.masterSubSection,
       moId: null,
     });
   };
@@ -660,6 +668,7 @@ function AppContent() {
       activeProductionModuleTab={activeProductionModuleTab}
       activePlanningSubTab={activePlanningSubTab}
       activeMachineSubTab={activeMachineSubTab}
+      activeMasterSubSection={activeMasterSubSection}
       layoutTemplate={layoutTemplate}
       colorTheme={colorTheme}
       onTabChange={(tab, navParams) => {
@@ -678,6 +687,7 @@ function AppContent() {
         if (navParams.productionModuleTab) setActiveProductionModuleTab(navParams.productionModuleTab);
         if (navParams.planningSubTab) setActivePlanningSubTab(navParams.planningSubTab);
         if (navParams.machineSubTab) setActiveMachineSubTab(navParams.machineSubTab);
+        if (navParams.masterSubSection) setActiveMasterSubSection(navParams.masterSubSection);
         router.navigate({
           tab,
           inventorySubTab: navParams.inventorySubTab,
@@ -685,6 +695,7 @@ function AppContent() {
           productionModuleTab: navParams.productionModuleTab,
           planningSubTab: navParams.planningSubTab,
           machineSubTab: navParams.machineSubTab,
+          masterSubSection: navParams.masterSubSection,
           moId: null,
         });
       }}
@@ -734,6 +745,8 @@ function AppContent() {
         <MasterDataHubView
           layoutTemplate={layoutTemplate}
           colorTheme={colorTheme}
+          initialSection={activeMasterSubSection}
+          onSectionChange={setActiveMasterSubSection}
           parts={parts}
           routings={routings}
           machines={machines}

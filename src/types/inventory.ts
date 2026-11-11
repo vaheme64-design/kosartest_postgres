@@ -47,6 +47,8 @@ export interface FactoryHall {
   type: 'STAMPING' | 'WELDING' | 'PAINT' | 'ASSEMBLY' | 'WAREHOUSE';
   supervisorName?: string;
   capacityDesc?: string;
+  description?: string;
+  active?: boolean;
 }
 
 export interface Operator {
@@ -117,6 +119,7 @@ export interface DieMold {
   processType: ProcessType;   // نوع عملیات این قالب
   requiredTonnage: number;    // تناژ مورد نیاز پرس برای کار با این قالب (تن)
   compatibleMachineCodes?: string[]; // کدهای پرس‌های سازگار
+  compatibleMachineIds?: string[];   // شناسه‌های پرس‌های سازگار
   strokeLifeTarget: number;   // عمر اسمی قالب برحسب ضرب
   currentStrokes: number;     // کارکرد ضرب تا کنون
   status: 'READY' | 'UNDER_MAINTENANCE' | 'CALIBRATION';

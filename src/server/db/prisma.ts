@@ -42,6 +42,9 @@ export const resolveDatabaseUrl = (): string => {
   return rawUrl;
 };
 
+// Immediate top-level invocation so process.env.DATABASE_URL is always a valid PostgreSQL URL
+resolveDatabaseUrl();
+
 export const getPrismaClient = (): PrismaClient => {
   if (!global.__prismaClient) {
     const dbUrl = resolveDatabaseUrl();

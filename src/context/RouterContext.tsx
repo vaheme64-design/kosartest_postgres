@@ -4,6 +4,7 @@ import { InventorySubTab } from '../components/inventory/InventoryModuleView';
 import { ProductionWorkbenchSubTab } from '../components/production/ErpProductionWorkbenchView';
 import { PlanningSubTabKey } from '../components/planning/ProductionPlanningModuleView';
 import { DrawerTabKey } from '../components/workflow/OrderDetailsDrawer';
+import { MasterSubSection } from '../components/MasterDataHubView';
 
 export type ErpModalType = 'create-mo' | 'wip-check' | 'edit-mo' | 'timeline' | 'log-step' | null;
 
@@ -14,6 +15,7 @@ export interface RouteState {
   inventorySubTab: InventorySubTab;
   planningSubTab: PlanningSubTabKey;
   machineSubTab: MachineSubTabKey;
+  masterSubSection?: MasterSubSection;
   moId: string | null;
   drawerTab: DrawerTabKey | null;
   timelineMoId: string | null;
@@ -29,6 +31,7 @@ export interface RouteNavigateParams {
   inventorySubTab?: InventorySubTab;
   planningSubTab?: PlanningSubTabKey;
   machineSubTab?: MachineSubTabKey;
+  masterSubSection?: MasterSubSection;
   moId?: string | null;
   drawerTab?: DrawerTabKey | null;
   timelineMoId?: string | null;
@@ -58,6 +61,7 @@ const DEFAULT_ROUTE: RouteState = {
   inventorySubTab: 'DASHBOARD',
   planningSubTab: 'erp_workbench',
   machineSubTab: 'machines',
+  masterSubSection: 'PARTS',
   moId: null,
   drawerTab: null,
   timelineMoId: null,
@@ -259,6 +263,9 @@ function parseUrlToRoute(): RouteState {
   const modalOrderId = searchParams.get('orderId') || searchParams.get('mo') || null;
   const modalPartId = searchParams.get('partId') || null;
 
+  const rawMasterSubSection = searchParams.get('masterSubSection') || searchParams.get('section');
+  const masterSubSection: MasterSubSection = (rawMasterSubSection as MasterSubSection) || 'PARTS';
+
   return {
     tab,
     productionViewMode,
@@ -266,6 +273,7 @@ function parseUrlToRoute(): RouteState {
     inventorySubTab,
     planningSubTab,
     machineSubTab,
+    masterSubSection,
     moId,
     drawerTab,
     timelineMoId,
@@ -310,6 +318,10 @@ function serializeRouteToHash(state: RouteState): string {
     if (state.drawerTab && state.drawerTab !== 'TRACEABILITY') {
       params.set('drawerTab', state.drawerTab);
     }
+  }
+
+  if (state.tab === 'master_data' && state.masterSubSection && state.masterSubSection !== 'PARTS') {
+    params.set('section', state.masterSubSection);
   }
 
   if (state.timelineMoId) {

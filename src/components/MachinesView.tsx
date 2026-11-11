@@ -146,6 +146,76 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
   const [opTimesheetData, setOpTimesheetData] = useState<any>(null);
   const [loadingTimesheet, setLoadingTimesheet] = useState(false);
 
+  // Dynamic Factory Halls State
+  const [hallsList, setHallsList] = useState<FactoryHall[]>(halls);
+  const [isQuickHallModalOpen, setIsQuickHallModalOpen] = useState(false);
+  const [quickHallCode, setQuickHallCode] = useState('');
+  const [quickHallName, setQuickHallName] = useState('');
+  const [quickHallType, setQuickHallType] = useState<FactoryHall['type']>('STAMPING');
+  const [quickHallSupervisor, setQuickHallSupervisor] = useState('');
+  const [savingQuickHall, setSavingQuickHall] = useState(false);
+
+  useEffect(() => {
+    if (halls && halls.length > 0) {
+      setHallsList(halls);
+    } else {
+      fetch('/api/halls')
+        .then(r => r.json())
+        .then(data => {
+          if (data.success && Array.isArray(data.data)) {
+            setHallsList(data.data);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [halls]);
+
+  const handleCreateQuickHall = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickHallCode.trim() || !quickHallName.trim()) return;
+    setSavingQuickHall(true);
+    try {
+      const newHall: Partial<FactoryHall> = {
+        code: quickHallCode.trim(),
+        name: quickHallName.trim(),
+        type: quickHallType,
+        supervisorName: quickHallSupervisor.trim(),
+        active: true,
+      };
+      if (onSaveHall) {
+        await onSaveHall(newHall);
+      } else {
+        await fetch('/api/halls', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newHall),
+        });
+      }
+      const createdObj: FactoryHall = {
+        id: `hall-${Date.now()}`,
+        code: quickHallCode.trim(),
+        name: quickHallName.trim(),
+        type: quickHallType,
+        supervisorName: quickHallSupervisor.trim(),
+        active: true,
+      };
+      setHallsList(prev => [...prev, createdObj]);
+      setMachineFormData(prev => ({
+        ...prev,
+        hallId: createdObj.id,
+        location: createdObj.name,
+      }));
+      setIsQuickHallModalOpen(false);
+      setQuickHallCode('');
+      setQuickHallName('');
+      setQuickHallSupervisor('');
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSavingQuickHall(false);
+    }
+  };
+
   // Dynamic Machine Process Capabilities
   const [availableProcesses, setAvailableProcesses] = useState<Array<{ code: string; name: string; category?: string; description?: string }>>([
     ...PROCESS_DEFINITIONS,
@@ -389,13 +459,18 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
   // DIE MODAL HANDLERS
   const handleOpenNewDie = () => {
     setEditingDie(null);
+    const initialSuitableCodes = machines
+      .filter(m => (m.tonnage || 0) >= 250)
+      .slice(0, 3)
+      .map(m => m.code);
     setDieFormData({
       code: '',
       name: '',
       partId: parts[0]?.id || '',
       processType: 'BLANKING',
       requiredTonnage: 250,
-      compatibleMachineCodes: ['PRS-250-01'],
+      compatibleMachineCodes: initialSuitableCodes.length > 0 ? initialSuitableCodes : machines.slice(0, 1).map(m => m.code),
+      compatibleMachineIds: machines.filter(m => initialSuitableCodes.includes(m.code)).map(m => m.id),
       strokeLifeTarget: 250000,
       currentStrokes: 0,
       status: 'READY',
@@ -408,7 +483,15 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
 
   const handleEditDie = (die: DieMold) => {
     setEditingDie(die);
-    setDieFormData({ ...die });
+    const legacyMachineId = (die as any).machineId;
+    const codes = Array.isArray(die.compatibleMachineCodes) && die.compatibleMachineCodes.length > 0
+      ? die.compatibleMachineCodes
+      : (legacyMachineId ? [legacyMachineId] : []);
+    setDieFormData({
+      ...die,
+      compatibleMachineCodes: codes,
+      compatibleMachineIds: die.compatibleMachineIds || machines.filter(m => codes.includes(m.code)).map(m => m.id),
+    });
     setFormError(null);
     setIsDieModalOpen(true);
   };
@@ -1102,15 +1185,32 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-slate-700 font-medium">سالن استقرار</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-slate-700 font-medium">سالن استقرار</label>
+                    <button
+                      type="button"
+                      onClick={() => setIsQuickHallModalOpen(true)}
+                      className="text-[11px] text-orange-600 hover:text-orange-700 font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>+ سالن جدید / مدیریت</span>
+                    </button>
+                  </div>
                   <select
                     value={machineFormData.hallId || ''}
-                    onChange={e => setMachineFormData({ ...machineFormData, hallId: e.target.value })}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-orange-500"
+                    onChange={e => {
+                      const selectedH = hallsList.find(h => h.id === e.target.value);
+                      setMachineFormData({
+                        ...machineFormData,
+                        hallId: e.target.value,
+                        location: selectedH ? selectedH.name : machineFormData.location,
+                      });
+                    }}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-orange-500 font-medium"
                   >
-                    {halls.map(h => (
+                    {hallsList.map(h => (
                       <option key={h.id} value={h.id}>
-                        {h.name}
+                        {h.name} ({h.code})
                       </option>
                     ))}
                   </select>
@@ -1151,7 +1251,7 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
             <div className="sticky top-0 z-10 bg-white flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                 <Wrench className="w-4 h-4 text-blue-600" />
-                <span>{editingDie ? 'کشوی ویرایش شناسنامه قالب پرس' : 'کشوی ثبت و تعریف قالب پرس جدید'}</span>
+                <span>{editingDie ? 'کشوی ویرایش شناسنامه فنی قالب' : 'کشوی ثبت و تعریف قالب جدید تولیدی'}</span>
               </h3>
               <button onClick={() => setIsDieModalOpen(false)} className="text-slate-400 hover:text-slate-700 cursor-pointer">
                 <X className="w-4 h-4" />
@@ -1173,20 +1273,29 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
                     value={dieFormData.code || ''}
                     onChange={e => setDieFormData({ ...dieFormData, code: e.target.value })}
                     placeholder="DIE-206-BRK05"
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 font-mono focus:outline-none focus:border-blue-500"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 font-mono focus:outline-none focus:border-blue-500 font-bold"
                     required
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-slate-700 font-medium">عملیات فرآیندی *</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-slate-700 font-medium">عملیات فرآیندی *</label>
+                    <button
+                      type="button"
+                      onClick={() => setIsNewProcessModalOpen(true)}
+                      className="text-[10px] text-blue-600 hover:text-blue-700 font-bold cursor-pointer"
+                    >
+                      + فرآیند جدید
+                    </button>
+                  </div>
                   <select
                     value={dieFormData.processType}
                     onChange={e => setDieFormData({ ...dieFormData, processType: e.target.value as ProcessType })}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-blue-500 font-medium"
                   >
-                    {PROCESS_DEFINITIONS.map(p => (
+                    {availableProcesses.map(p => (
                       <option key={p.code} value={p.code}>
-                        {p.name}
+                        {p.name} ({p.code})
                       </option>
                     ))}
                   </select>
@@ -1194,32 +1303,136 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
               </div>
 
               <div className="space-y-1">
-                <label className="text-slate-700 font-medium">عنوان کامل قالب پرس *</label>
+                <label className="text-slate-700 font-medium">عنوان شناسنامه فنی قالب *</label>
                 <input
                   type="text"
                   value={dieFormData.name || ''}
                   onChange={e => setDieFormData({ ...dieFormData, name: e.target.value })}
-                  placeholder="قالب کشش عمیق و برش پیرسینگ دیاق سپر جلو تارا"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-blue-500"
+                  placeholder="مثال: قالب کشش عمیق و برش پیرسینگ دیاق سپر جلو"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-blue-500 font-medium"
                   required
                 />
               </div>
 
+              {/* SEARCHABLE SELECT FOR PART */}
               <div className="space-y-1">
                 <label className="text-slate-700 font-medium">قطعه تولیدی مرتبط *</label>
-                <select
+                <SearchableSelect
+                  options={parts.map(p => ({
+                    value: p.id,
+                    label: p.name,
+                    sublabel: `کد فنی: ${p.code} | رده خودرو: ${p.carModel || 'مشترک'}`,
+                    badge: p.materialGrade || p.unit || 'قطعه',
+                  }))}
                   value={dieFormData.partId || ''}
-                  onChange={e => setDieFormData({ ...dieFormData, partId: e.target.value })}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-blue-500"
+                  onChange={val => setDieFormData({ ...dieFormData, partId: val })}
+                  placeholder="جستجو و انتخاب قطعه از کاتالوگ..."
+                  searchPlaceholder="جستجوی کد فنی، نام یا رده خودرو..."
                   required
-                >
-                  <option value="">-- انتخاب قطعه از کاتالوگ --</option>
-                  {parts.map(p => (
-                    <option key={p.id} value={p.id}>
-                      [{p.code}] {p.name}
-                    </option>
-                  ))}
-                </select>
+                />
+              </div>
+
+              {/* MACHINE-DIE COMPATIBILITY MATRIX (سازگاری قالب با پرس‌ها) */}
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-slate-800 font-bold block">
+                      سازگاری قالب با پرس‌ها (Machine-Die Compatibility) *
+                    </label>
+                    <span className="text-[10px] text-slate-500 block">
+                      پرس‌هایی که قابلیت نصب این قالب را دارند انتخاب نمایید (تاثیر مستقیم در الگوریتم MRP و برنامه‌ریزی تولید).
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const reqTon = dieFormData.requiredTonnage || 0;
+                      const suitableCodes = machines
+                        .filter(m => (m.tonnage || 0) >= reqTon)
+                        .map(m => m.code);
+                      const allCodes = machines.map(m => m.code);
+                      const current = dieFormData.compatibleMachineCodes || [];
+                      if (current.length === allCodes.length) {
+                        setDieFormData({ ...dieFormData, compatibleMachineCodes: [], compatibleMachineIds: [] });
+                      } else if (suitableCodes.length > 0) {
+                        setDieFormData({
+                          ...dieFormData,
+                          compatibleMachineCodes: suitableCodes,
+                          compatibleMachineIds: machines.filter(m => suitableCodes.includes(m.code)).map(m => m.id),
+                        });
+                      } else {
+                        setDieFormData({
+                          ...dieFormData,
+                          compatibleMachineCodes: allCodes,
+                          compatibleMachineIds: machines.map(m => m.id),
+                        });
+                      }
+                    }}
+                    className="text-[10px] text-blue-600 hover:text-blue-800 font-bold underline cursor-pointer"
+                  >
+                    انتخاب خودکار پرس‌های متناسب
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-44 overflow-y-auto pt-1">
+                  {machines.map(m => {
+                    const isSelected = (dieFormData.compatibleMachineCodes || []).includes(m.code);
+                    const isTonnageEnough = (m.tonnage || 0) >= (dieFormData.requiredTonnage || 0);
+
+                    return (
+                      <div
+                        key={m.id}
+                        onClick={() => {
+                          const current = dieFormData.compatibleMachineCodes || [];
+                          const updated = isSelected
+                            ? current.filter(c => c !== m.code)
+                            : [...current, m.code];
+                          setDieFormData({
+                            ...dieFormData,
+                            compatibleMachineCodes: updated,
+                            compatibleMachineIds: machines.filter(mc => updated.includes(mc.code)).map(mc => mc.id),
+                          });
+                        }}
+                        className={`flex items-start gap-2.5 p-2 rounded-lg border transition cursor-pointer select-none ${
+                          isSelected
+                            ? 'bg-blue-50/90 border-blue-400 text-blue-950 font-medium'
+                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => {}}
+                          className="mt-0.5 rounded text-blue-600 focus:ring-blue-500 cursor-pointer pointer-events-none"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-mono text-[11px] font-bold text-slate-900">{m.code}</span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-700 font-bold">
+                              {toPersianDigits(m.tonnage || 0)} تن
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-slate-600 truncate">{m.name}</p>
+                          <div className="flex items-center gap-1.5 mt-0.5 text-[9px]">
+                            <span className="text-slate-400">میز: {m.bolsterSize || '-'}</span>
+                            <span className="text-slate-300">•</span>
+                            <span className={isTonnageEnough ? 'text-emerald-600 font-bold' : 'text-amber-600'}>
+                              {isTonnageEnough ? 'تناژ کافی ✓' : 'تناژ ناکافی ⚠️'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {(dieFormData.compatibleMachineCodes || []).length > 0 && (
+                  <div className="text-[10px] text-blue-800 font-medium flex items-center gap-1 pt-1 border-t border-slate-200/60">
+                    <CheckCircle2 className="w-3 h-3 text-blue-600 shrink-0" />
+                    <span>
+                      {toPersianDigits((dieFormData.compatibleMachineCodes || []).length)} پرس به عنوان ماشین‌های مجاز برای سوار کردن این قالب تخصیص یافتند.
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -1597,6 +1810,97 @@ export const MachinesView: React.FC<MachinesViewProps> = ({
                   className="px-4 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-500 text-white font-bold text-xs cursor-pointer shadow-xs"
                 >
                   + افزودن قابلیت
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: QUICK ADD FACTORY HALL (تعریف سالن استقرار جدید) */}
+      {isQuickHallModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md p-5 space-y-4 shadow-xl text-right">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <Building className="w-4 h-4 text-orange-600" />
+                <h3 className="text-sm font-bold text-slate-900">ثبت و تعریف سالن تولید جدید</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsQuickHallModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateQuickHall} className="space-y-3 text-xs">
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">کد سالن *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="HALL-PRESS-02"
+                  value={quickHallCode}
+                  onChange={e => setQuickHallCode(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-900 uppercase focus:outline-none focus:border-orange-500 font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-700 block mb-1">نام سالن تولید *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="مثال: سالن پرس متوسط و فیدر خطوط تارا"
+                  value={quickHallName}
+                  onChange={e => setQuickHallName(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-orange-500 font-medium"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700 block mb-1">نوع سالن *</label>
+                  <select
+                    value={quickHallType}
+                    onChange={e => setQuickHallType(e.target.value as any)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-orange-500"
+                  >
+                    <option value="STAMPING">پرسکاری و پرس ضربه‌ای</option>
+                    <option value="WELDING">مجموعه‌سازی و جوشکاری</option>
+                    <option value="PAINT">رنگ و پوشش‌دهی</option>
+                    <option value="ASSEMBLY">مونتاژ نهایی</option>
+                    <option value="WAREHOUSE">انبار و لجستیک داخلی</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700 block mb-1">سرپرست سالن</label>
+                  <input
+                    type="text"
+                    placeholder="مهندس مرادی"
+                    value={quickHallSupervisor}
+                    onChange={e => setQuickHallSupervisor(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 focus:outline-none focus:border-orange-500"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsQuickHallModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-medium cursor-pointer"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingQuickHall}
+                  className="px-5 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white font-bold cursor-pointer shadow-xs"
+                >
+                  {savingQuickHall ? 'در حال ثبت...' : 'ثبت و انتخاب سالن'}
                 </button>
               </div>
             </form>

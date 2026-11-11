@@ -1139,9 +1139,22 @@ apiRouter.post('/halls', (req: Request, res: Response) => {
       type: payload.type || 'STAMPING',
       supervisorName: payload.supervisorName || '',
       capacityDesc: payload.capacityDesc || '',
+      description: payload.description || '',
+      active: payload.active ?? true,
     };
     hallsStore.push(newHall);
     return res.status(201).json({ success: true, message: 'سالن جدید تعریف گردید.', data: newHall });
+  }
+});
+
+apiRouter.delete('/halls/:id', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const initialLen = hallsStore.length;
+  hallsStore = hallsStore.filter(h => h.id !== id && h.code !== id);
+  if (hallsStore.length < initialLen) {
+    res.json({ success: true, message: 'سالن استقرار با موفقیت حذف گردید.' });
+  } else {
+    res.status(404).json({ success: false, error: 'سالن مورد نظر یافت نشد.' });
   }
 });
 
