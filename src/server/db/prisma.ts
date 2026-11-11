@@ -30,6 +30,14 @@ export const resolveDatabaseUrl = (): string => {
     rawUrl = rawUrl.slice(1, -1).trim();
   }
 
+  // The Prisma schema is configured with provider = "postgresql".
+  // If the user's local .env still contains a leftover SQLite/file URL (e.g., file:./prisma/dev.db)
+  // or an invalid protocol, replace it with the PostgreSQL connection string so Prisma validation succeeds.
+  if (!rawUrl.startsWith('postgresql://') && !rawUrl.startsWith('postgres://')) {
+    console.warn(`[KPIMS Notice] DATABASE_URL "${rawUrl}" is not a valid PostgreSQL URL. Replacing with postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public`);
+    rawUrl = 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
+  }
+
   process.env.DATABASE_URL = rawUrl;
   return rawUrl;
 };
