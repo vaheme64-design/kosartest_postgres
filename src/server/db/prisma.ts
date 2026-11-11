@@ -12,68 +12,71 @@ declare global {
   var __prismaClient: PrismaClient | undefined;
 }
 
+import { execSync } from 'child_process';
+
+let clientGeneratedAttempted = false;
+
 export const isDatabaseUrlConfigured = (): boolean => {
   return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
 };
 
 export const resolveDatabaseUrl = (): string => {
-  const cwd = process.cwd();
-  const prismaDirDb = path.resolve(cwd, 'prisma', 'dev.db');
-  const rootDirDb = path.resolve(cwd, 'dev.db');
-  const defaultDbPath = fs.existsSync(prismaDirDb) ? prismaDirDb : rootDirDb;
-
   let rawUrl = (process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0)
     ? process.env.DATABASE_URL.trim()
-    : `file:${defaultDbPath}`;
+    : 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
 
   // Strip surrounding quotes if present
   if ((rawUrl.startsWith('"') && rawUrl.endsWith('"')) || (rawUrl.startsWith("'") && rawUrl.endsWith("'"))) {
     rawUrl = rawUrl.slice(1, -1).trim();
   }
 
-  // Since Prisma is configured with SQLite provider in this environment, redirect any postgres:// URL to SQLite file
-  if (rawUrl.startsWith('postgresql://') || rawUrl.startsWith('postgres://')) {
-    const resolvedSqliteUrl = `file:${defaultDbPath}`;
-    process.env.DATABASE_URL = resolvedSqliteUrl;
-    return resolvedSqliteUrl;
-  }
-
-  // Extract file path if file: protocol is used
-  const filePath = rawUrl.replace(/^file:/, '');
-
-  let absolutePath: string;
-  if (path.isAbsolute(filePath)) {
-    absolutePath = filePath;
-  } else {
-    if (filePath.includes('prisma/dev.db') || filePath.includes('prisma\\dev.db')) {
-      absolutePath = prismaDirDb;
-    } else if (filePath.endsWith('dev.db')) {
-      absolutePath = fs.existsSync(prismaDirDb) ? prismaDirDb : path.resolve(cwd, filePath);
-    } else {
-      absolutePath = path.resolve(cwd, filePath);
-    }
-  }
-
-  const resolvedUrl = `file:${absolutePath}`;
-  process.env.DATABASE_URL = resolvedUrl;
-  return resolvedUrl;
+  process.env.DATABASE_URL = rawUrl;
+  return rawUrl;
 };
 
 export const getPrismaClient = (): PrismaClient => {
   if (!global.__prismaClient) {
     const dbUrl = resolveDatabaseUrl();
 
-    const client = new PrismaClient({
-      datasources: {
-        db: {
-          url: dbUrl,
+    let client: PrismaClient;
+    try {
+      client = new PrismaClient({
+        datasources: {
+          db: {
+            url: dbUrl,
+          },
         },
-      },
-      log: [
-        { emit: 'event', level: 'error' },
-        { emit: 'event', level: 'warn' },
-      ],
-    });
+        log: [
+          { emit: 'event', level: 'error' },
+          { emit: 'event', level: 'warn' },
+        ],
+      });
+    } catch (err: any) {
+      const errMsg = String(err?.message || '');
+      if (errMsg.includes('did not initialize yet') && !clientGeneratedAttempted) {
+        clientGeneratedAttempted = true;
+        console.warn('⚠️ @prisma/client is not initialized yet. Running "npx prisma generate" automatically...');
+        try {
+          execSync('npx prisma generate', { stdio: 'inherit' });
+          client = new PrismaClient({
+            datasources: {
+              db: {
+                url: dbUrl,
+              },
+            },
+            log: [
+              { emit: 'event', level: 'error' },
+              { emit: 'event', level: 'warn' },
+            ],
+          });
+        } catch (genErr) {
+          console.error('❌ Failed to auto-generate Prisma client:', genErr);
+          throw err;
+        }
+      } else {
+        throw err;
+      }
+    }
 
     // Intercept Prisma connection events to gracefully handle socket closures
     (client as any).$on('error', (e: any) => {

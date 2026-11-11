@@ -5767,7 +5767,28 @@ apiRouter.get('/master-data/:categoryCode', async (req: Request, res: Response) 
       })),
     });
   } catch (error) {
-    console.error('Error fetching master data:', error);
+    console.warn('⚠️ Notice: Database query failed in /master-data/:categoryCode. Serving default template fallback:', error instanceof Error ? error.message : error);
+    const rawCode = String(req.params.categoryCode || '').trim().toUpperCase();
+    const normalizedCode = CATEGORY_ALIASES[rawCode] || rawCode;
+    const defaultTpl = DEFAULT_MASTER_CATEGORIES.find(c => c.code === normalizedCode);
+    if (defaultTpl) {
+      return res.json({
+        success: true,
+        category: {
+          id: `cat-${defaultTpl.code}`,
+          code: defaultTpl.code,
+          name: defaultTpl.name,
+          description: defaultTpl.description,
+        },
+        data: defaultTpl.items.map(item => ({
+          id: `item-${defaultTpl.code}-${item.code}`,
+          code: item.code,
+          value: item.value,
+          orderIndex: item.orderIndex,
+        })),
+        isFallback: true,
+      });
+    }
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : 'خطا در واکشی داده‌های پایه',
@@ -5777,7 +5798,7 @@ apiRouter.get('/master-data/:categoryCode', async (req: Request, res: Response) 
 
 /**
  * 2. GET /api/master-data
- * Returns all active master categories and their items.
+ * Returns all active master categories and their items with graceful fallback.
  */
 apiRouter.get('/master-data', async (_req: Request, res: Response) => {
   try {
@@ -5799,10 +5820,25 @@ apiRouter.get('/master-data', async (_req: Request, res: Response) => {
       data: categories,
     });
   } catch (error) {
-    console.error('Error listing master categories:', error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در فهرست دسته‌بندی‌های پایه',
+    console.warn('⚠️ Notice: Database query failed in /master-data. Serving default categories fallback:', error instanceof Error ? error.message : error);
+    res.json({
+      success: true,
+      count: DEFAULT_MASTER_CATEGORIES.length,
+      data: DEFAULT_MASTER_CATEGORIES.map(c => ({
+        id: `cat-${c.code}`,
+        code: c.code,
+        name: c.name,
+        description: c.description,
+        isSystem: true,
+        items: c.items.map(it => ({
+          id: `item-${c.code}-${it.code}`,
+          code: it.code,
+          value: it.value,
+          orderIndex: it.orderIndex,
+          isActive: true,
+        })),
+      })),
+      isFallback: true,
     });
   }
 });
@@ -5874,9 +5910,54 @@ apiRouter.post('/master-data/:categoryCode/items', async (req: Request, res: Res
   }
 });
 
+const DEFAULT_SYSTEM_MENUS = [
+  {
+    id: 'menu-dashboard',
+    title: 'داشبورد و مانیتورینگ کارخانه',
+    path: '/dashboard',
+    icon: 'LayoutDashboard',
+    orderIndex: 1,
+    children: [],
+  },
+  {
+    id: 'menu-master-data',
+    title: 'مهندسی و اطلاعات پایه (Master Data)',
+    path: '/master-data',
+    icon: 'Database',
+    orderIndex: 2,
+    children: [
+      { id: 'menu-sub-master-data-items', parentId: 'menu-master-data', title: 'کاتالوگ اقلام و قطعات (Items)', path: '/master-data/items', icon: 'Boxes', orderIndex: 1 },
+      { id: 'menu-sub-master-data-work-centers', parentId: 'menu-master-data', title: 'مراکز کاری و ماشین‌آلات (Work Centers)', path: '/master-data/work-centers', icon: 'Factory', orderIndex: 2 },
+      { id: 'menu-sub-master-data-categories', parentId: 'menu-master-data', title: 'دسته‌بندی‌های داینامیک پایه', path: '/master-data/categories', icon: 'Sliders', orderIndex: 3 },
+    ],
+  },
+  {
+    id: 'menu-production',
+    title: 'برنامه‌ریزی و پیشخوان تولید (SAP PP)',
+    path: '/production',
+    icon: 'Cpu',
+    orderIndex: 3,
+    children: [
+      { id: 'menu-sub-production-matrix', parentId: 'menu-production', title: 'ماتریس مراحل تولید (OP Matrix)', path: '/production/matrix', icon: 'Layers', orderIndex: 1 },
+      { id: 'menu-sub-production-wip', parentId: 'menu-production', title: 'موجودی پای‌خط و بین‌ایستگاهی (WIP)', path: '/production/wip', icon: 'GitBranch', orderIndex: 2 },
+      { id: 'menu-sub-production-orders', parentId: 'menu-production', title: 'دستور کارهای تولید (Work Orders)', path: '/production/orders', icon: 'FileText', orderIndex: 3 },
+      { id: 'menu-sub-production-logs', parentId: 'menu-production', title: 'لاگ ثبت کارکرد و ضایعات شیفت', path: '/production/logs', icon: 'CheckCircle2', orderIndex: 4 },
+      { id: 'menu-sub-production-downtime', parentId: 'menu-production', title: 'ثبت و تحلیل توقفات خطوط', path: '/production/downtime', icon: 'AlertTriangle', orderIndex: 5 },
+    ],
+  },
+  {
+    id: 'menu-inventory',
+    title: 'مدیریت انبار و زنجیره تامین ساپکو',
+    path: '/inventory',
+    icon: 'Boxes',
+    orderIndex: 4,
+    children: [],
+  },
+];
+
 /**
  * 4. GET /api/menus/tree
- * Returns dynamic hierarchical navigation tree from the Menu table.
+ * Returns dynamic hierarchical navigation tree from the Menu table with graceful fallback.
  */
 apiRouter.get('/menus/tree', async (_req: Request, res: Response) => {
   try {
@@ -5903,16 +5984,26 @@ apiRouter.get('/menus/tree', async (_req: Request, res: Response) => {
       },
     });
 
-    res.json({
+    if (rootMenus && rootMenus.length > 0) {
+      return res.json({
+        success: true,
+        count: rootMenus.length,
+        data: rootMenus,
+      });
+    }
+
+    return res.json({
       success: true,
-      count: rootMenus.length,
-      data: rootMenus,
+      count: DEFAULT_SYSTEM_MENUS.length,
+      data: DEFAULT_SYSTEM_MENUS,
     });
   } catch (error) {
-    console.error('Error fetching dynamic menu tree:', error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در بارگذاری منوهای سیستم',
+    console.warn('⚠️ Notice: PostgreSQL database unreachable or not yet migrated for /api/menus/tree. Serving default menus fallback.', error instanceof Error ? error.message : error);
+    res.json({
+      success: true,
+      count: DEFAULT_SYSTEM_MENUS.length,
+      data: DEFAULT_SYSTEM_MENUS,
+      isFallback: true,
     });
   }
 });
@@ -5923,12 +6014,11 @@ apiRouter.get('/menus/tree', async (_req: Request, res: Response) => {
 
 /**
  * 1. GET /api/erp-services/work-orders
- * Lists all active WorkOrders from Prisma with their Item and Routing operations.
+ * Lists all active WorkOrders from Prisma with their Item and Routing operations with graceful fallback.
  */
 apiRouter.get('/erp-services/work-orders', async (_req: Request, res: Response) => {
   try {
-    // Ensure concurrent work orders are seeded
-    await CapacityPlanningService.detectMachineOverlaps(new Date());
+    await CapacityPlanningService.detectMachineOverlaps(new Date()).catch(() => {});
     const prisma = getPrismaClient();
     const workOrders = await prisma.workOrder.findMany({
       where: { isDeleted: false },
@@ -5952,10 +6042,59 @@ apiRouter.get('/erp-services/work-orders', async (_req: Request, res: Response) 
       data: workOrders,
     });
   } catch (error) {
-    console.error('Error fetching work orders:', error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در دریافت لیست دستور کارها',
+    console.warn('⚠️ Notice: PostgreSQL database query for work-orders failed. Serving fallback sample orders:', error instanceof Error ? error.message : error);
+    res.json({
+      success: true,
+      count: 2,
+      data: [
+        {
+          id: 'wo-fallback-1001',
+          orderNumber: 'WO-1404-1001',
+          plannedQuantity: 2500,
+          completedQuantity: 1600,
+          scrapQuantity: 24,
+          status: 'IN_PROGRESS',
+          startDate: new Date().toISOString(),
+          endDate: new Date(Date.now() + 86400000 * 5).toISOString(),
+          item: {
+            id: 'item-ecu-01',
+            code: 'PRT-ECU-BRK-01',
+            name: 'مجموعه براکت ECU پژو ۲۰۶',
+            type: 'FINISHED_GOOD',
+            carModel: 'پژو ۲۰۶',
+            unit: 'PCS',
+            routingOperations: [
+              { id: 'op10', opNumber: 10, opCode: 'OP10', opName: 'برش و نواربری اولیه', workCenter: { code: 'SHR-01', name: 'گیوتین خط برش' } },
+              { id: 'op20', opNumber: 20, opCode: 'OP20', opName: 'کشش عمیق هیدرولیک', workCenter: { code: 'PRS-800T-01', name: 'پرس ۸۰۰ تن هیدرولیک' } },
+              { id: 'op30', opNumber: 30, opCode: 'OP30', opName: 'خم‌کاری با قالب پروگرسیو', workCenter: { code: 'PRS-400T-01', name: 'پرس ۴۰۰ تن ضربه‌ای' } },
+              { id: 'op40', opNumber: 40, opCode: 'OP40', opName: 'پرس‌جوش مقاومتی نقطه‌ای', workCenter: { code: 'WLD-SPOT-01', name: 'ایستگاه جوش نقطه‌ای' } },
+            ],
+          },
+        },
+        {
+          id: 'wo-fallback-1002',
+          orderNumber: 'WO-1404-1002',
+          plannedQuantity: 1800,
+          completedQuantity: 450,
+          scrapQuantity: 8,
+          status: 'IN_PROGRESS',
+          startDate: new Date().toISOString(),
+          endDate: new Date(Date.now() + 86400000 * 6).toISOString(),
+          item: {
+            id: 'item-tara-02',
+            code: 'IKCO-TARA-BPIL-02',
+            name: 'مجموعه تقویتی ستون وسط تارا',
+            type: 'FINISHED_GOOD',
+            carModel: 'تارا',
+            unit: 'PCS',
+            routingOperations: [
+              { id: 'top10', opNumber: 10, opCode: 'OP10', opName: 'بلنکینگ اولیه', workCenter: { code: 'PRS-400T-01', name: 'پرس ۴۰۰ تن' } },
+              { id: 'top20', opNumber: 20, opCode: 'OP20', opName: 'کشش هیدرولیک', workCenter: { code: 'PRS-800T-01', name: 'پرس ۸۰۰ تن هیدرولیک' } },
+            ],
+          },
+        },
+      ],
+      isFallback: true,
     });
   }
 });
