@@ -222,8 +222,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
   const [issueMoId, setIssueMoId] = useState('');
   const [issueScrap, setIssueScrap] = useState('0');
   const [multiPartsList, setMultiPartsList] = useState<Array<{ partName: string; moId: string; issuedWeightKg: string }>>([
-    { partName: 'قطعه شماره ۱ (براکت چپ)', moId: 'MO-1403-101', issuedWeightKg: '800' },
-    { partName: 'قطعه شماره ۲ (براکت راست)', moId: 'MO-1403-102', issuedWeightKg: '700' },
+    { partName: '', moId: '', issuedWeightKg: '' },
   ]);
 
   // Return Form states
@@ -312,6 +311,10 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
 
     if (issueMode === 'MULTI') {
       const validParts = multiPartsList.filter(p => Number(p.issuedWeightKg) > 0);
+      if (validParts.length === 0 || validParts.some(p => !p.moId.trim())) {
+        setNotification({ type: 'error', message: 'برای هر ردیف، شماره دستور ساخت معتبر و وزن حواله را وارد کنید.' });
+        return;
+      }
       const totalMultiKg = validParts.reduce((sum, p) => sum + Number(p.issuedWeightKg), 0);
       const scrap = Number(issueScrap) || 0;
       const totalRequired = totalMultiKg + scrap;
@@ -351,6 +354,10 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
       }
     } else {
       const issuedKg = Number(issueWeight);
+      if (!issueMoId.trim()) {
+        setNotification({ type: 'error', message: 'برای رهگیری مصرف، شماره دستور ساخت (MO) الزامی است.' });
+        return;
+      }
       if (!issuedKg || issuedKg <= 0 || issuedKg > selectedCoil.remainingWeightKg) {
         setNotification({
           type: 'error',
@@ -365,7 +372,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             issuedWeightKg: issuedKg,
-            moId: issueMoId || 'MO-PROD-LINE-01',
+            moId: issueMoId.trim(),
             scrappedKg: Number(issueScrap) || 0,
             user: currentUser,
           }),
@@ -1003,7 +1010,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                     <div key={idx} className="bg-white p-3 rounded-lg border border-slate-200 space-y-2">
                       <div className="flex items-center justify-between text-[11px] font-bold text-slate-700">
                         <span>قطعه شماره {idx + 1}</span>
-                        {multiPartsList.length > 2 && (
+                        {multiPartsList.length > 1 && (
                           <button
                             type="button"
                             onClick={() => setMultiPartsList(multiPartsList.filter((_, i) => i !== idx))}
@@ -1058,6 +1065,14 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                       </div>
                     </div>
                   ))}
+
+                  <button
+                    type="button"
+                    onClick={() => setMultiPartsList([...multiPartsList, { partName: '', moId: '', issuedWeightKg: '' }])}
+                    className="w-full rounded-lg border border-dashed border-blue-300 bg-white px-3 py-2 text-xs font-medium text-blue-800 hover:bg-blue-50"
+                  >
+                    افزودن قطعه / دستور ساخت
+                  </button>
 
                   <div className="flex items-center justify-between pt-2 border-t border-blue-200 text-xs">
                     <span className="text-slate-600">
