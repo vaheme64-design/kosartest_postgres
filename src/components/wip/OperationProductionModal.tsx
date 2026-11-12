@@ -128,6 +128,10 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
     setErrorMsg(null);
 
     try {
+      const submissionKey = idempotencyKey || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `WIP-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      setIdempotencyKey(submissionKey);
       const res = await onSubmit({
         moId: operation.moId,
         operationId: operation.id,
@@ -142,9 +146,7 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
         shiftId,
         createdByUserId,
         relationalMachineId: relationalMachineId || undefined,
-        idempotencyKey: idempotencyKey || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
-          ? crypto.randomUUID()
-          : `WIP-${Date.now()}-${Math.random().toString(36).slice(2)}`),
+        idempotencyKey: submissionKey,
       });
 
       if (res.success) {
