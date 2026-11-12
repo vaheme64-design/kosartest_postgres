@@ -7203,7 +7203,8 @@ apiRouter.post('/planning/customer-orders', async (req: Request, res: Response) 
     res.status(201).json({ success: true, message: 'سفارش مشتری ثبت شد.', data: newOrder, source: 'memory-fallback' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'خطا در ثبت سفارش مشتری';
-    res.status(message.includes('یافت نشد') || message.includes('معتبر نیست') || message.includes('الزامی') ? 400 : 500).json({ success: false, error: message });
+    const statusCode = (error as any)?.code === 'P2002' ? 409 : (message.includes('یافت نشد') || message.includes('معتبر نیست') || message.includes('الزامی') ? 400 : 500);
+    res.status(statusCode).json({ success: false, error: statusCode === 409 ? 'شماره سفارش مشتری قبلاً ثبت شده است.' : message });
   }
 });
 
@@ -7272,7 +7273,8 @@ apiRouter.put('/planning/customer-orders/:id', async (req: Request, res: Respons
     res.json({ success: true, message: `سفارش شماره «${updatedOrder.orderNumber}» به‌روزرسانی شد.`, data: updatedOrder, source: 'memory-fallback' });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'خطا در ویرایش سفارش مشتری';
-    res.status(message.includes('یافت نشد') || message.includes('معتبر نیست') ? 400 : 500).json({ success: false, error: message });
+    const statusCode = (error as any)?.code === 'P2002' ? 409 : (message.includes('یافت نشد') || message.includes('معتبر نیست') ? 400 : 500);
+    res.status(statusCode).json({ success: false, error: statusCode === 409 ? 'شماره سفارش مشتری قبلاً ثبت شده است.' : message });
   }
 });
 
