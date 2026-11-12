@@ -6676,6 +6676,7 @@ apiRouter.post('/wip/operations/production', async (req: Request, res: Response)
           rejectedQty: Number(body.rejectedQty) || 0,
           scrapReason: typeof body.scrapReason === 'string' ? body.scrapReason : undefined,
           operatorName: typeof body.operatorName === 'string' ? body.operatorName : 'اپراتور',
+          expectedSnapshotVersion: getProductionWipSnapshotVersion(),
           snapshotPayload: {
             manufacturingOrders: manufacturingOrdersStore,
             wipTransfers: wipTransfersStore,
@@ -6685,6 +6686,7 @@ apiRouter.post('/wip/operations/production', async (req: Request, res: Response)
         if (ledgerResult?.duplicate) {
           throw new Error('WIP_IDEMPOTENCY_DUPLICATE');
         }
+        advanceProductionWipSnapshotVersion(getProductionWipSnapshotVersion());
       },
     );
     if (!result.success) {
