@@ -142,6 +142,26 @@ async function main() {
     assert(returned.response.status === 200 && returned.payload.success === true, `HTTP remnant return failed: ${JSON.stringify(returned.payload)}`);
     console.log('PASS: HTTP POST partial remnant return.');
 
+    // Exercise the actual HTTP route with two simultaneous returns against 15 kg outstanding.
+    const concurrentReturns = await Promise.all([
+      requestJson(baseUrl, `/api/inventory/coils/${coilId}/return`, 'POST', {
+        returnedRemnantWeightKg: 10,
+        warehouseId: 'WH-RAW',
+        locationCode: 'LOC-RAW-A1',
+        notes: 'HTTP concurrent return A',
+      }),
+      requestJson(baseUrl, `/api/inventory/coils/${coilId}/return`, 'POST', {
+        returnedRemnantWeightKg: 10,
+        warehouseId: 'WH-RAW',
+        locationCode: 'LOC-RAW-A1',
+        notes: 'HTTP concurrent return B',
+      }),
+    ]);
+    const acceptedReturns = concurrentReturns.filter(row => row.response.status === 200 && row.payload.success === true);
+    const rejectedReturns = concurrentReturns.filter(row => row.response.status === 409 && row.payload.success === false);
+    assert(acceptedReturns.length === 1 && rejectedReturns.length === 1, `Two concurrent 10 kg HTTP returns against 15 kg outstanding must yield one success and one conflict; got statuses ${concurrentReturns.map(row => row.response.status).join(', ')}.`);
+    console.log('PASS: HTTP concurrent partial returns accept exactly one request and reject the competing stale request.');
+
     const [coil, lot, balances, issueRecords] = await Promise.all([
       prisma.physicalCoil.findUnique({ where: { id: coilId } }),
       prisma.materialLot.findFirst({ where: { lotNumber: `${nonce}-COIL` } }),
@@ -149,10 +169,10 @@ async function main() {
       prisma.coilIssueReturnRecord.findMany({ where: { coilId, issuedWeightKg: { gt: 0 } } }),
     ]);
     const balanceKg = balances.reduce((sum, row) => sum + Number(row.weightKgOnHand), 0);
-    assert(Number(coil?.remainingWeightKg) === 85, `Expected coil balance 85 kg, got ${coil?.remainingWeightKg}.`);
-    assert(Number(lot?.remainingWeightKg) === 85, `Expected material lot balance 85 kg, got ${lot?.remainingWeightKg}.`);
-    assert(balanceKg === 85, `Expected stock ledger balance 85 kg, got ${balanceKg}.`);
-    assert(issueRecords.length > 0 && Number(issueRecords[0].outstandingWeightKg) === 15 && Number(issueRecords[0].returnedWeightKg) === 5, 'Issue/return genealogy must reconcile to 15 kg outstanding and 5 kg returned.');
+    assert(Number(coil?.remainingWeightKg) === 95, `Expected coil balance 95 kg after concurrent return, got ${coil?.remainingWeightKg}.`);
+    assert(Number(lot?.remainingWeightKg) === 95, `Expected material lot balance 95 kg, got ${lot?.remainingWeightKg}.`);
+    assert(balanceKg === 95, `Expected stock ledger balance 95 kg, got ${balanceKg}.`);
+    assert(issueRecords.length > 0 && Number(issueRecords[0].outstandingWeightKg) === 5 && Number(issueRecords[0].returnedWeightKg) === 15, 'Issue/return genealogy must reconcile to 5 kg outstanding and 15 kg returned.');
     console.log('PASS: HTTP lifecycle reconciles coil, lot, stock ledger and issue/return genealogy to 85 kg.');
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
