@@ -28,7 +28,7 @@ import {
   PROCESS_DEFINITIONS,
   FACTORY_HALLS,
 } from '../types/inventory';
-import { checkDatabaseConnection, getPrismaClient } from './db/prisma';
+import { checkDatabaseConnection, getPrismaClient, isDatabaseUrlConfigured } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
 
@@ -89,6 +89,7 @@ import {
   productionLogsStore,
   clearProductionWipData,
   reseedProductionWipData,
+  persistProductionWipState,
 } from './productionWipEngine';
 import {
   calculateNetRequirements,
@@ -321,18 +322,297 @@ let shiftsStore: ShiftDefinition[] = [
     status: 'ACTIVE',
   },
 ];
-let savedReportsStore: SavedReportConfig[] = [
-  {
-    id: 'REP-CFG-01',
-    name: 'موجودی کل کلاف‌ها بر اساس پکینگ و گرید',
-    reportType: 'COILS_SUMMARY',
-    selectedColumns: ['materialGrade', 'thicknessMm', 'widthMm', 'coilPackNumber', 'totalCoilsCount', 'totalRemainingWeightKg'],
-    groupBy: ['materialGrade', 'coilPackNumber'],
-    filters: {},
-    createdAt: new Date().toISOString(),
-  },
-];
+// Saved report configurations are persisted in PostgreSQL, not in process memory.
 let importBatchesStore: ImportBatchSummary[] = [];
+
+const INVENTORY_APP_SNAPSHOT_ID = 'inventory-app-state';
+let inventoryStateQueue: Promise<unknown> = Promise.resolve();
+
+export async function persistInventoryAppState(): Promise<void> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required; contract and physical-coil state cannot remain memory-only.');
+  }
+
+  const prisma = getPrismaClient();
+  const payload = JSON.parse(JSON.stringify({
+    contracts: contractsStore,
+    physicalCoils: physicalCoilsStore,
+    coilIssueRecords: coilIssueRecordsStore,
+    reservations: reservationsStore,
+    inventoryDocuments: inventoryDocsStore,
+    auditLogs: auditLogsStore,
+    qcHolds: serverQcHoldStore,
+  }));
+
+  const task = inventoryStateQueue.catch(() => undefined).then(async () => {
+    await prisma.inventoryAppStateSnapshot.upsert({
+      where: { id: INVENTORY_APP_SNAPSHOT_ID },
+      create: { id: INVENTORY_APP_SNAPSHOT_ID, payload },
+      update: { payload },
+    });
+  });
+  inventoryStateQueue = task.then(() => undefined, () => undefined);
+  await task;
+}
+
+export async function loadInventoryAppState(): Promise<void> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required before loading inventory application state.');
+  }
+
+  const prisma = getPrismaClient();
+  const snapshot = await prisma.inventoryAppStateSnapshot.findUnique({
+    where: { id: INVENTORY_APP_SNAPSHOT_ID },
+  });
+
+  if (snapshot) {
+    const payload = snapshot.payload as {
+      contracts?: SapcoContract[];
+      physicalCoils?: PhysicalCoil[];
+      coilIssueRecords?: CoilIssueReturnRecord[];
+      reservations?: InventoryReservation[];
+      inventoryDocuments?: InventoryDocument[];
+      auditLogs?: AuditRecord[];
+      qcHolds?: Record<string, any>;
+    };
+    if (
+      !payload ||
+      !Array.isArray(payload.contracts) ||
+      !Array.isArray(payload.physicalCoils) ||
+      !Array.isArray(payload.coilIssueRecords) ||
+      !Array.isArray(payload.reservations) ||
+      !Array.isArray(payload.inventoryDocuments) ||
+      !Array.isArray(payload.auditLogs) ||
+      !payload.qcHolds || typeof payload.qcHolds !== 'object'
+    ) {
+      throw new Error('Persistent inventory application snapshot is malformed; refusing to overwrite it.');
+    }
+
+    contractsStore.splice(0, contractsStore.length, ...payload.contracts);
+    physicalCoilsStore.splice(0, physicalCoilsStore.length, ...payload.physicalCoils);
+    coilIssueRecordsStore.splice(0, coilIssueRecordsStore.length, ...payload.coilIssueRecords);
+    reservationsStore.splice(0, reservationsStore.length, ...payload.reservations);
+    inventoryDocsStore.splice(0, inventoryDocsStore.length, ...payload.inventoryDocuments);
+    auditLogsStore.splice(0, auditLogsStore.length, ...payload.auditLogs);
+    for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
+    Object.assign(serverQcHoldStore, payload.qcHolds);
+  } else if (process.env.NODE_ENV === 'production') {
+    // Do not expose hard-coded sample contracts/coils as live production inventory.
+    contractsStore.splice(0);
+    physicalCoilsStore.splice(0);
+    coilIssueRecordsStore.splice(0);
+    reservationsStore.splice(0);
+    inventoryDocsStore.splice(0);
+    auditLogsStore.splice(0);
+    for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
+    await persistInventoryAppState();
+  }
+
+  const dbParts = await prisma.part.findMany({
+    where: { active: true },
+    include: { unit: true, material: true },
+    orderBy: { partNumber: 'asc' },
+  });
+  if (dbParts.length) {
+    partsStore = dbParts.map(dbPart => {
+      const template = INITIAL_PARTS.find(part => part.code === dbPart.partNumber);
+      return {
+        id: template?.id || dbPart.id,
+        code: dbPart.partNumber,
+        name: dbPart.name,
+        category: dbPart.category as Part['category'],
+        unit: dbPart.unit.code as Part['unit'],
+        weightPerUnitKg: Number(dbPart.weightNetKg),
+        sapcoCode: dbPart.supplierPartNumber || template?.sapcoCode,
+        carModel: dbPart.carModel || undefined,
+        thicknessMm: dbPart.thicknessMm == null ? undefined : Number(dbPart.thicknessMm),
+        materialGrade: dbPart.material?.grade || undefined,
+        minStock: Number(dbPart.minSafetyStock),
+        maxStock: dbPart.maxStock == null ? undefined : Number(dbPart.maxStock),
+        isDemo: false,
+      } as Part;
+    });
+  } else if (process.env.NODE_ENV === 'production') {
+    partsStore = [];
+  }
+
+  const dbDocuments = await prisma.inventoryDocument.findMany({
+    where: { postingStatus: 'POSTED' },
+    include: {
+      warehouse: true,
+      targetWarehouse: true,
+      createdByUser: true,
+      lines: {
+        include: {
+          part: true,
+          unit: true,
+          materialLot: true,
+          location: true,
+          targetLocation: true,
+        },
+        orderBy: { lineNumber: 'asc' },
+      },
+    },
+    orderBy: { documentDate: 'asc' },
+  });
+
+  if (dbDocuments.length || process.env.NODE_ENV === 'production') {
+    const mappedDatabaseDocuments = dbDocuments.map(dbDoc => {
+      const lines: InventoryDocumentLine[] = dbDoc.lines.map(line => {
+        const appPart = partsStore.find(part => part.code === line.part.partNumber);
+        return {
+          id: line.id,
+          documentId: dbDoc.id,
+          lineNumber: line.lineNumber,
+          partId: appPart?.id || line.partId,
+          partCode: line.part.partNumber,
+          partName: line.part.name,
+          materialLotId: line.materialLot?.lotNumber,
+          lotNumber: line.materialLot?.lotNumber,
+          heatNumber: line.materialLot?.heatNumber || undefined,
+          ownership: line.ownership as StockOwnership,
+          contractId: line.contractId || undefined,
+          contractNumber: line.contractNumber || undefined,
+          locationCode: line.location?.code,
+          targetLocationCode: line.targetLocation?.code,
+          quantity: Number(line.quantity),
+          unit: line.unit.code as InventoryDocumentLine['unit'],
+          quantityKg: Number(line.weightKg),
+          qualityStatus: line.qualityStatus as StockQualityStatus,
+          unitCost: line.unitCost == null ? undefined : Number(line.unitCost),
+          notes: line.notes || undefined,
+        };
+      });
+      const firstLine = lines[0];
+      const dbType = dbDoc.documentType;
+      let documentType: InventoryDocType;
+      if (dbType === 'RECEIPT') {
+        documentType = firstLine?.partCode && partsStore.find(p => p.code === firstLine.partCode)?.category === 'FINISHED_GOOD'
+          ? 'RECEIPT_FINISHED_GOODS'
+          : 'RECEIPT_RAW_MATERIAL';
+      } else if (dbType === 'ISSUE') {
+        documentType = dbDoc.referenceNumber?.startsWith('SO-') ? 'DELIVERY_CUSTOMER' : 'ISSUE_RAW_MATERIAL';
+      } else if (dbType === 'WIP_TRANSFER') {
+        documentType = 'TRANSFER';
+      } else if (dbType === 'INITIAL_BALANCE') {
+        documentType = 'OPENING_BALANCE';
+      } else if (dbType === 'RETURN') {
+        documentType = 'REVERSAL';
+      } else {
+        documentType = 'ADJUSTMENT';
+      }
+
+      return {
+        id: dbDoc.id,
+        documentNumber: dbDoc.documentNumber,
+        documentType,
+        documentDate: dbDoc.documentDate.toISOString(),
+        documentStatus: dbDoc.documentStatus as InventoryDocument['documentStatus'],
+        postingStatus: dbDoc.postingStatus as InventoryDocument['postingStatus'],
+        warehouseId: dbDoc.warehouse.code,
+        warehouseName: dbDoc.warehouse.name,
+        targetWarehouseId: dbDoc.targetWarehouse?.code,
+        targetWarehouseName: dbDoc.targetWarehouse?.name,
+        ownership: firstLine?.ownership || 'COMPANY_OWNED',
+        contractId: firstLine?.contractId,
+        contractNumber: firstLine?.contractNumber,
+        referenceType: dbDoc.referenceType || undefined,
+        referenceNumber: dbDoc.referenceNumber || undefined,
+        reversalOfDocumentId: dbDoc.reversalOfId || undefined,
+        adjustmentReason: dbDoc.notes || undefined,
+        auditNote: dbDoc.notes || undefined,
+        lines,
+        totalQuantity: lines.reduce((sum, line) => sum + line.quantity, 0),
+        totalWeightKg: lines.reduce((sum, line) => sum + line.quantityKg, 0),
+        createdByUid: dbDoc.createdByUser.username,
+        createdByName: dbDoc.createdByUser.fullName,
+        postedAt: dbDoc.postedAt?.toISOString(),
+        createdAt: dbDoc.createdAt.toISOString(),
+        updatedAt: dbDoc.updatedAt.toISOString(),
+      };
+    });
+    const documentsByNumber = new Map(inventoryDocsStore.map(doc => [doc.documentNumber, doc]));
+    for (const doc of mappedDatabaseDocuments) documentsByNumber.set(doc.documentNumber, doc);
+    inventoryDocsStore.splice(0, inventoryDocsStore.length, ...documentsByNumber.values());
+  }
+
+  const dbReservations = await prisma.inventoryReservation.findMany({
+    include: { part: { include: { unit: true } }, warehouse: true, materialLot: true, reservedForMO: true, reservedForCO: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (dbReservations.length) {
+    reservationsStore.splice(0, reservationsStore.length, ...dbReservations.map(row => {
+      const appPart = partsStore.find(part => part.code === row.part.partNumber);
+      return {
+        id: row.id,
+        reservationNumber: row.reservationNumber,
+        partId: appPart?.id || row.partId,
+        partCode: row.part.partNumber,
+        partName: row.part.name,
+        warehouseId: row.warehouse.code,
+        warehouseName: row.warehouse.name,
+        materialLotId: row.materialLot?.lotNumber,
+        lotNumber: row.materialLot?.lotNumber,
+        ownership: 'COMPANY_OWNED' as InventoryReservation['ownership'],
+        reservedFor: row.reservedForMO?.moNumber || row.reservedForCO?.orderNumber || 'سفارش نامشخص',
+        quantity: Number(row.quantity),
+        quantityKg: Number(row.weightKg),
+        unit: row.part.unit.code as InventoryReservation['unit'],
+        status: row.status as InventoryReservation['status'],
+        validUntil: row.validUntil?.toISOString(),
+        createdAt: row.createdAt.toISOString(),
+      };
+    }));
+  } else if (process.env.NODE_ENV === 'production' && !snapshot) {
+    reservationsStore.splice(0);
+  }
+
+  const dbAudit = await prisma.auditLog.findMany({
+    include: { user: true },
+    orderBy: { timestamp: 'desc' },
+    take: 1000,
+  });
+  if (dbAudit.length || process.env.NODE_ENV === 'production') {
+    const databaseAudit = dbAudit.map(row => ({
+      id: row.id,
+      action: row.action,
+      entityName: row.entityName,
+      entityId: row.entityId,
+      user: { uid: row.user?.username || 'system', displayName: row.user?.fullName || 'سیستم' },
+      details: JSON.stringify(row.newValues || row.oldValues || {}),
+      timestamp: row.timestamp.toISOString(),
+    }));
+    const auditById = new Map(auditLogsStore.map(row => [row.id, row]));
+    for (const row of databaseAudit) auditById.set(row.id, row);
+    auditLogsStore.splice(0, auditLogsStore.length, ...auditById.values());
+  }
+}
+
+let wipMutationQueue: Promise<unknown> = Promise.resolve();
+
+async function executePersistentWipMutation<T extends { success: boolean }>(mutation: () => T): Promise<T> {
+  const task = wipMutationQueue.catch(() => undefined).then(async () => {
+    const clone = <V>(value: V): V => JSON.parse(JSON.stringify(value)) as V;
+    const previousOrders = clone(manufacturingOrdersStore);
+    const previousTransfers = clone(wipTransfersStore);
+    const previousLogs = clone(productionLogsStore);
+    const result = mutation();
+    if (!result.success) return result;
+
+    try {
+      await persistProductionWipState();
+      return result;
+    } catch (error) {
+      manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...previousOrders);
+      wipTransfersStore.splice(0, wipTransfersStore.length, ...previousTransfers);
+      productionLogsStore.splice(0, productionLogsStore.length, ...previousLogs);
+      throw error;
+    }
+  });
+
+  wipMutationQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
 
 export const apiRouter = Router();
 
@@ -1518,6 +1798,10 @@ apiRouter.post('/demo-data/seed', async (_req: Request, res: Response) => {
 
   reseedCustomerOrdersAndPlans();
   reseedProductionWipData();
+  await persistProductionWipState();
+  auditLogsStore.length = 0;
+  auditLogsStore.push(...INITIAL_AUDIT_LOGS);
+  await persistInventoryAppState();
 
   const summary = calculateInventoryLedger(transactionsStore, partsStore);
   res.json({
@@ -1548,6 +1832,8 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   contractsStore.length = 0;
   reservationsStore.length = 0;
   coilIssueRecordsStore.length = 0;
+  auditLogsStore.length = 0;
+  for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
 
   clearCustomerOrdersAndPlans();
   clearProductionWipData();
@@ -1556,6 +1842,8 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   try {
     const prisma = getPrismaClient();
     if (prisma) {
+      await prisma.wipStateSnapshot.deleteMany({});
+      await prisma.inventoryAppStateSnapshot.deleteMany({});
       await prisma.productionScrap.deleteMany({}).catch(() => {});
       await prisma.machineAssignment.deleteMany({}).catch(() => {});
       await prisma.productionReport.deleteMany({}).catch(() => {});
@@ -1582,6 +1870,9 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   } catch (dbErr) {
     console.warn('Prisma tables wipe notice:', dbErr);
   }
+
+  await persistInventoryAppState();
+  await persistProductionWipState();
 
   const summary = calculateInventoryLedger(transactionsStore, partsStore);
   res.json({
@@ -1847,7 +2138,7 @@ apiRouter.get('/inventory/documents/:id', (req: Request, res: Response) => {
 /**
  * 16.5. Create Inventory Document (Draft or Auto-post)
  */
-apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
+apiRouter.post('/inventory/documents', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     const autoPost = payload.autoPost === true;
@@ -1907,7 +2198,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
         ownership: l.ownership || payload.ownership || 'COMPANY_OWNED',
         contractId: l.contractId || payload.contractId,
         contractNumber: l.contractNumber || payload.contractNumber,
-        locationCode: l.locationCode || 'LOC-01',
+        locationCode: l.locationCode || undefined,
         targetLocationCode: l.targetLocationCode,
         quantity: qty,
         unit: part ? part.unit : l.unit || 'PCS',
@@ -1950,6 +2241,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
         uid: payload.user?.uid || 'USR-OP-01',
         displayName: payload.user?.displayName || 'کاربر سیستم',
       };
+      const previousReservations = JSON.parse(JSON.stringify(reservationsStore)) as InventoryReservation[];
       const postResult = atomicPostDocument(
         newDoc,
         inventoryDocsStore,
@@ -1960,6 +2252,13 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
 
       if (!postResult.success) {
         return res.status(400).json({ success: false, error: postResult.error });
+      }
+
+      // Do not report a posted document until the relational ledger transaction commits.
+      const dbResult = await postDocumentInDbTransaction(newDoc, user);
+      if (!dbResult.success) {
+        reservationsStore.splice(0, reservationsStore.length, ...previousReservations);
+        return res.status(409).json({ success: false, error: dbResult.error || 'ثبت قطعی در PostgreSQL ناموفق بود.' });
       }
 
       inventoryDocsStore.unshift(newDoc);
@@ -2048,10 +2347,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
         }
       }
 
-      // Persist to PostgreSQL via Prisma transaction
-      postDocumentInDbTransaction(newDoc, user).catch(err => {
-        console.warn('PostgreSQL Prisma transaction background warning:', err?.message || err);
-      });
+      await persistInventoryAppState();
 
       return res.status(201).json({
         success: true,
@@ -2061,6 +2357,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
     }
 
     inventoryDocsStore.unshift(newDoc);
+    await persistInventoryAppState();
     res.status(201).json({
       success: true,
       message: `پیش‌نویس سند شماره «${newDoc.documentNumber}» ثبت شد. توجه: پیش‌نویس تا زمان ثبت قطعی در کاردکس اثر ندارد.`,
@@ -2077,7 +2374,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
 /**
  * 16.6. Atomic Post Document
  */
-apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) => {
+apiRouter.post('/inventory/documents/:id/post', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { user } = req.body;
@@ -2093,6 +2390,15 @@ apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) =>
       displayName: user?.displayName || 'مدیر انبار',
     };
 
+    const previousState = {
+      postingStatus: doc.postingStatus,
+      documentStatus: doc.documentStatus,
+      postedByUid: doc.postedByUid,
+      postedByName: doc.postedByName,
+      postedAt: doc.postedAt,
+      updatedAt: doc.updatedAt,
+    };
+
     const postResult = atomicPostDocument(
       doc,
       inventoryDocsStore,
@@ -2105,18 +2411,26 @@ apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) =>
       return res.status(400).json({ success: false, error: postResult.error });
     }
 
+    // A successful response is sent only after the PostgreSQL transaction commits.
+    const dbResult = await postDocumentInDbTransaction(doc, postUser);
+    if (!dbResult.success) {
+      Object.assign(doc, previousState);
+      return res.status(409).json({
+        success: false,
+        error: dbResult.error || 'ثبت سند در PostgreSQL انجام نشد؛ وضعیت سند به حالت قبل بازگردانده شد.',
+      });
+    }
+
     if (postResult.auditRecord) {
       auditLogsStore.unshift(postResult.auditRecord);
     }
-
-    // Persist to PostgreSQL via Prisma transaction
-    postDocumentInDbTransaction(doc, postUser).catch(err => {
-      console.warn('PostgreSQL Prisma transaction background warning:', err?.message || err);
+    await persistInventoryAppState().catch(err => {
+      console.warn('Inventory app-state snapshot warning after committed ledger post:', err?.message || err);
     });
 
-    res.json({
+    return res.json({
       success: true,
-      message: `سند شماره «${doc.documentNumber}» با موفقیت در کاردکس و موجودی رسمی ثبت قطعی گردید.`,
+      message: `سند شماره «${doc.documentNumber}» با موفقیت در PostgreSQL، کاردکس و موجودی رسمی ثبت قطعی گردید.`,
       data: doc,
     });
   } catch (error) {
@@ -2130,7 +2444,7 @@ apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) =>
 /**
  * 16.7. Reversal Document (Document Correction)
  */
-apiRouter.post('/inventory/documents/:id/reverse', (req: Request, res: Response) => {
+apiRouter.post('/inventory/documents/:id/reverse', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { reason, user } = req.body;
@@ -2159,6 +2473,7 @@ apiRouter.post('/inventory/documents/:id/reverse', (req: Request, res: Response)
     if (reversalResult.auditRecord) {
       auditLogsStore.unshift(reversalResult.auditRecord);
     }
+    await persistInventoryAppState();
 
     res.json({
       success: true,
@@ -2256,7 +2571,7 @@ apiRouter.get('/inventory/stock-inquiry', (req: Request, res: Response) => {
 /**
  * 16.8.1 Toggle QC Hold (قرنطینه کیفی) on Warehouse Stock Row or Coil
  */
-apiRouter.post('/inventory/qc-hold', (req: Request, res: Response) => {
+apiRouter.post('/inventory/qc-hold', async (req: Request, res: Response) => {
   try {
     const { key, partId, partCode, materialGrade, lotNumber, isHeld, heldQty, heldWeightKg, reasonFa } = req.body;
     if (!key) {
@@ -2289,6 +2604,7 @@ apiRouter.post('/inventory/qc-hold', (req: Request, res: Response) => {
       targetCoil.physicalStatus = isHeld ? 'BLOCKED' : targetCoil.remainingWeightKg > 0 ? 'AVAILABLE' : 'CONSUMED';
     }
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: isHeld
@@ -2375,7 +2691,7 @@ apiRouter.get('/inventory/reservations', (_req: Request, res: Response) => {
   res.json({ success: true, count: reservationsStore.length, data: reservationsStore });
 });
 
-apiRouter.post('/inventory/reservations', (req: Request, res: Response) => {
+apiRouter.post('/inventory/reservations', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     if (!payload.partId || !payload.warehouseId || !payload.quantity) {
@@ -2424,6 +2740,7 @@ apiRouter.post('/inventory/reservations', (req: Request, res: Response) => {
     };
 
     reservationsStore.unshift(newRes);
+    await persistInventoryAppState();
     res.status(201).json({ success: true, message: 'رزرو موجودی با موفقیت ثبت شد.', data: newRes });
   } catch (error) {
     res.status(500).json({
@@ -2433,7 +2750,7 @@ apiRouter.post('/inventory/reservations', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/reservations/:id/release', (req: Request, res: Response) => {
+apiRouter.post('/inventory/reservations/:id/release', async (req: Request, res: Response) => {
   const { id } = req.params;
   const resIndex = reservationsStore.findIndex(r => r.id === id);
   if (resIndex === -1) {
@@ -2441,6 +2758,7 @@ apiRouter.post('/inventory/reservations/:id/release', (req: Request, res: Respon
   }
 
   reservationsStore[resIndex].status = 'RELEASED';
+  await persistInventoryAppState();
   res.json({ success: true, message: 'رزرو با موفقیت آزاد گردید و به موجودی قابل استفاده بازگشت.', data: reservationsStore[resIndex] });
 });
 
@@ -2532,7 +2850,7 @@ apiRouter.get('/inventory/contracts', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/contracts', (req: Request, res: Response) => {
+apiRouter.post('/inventory/contracts', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     if (!payload.contractNumber || !payload.title) {
@@ -2616,6 +2934,7 @@ apiRouter.post('/inventory/contracts', (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
 
+    await persistInventoryAppState();
     res.status(201).json({
       success: true,
       message: `قرارداد شماره «${newContract.contractNumber}» با موفقیت در سیستم ثبت گردید.`,
@@ -2629,7 +2948,7 @@ apiRouter.post('/inventory/contracts', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/inventory/contracts/:id', (req: Request, res: Response) => {
+apiRouter.put('/inventory/contracts/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const payload = req.body;
@@ -2678,6 +2997,7 @@ apiRouter.put('/inventory/contracts/:id', (req: Request, res: Response) => {
 
     contractsStore[contractIndex] = updated;
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `قرارداد شماره «${updated.contractNumber}» به‌روزرسانی شد و در تاریخچه ویرایش‌ها ثبت گردید.`,
@@ -2691,7 +3011,7 @@ apiRouter.put('/inventory/contracts/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
+apiRouter.delete('/inventory/contracts/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const contract = contractsStore.find(c => c.id === id || c.contractNumber === id);
@@ -2707,6 +3027,7 @@ apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
     if (hasMovements) {
       // Soft-cancel instead of hard delete to preserve Kardex integrity
       contract.status = 'SUSPENDED';
+      await persistInventoryAppState();
       return res.json({
         success: true,
         message: `قرارداد «${contract.contractNumber}» به دلیل داشتن گردش کاردکس قطعی، به وضعیت «تعلیق» تغییر یافت و سوابق آن حفظ شد.`,
@@ -2715,6 +3036,7 @@ apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
     }
 
     contractsStore = contractsStore.filter(c => c.id !== contract.id);
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `قرارداد «${contract.contractNumber}» با موفقیت حذف گردید.`,
@@ -2727,7 +3049,7 @@ apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/contracts/:id/allocate-coil', (req: Request, res: Response) => {
+apiRouter.post('/inventory/contracts/:id/allocate-coil', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { coilId, allocatedWeightKg, notes } = req.body;
@@ -2769,6 +3091,7 @@ apiRouter.post('/inventory/contracts/:id/allocate-coil', (req: Request, res: Res
       coil.allocations.push(allocRecord);
     }
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `مقدار ${weight} کیلوگرم از کلاف «${coil.coilId}» (پکینگ: ${coil.coilPackNumber}) به قرارداد «${contract.contractNumber}» تخصیص یافت.`,
@@ -2838,7 +3161,7 @@ apiRouter.get('/inventory/coils', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/coils', (req: Request, res: Response) => {
+apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     if (!payload.coilId || !payload.partId || !payload.originalWeightKg || !payload.warehouseId) {
@@ -2926,6 +3249,7 @@ apiRouter.post('/inventory/coils', (req: Request, res: Response) => {
     };
     inventoryDocsStore.unshift(autoDoc);
 
+    await persistInventoryAppState();
     res.status(201).json({
       success: true,
       message: `کلاف فیزیکی شماره «${newCoil.coilId}» (پکینگ ${newCoil.coilPackNumber}) در انبار و گزارش‌ها با موفقیت ثبت گردید.`,
@@ -2939,7 +3263,7 @@ apiRouter.post('/inventory/coils', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/coils/:id/issue', (req: Request, res: Response) => {
+apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { issuedWeightKg, moId, moOperationId, scrappedKg, user, multiParts } = req.body;
@@ -3020,6 +3344,7 @@ apiRouter.post('/inventory/coils/:id/issue', (req: Request, res: Response) => {
       coilIssueRecordsStore.unshift(result.issueRecord);
     }
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `مقدار ${issuedWeightKg} کیلوگرم از کلاف «${coil.coilId}» جهت خط تولید صادر شد. مانده کلاف: ${coil.remainingWeightKg} کیلوگرم.`,
@@ -3093,7 +3418,7 @@ apiRouter.get('/inventory/coils/:id/genealogy', (req: Request, res: Response) =>
   }
 });
 
-apiRouter.post('/inventory/coils/:id/return', (req: Request, res: Response) => {
+apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { returnedRemnantWeightKg, warehouseId, locationCode, notes, user } = req.body;
@@ -3125,6 +3450,7 @@ apiRouter.post('/inventory/coils/:id/return', (req: Request, res: Response) => {
       coilIssueRecordsStore.unshift(result.returnRecord);
     }
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `ته‌کلاف / مازاد به وزن ${returnedRemnantWeightKg} کیلوگرم با حفظ پکینگ اصلی (${coil.coilPackNumber}) به انبار برگشت داده شد. مانده جدید کلاف: ${coil.remainingWeightKg} کیلوگرم.`,
@@ -3139,7 +3465,7 @@ apiRouter.post('/inventory/coils/:id/return', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/coils/:id/allocate', (req: Request, res: Response) => {
+apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { allocations } = req.body;
@@ -3169,6 +3495,7 @@ apiRouter.post('/inventory/coils/:id/allocate', (req: Request, res: Response) =>
       ownership: a.ownership || coil.ownership,
     }));
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `تخصیص چندقراردادی کلاف شماره «${coil.coilId}» به‌روزرسانی شد.`,
@@ -3188,8 +3515,15 @@ apiRouter.post('/inventory/coils/:id/allocate', (req: Request, res: Response) =>
  * Automatically deducts consumed raw materials / fasteners / WIP sub-assemblies
  * and posts official WIP or Finished Goods receipts with full Heat/Coil traceability.
  */
-apiRouter.post('/production/execute-op-backflush', (req: Request, res: Response) => {
+apiRouter.post('/production/execute-op-backflush', async (req: Request, res: Response) => {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(409).json({
+        success: false,
+        error: 'اجرای Backflush فعلاً به نسبت‌های ثابت نمونه متکی است و تا زمان اتصال به BOM تأییدشده و ردیابی واقعی کویل در محیط عملیاتی غیرفعال است.',
+      });
+    }
+
     const {
       orderCode = 'MO-ECU-01',
       partId,
@@ -3558,6 +3892,7 @@ apiRouter.post('/production/execute-op-backflush', (req: Request, res: Response)
     }
 
     const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
+    await persistInventoryAppState();
 
     res.json({
       success: true,
@@ -3997,33 +4332,102 @@ apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/inventory/report-configs', (_req: Request, res: Response) => {
-  res.json({ success: true, count: savedReportsStore.length, data: savedReportsStore });
-});
-
-apiRouter.post('/inventory/report-configs', (req: Request, res: Response) => {
+apiRouter.get('/inventory/report-configs', async (_req: Request, res: Response) => {
   try {
-    const payload = req.body;
-    if (!payload.name || !payload.reportType) {
-      return res.status(400).json({ success: false, error: 'نام گزارش و نوع گزارش الزامی است.' });
-    }
-
-    const newConfig: SavedReportConfig = {
-      id: payload.id || `REP-CFG-${Date.now()}`,
-      name: payload.name,
-      reportType: payload.reportType,
-      selectedColumns: payload.selectedColumns || [],
-      groupBy: payload.groupBy || [],
-      filters: payload.filters || {},
-      createdAt: new Date().toISOString(),
-    };
-
-    savedReportsStore.unshift(newConfig);
-    res.status(201).json({ success: true, message: 'پیکربندی گزارش با موفقیت ذخیره شد.', data: newConfig });
-  } catch (error) {
+    const records = await getPrismaClient().savedReportConfig.findMany({
+      orderBy: { updatedAt: 'desc' },
+    });
+    const data: SavedReportConfig[] = records.map(record => ({
+      id: record.id,
+      name: record.name,
+      reportType: record.reportType as SavedReportConfig['reportType'],
+      selectedColumns: Array.isArray(record.selectedColumns) ? record.selectedColumns as string[] : [],
+      groupBy: Array.isArray(record.groupBy) ? record.groupBy as string[] : [],
+      filters: record.filters && typeof record.filters === 'object' && !Array.isArray(record.filters)
+        ? record.filters as Record<string, any>
+        : {},
+      sortBy: record.sortBy || undefined,
+      sortOrder: record.sortOrder === 'desc' ? 'desc' : 'asc',
+      createdAt: record.createdAt.toISOString(),
+    }));
+    res.json({ success: true, count: data.length, data });
+  } catch (err) {
     res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'خطا در ذخیره پیکربندی گزارش',
+      error: err instanceof Error ? err.message : 'خطا در دریافت پیکربندی گزارش‌ها از PostgreSQL',
+    });
+  }
+});
+
+apiRouter.post('/inventory/report-configs', async (req: Request, res: Response) => {
+  try {
+    const payload = req.body || {};
+    const allowedReportTypes = new Set([
+      'COILS_SUMMARY',
+      'COIL_PACK_INQUIRY',
+      'CONTRACT_STOCK',
+      'WAREHOUSE_STOCK',
+      'OWNERSHIP_REPORT',
+      'CUSTOM',
+    ]);
+    if (typeof payload.name !== 'string' || !payload.name.trim() || !allowedReportTypes.has(payload.reportType)) {
+      return res.status(400).json({ success: false, error: 'نام معتبر گزارش و نوع گزارش مجاز الزامی است.' });
+    }
+
+    const id = typeof payload.id === 'string' && payload.id.trim()
+      ? payload.id.trim()
+      : `REP-CFG-${Date.now()}`;
+    const selectedColumns = Array.isArray(payload.selectedColumns)
+      ? payload.selectedColumns.filter((value: unknown): value is string => typeof value === 'string')
+      : [];
+    const groupBy = Array.isArray(payload.groupBy)
+      ? payload.groupBy.filter((value: unknown): value is string => typeof value === 'string')
+      : [];
+    const filters = payload.filters && typeof payload.filters === 'object' && !Array.isArray(payload.filters)
+      ? payload.filters
+      : {};
+    const sortBy = typeof payload.sortBy === 'string' && payload.sortBy.trim() ? payload.sortBy.trim() : null;
+    const sortOrder = payload.sortOrder === 'desc' ? 'desc' : 'asc';
+
+    const record = await getPrismaClient().savedReportConfig.upsert({
+      where: { id },
+      create: {
+        id,
+        name: payload.name.trim(),
+        reportType: payload.reportType,
+        selectedColumns,
+        groupBy,
+        filters,
+        sortBy,
+        sortOrder,
+      },
+      update: {
+        name: payload.name.trim(),
+        reportType: payload.reportType,
+        selectedColumns,
+        groupBy,
+        filters,
+        sortBy,
+        sortOrder,
+      },
+    });
+
+    const data: SavedReportConfig = {
+      id: record.id,
+      name: record.name,
+      reportType: record.reportType as SavedReportConfig['reportType'],
+      selectedColumns,
+      groupBy,
+      filters,
+      sortBy: record.sortBy || undefined,
+      sortOrder: record.sortOrder === 'desc' ? 'desc' : 'asc',
+      createdAt: record.createdAt.toISOString(),
+    };
+    res.status(201).json({ success: true, message: 'پیکربندی گزارش در PostgreSQL ذخیره شد.', data });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : 'خطا در ذخیره پیکربندی گزارش در PostgreSQL',
     });
   }
 });
@@ -4895,9 +5299,9 @@ apiRouter.get('/wip/manufacturing-orders/:id', (req: Request, res: Response) => 
 /**
  * 17.4. Create New Manufacturing Order from Approved Part Routing
  */
-apiRouter.post('/wip/manufacturing-orders', (req: Request, res: Response) => {
+apiRouter.post('/wip/manufacturing-orders', async (req: Request, res: Response) => {
   try {
-    const result = createManufacturingOrder(req.body);
+    const result = await executePersistentWipMutation(() => createManufacturingOrder(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -4913,9 +5317,9 @@ apiRouter.post('/wip/manufacturing-orders', (req: Request, res: Response) => {
 /**
  * 17.5. Register Operation Input (Loading into machine from waiting queue)
  */
-apiRouter.post('/wip/operations/input', (req: Request, res: Response) => {
+apiRouter.post('/wip/operations/input', async (req: Request, res: Response) => {
   try {
-    const result = registerOperationInput(req.body);
+    const result = await executePersistentWipMutation(() => registerOperationInput(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -4931,9 +5335,9 @@ apiRouter.post('/wip/operations/input', (req: Request, res: Response) => {
 /**
  * 17.6. Register Good Production, Scrap, Rework, Rejected Quantities
  */
-apiRouter.post('/wip/operations/production', (req: Request, res: Response) => {
+apiRouter.post('/wip/operations/production', async (req: Request, res: Response) => {
   try {
-    const result = registerOperationProduction(req.body);
+    const result = await executePersistentWipMutation(() => registerOperationProduction(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -4963,9 +5367,9 @@ apiRouter.get('/wip/transfers', (_req: Request, res: Response) => {
 /**
  * 17.8. Create Inter-Operation Transfer
  */
-apiRouter.post('/wip/transfers', (req: Request, res: Response) => {
+apiRouter.post('/wip/transfers', async (req: Request, res: Response) => {
   try {
-    const result = createOperationTransfer(req.body);
+    const result = await executePersistentWipMutation(() => createOperationTransfer(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -4981,14 +5385,14 @@ apiRouter.post('/wip/transfers', (req: Request, res: Response) => {
 /**
  * 17.9. Approve & Receive Inter-Operation Transfer
  */
-apiRouter.post('/wip/transfers/:id/approve', (req: Request, res: Response) => {
+apiRouter.post('/wip/transfers/:id/approve', async (req: Request, res: Response) => {
   try {
     const { receivedBy, notes } = req.body;
-    const result = approveOperationTransfer({
+    const result = await executePersistentWipMutation(() => approveOperationTransfer({
       transferId: req.params.id,
       receivedBy: receivedBy || 'سرپرست ایستگاه مقصد',
       notes,
-    });
+    }));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -5004,14 +5408,14 @@ apiRouter.post('/wip/transfers/:id/approve', (req: Request, res: Response) => {
 /**
  * 17.10. Reject Inter-Operation Transfer
  */
-apiRouter.post('/wip/transfers/:id/reject', (req: Request, res: Response) => {
+apiRouter.post('/wip/transfers/:id/reject', async (req: Request, res: Response) => {
   try {
     const { rejectedBy, rejectionReason } = req.body;
-    const result = rejectOperationTransfer({
+    const result = await executePersistentWipMutation(() => rejectOperationTransfer({
       transferId: req.params.id,
       rejectedBy: rejectedBy || 'بازرس کنترل کیفیت',
       rejectionReason: rejectionReason || 'مغایرت تعداد یا عدم انطباق کیفی در ورودی',
-    });
+    }));
     if (!result.success) {
       return res.status(400).json(result);
     }

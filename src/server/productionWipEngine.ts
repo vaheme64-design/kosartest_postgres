@@ -7,11 +7,69 @@ import {
   MoReconciliationReport,
 } from '../types/productionWip';
 import { INITIAL_ROUTINGS, INITIAL_PARTS } from './sampleData';
+import { getPrismaClient, isDatabaseUrlConfigured } from './db/prisma';
 
 // In-Memory Data Store for Production & WIP Execution
 export const manufacturingOrdersStore: ManufacturingOrder[] = [];
 export const wipTransfersStore: WipTransfer[] = [];
 export const productionLogsStore: ProductionActivityLog[] = [];
+
+const WIP_SNAPSHOT_ID = 'production-wip-state';
+
+export async function loadProductionWipState(): Promise<boolean> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required before loading production WIP state.');
+  }
+
+  const prisma = getPrismaClient();
+  const snapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: WIP_SNAPSHOT_ID } });
+  if (!snapshot) {
+    manufacturingOrdersStore.splice(0);
+    wipTransfersStore.splice(0);
+    productionLogsStore.splice(0);
+    await persistProductionWipState();
+    return false;
+  }
+
+  const payload = snapshot.payload as {
+    manufacturingOrders?: ManufacturingOrder[];
+    wipTransfers?: WipTransfer[];
+    productionLogs?: ProductionActivityLog[];
+  };
+
+  if (
+    !payload ||
+    !Array.isArray(payload.manufacturingOrders) ||
+    !Array.isArray(payload.wipTransfers) ||
+    !Array.isArray(payload.productionLogs)
+  ) {
+    throw new Error('Persistent WIP snapshot is malformed. Refusing to overwrite it.');
+  }
+
+  manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...payload.manufacturingOrders);
+  wipTransfersStore.splice(0, wipTransfersStore.length, ...payload.wipTransfers);
+  productionLogsStore.splice(0, productionLogsStore.length, ...payload.productionLogs);
+  return true;
+}
+
+export async function persistProductionWipState(): Promise<void> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required; WIP changes cannot be stored in memory only.');
+  }
+
+  const prisma = getPrismaClient();
+  const payload = JSON.parse(JSON.stringify({
+    manufacturingOrders: manufacturingOrdersStore,
+    wipTransfers: wipTransfersStore,
+    productionLogs: productionLogsStore,
+  }));
+
+  await prisma.wipStateSnapshot.upsert({
+    where: { id: WIP_SNAPSHOT_ID },
+    create: { id: WIP_SNAPSHOT_ID, payload },
+    update: { payload },
+  });
+}
 
 // Helper to determine warehouse location based on operation process
 function getLocationForProcess(processType: string, stepNumber: number): string {
@@ -305,8 +363,6 @@ export function initializeProductionWipSeed() {
   );
 }
 
-// Initialize seed on module load
-initializeProductionWipSeed();
 
 export function clearProductionWipData() {
   manufacturingOrdersStore.length = 0;

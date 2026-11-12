@@ -1374,50 +1374,75 @@ export async function postDocumentInDbTransaction(
   user: { uid: string; displayName: string }
 ): Promise<PostDocumentResult> {
   if (!isDatabaseUrlConfigured()) {
-    // Fallback to validated memory state when DB is not configured
-    return { success: true, postedDocument: document };
+    return {
+      success: false,
+      error: 'اتصال PostgreSQL تنظیم نشده است؛ ثبت قطعی سند بدون پایگاه داده مجاز نیست.',
+    };
   }
 
   const prisma = getPrismaClient();
+  const now = new Date(document.postedAt || new Date().toISOString());
+
+  const docTypeMap: Record<InventoryDocType, string> = {
+    OPENING_BALANCE: 'INITIAL_BALANCE',
+    RECEIPT_RAW_MATERIAL: 'RECEIPT',
+    RECEIPT_FINISHED_GOODS: 'RECEIPT',
+    ISSUE_RAW_MATERIAL: 'ISSUE',
+    ISSUE_FINISHED_GOODS: 'ISSUE',
+    DELIVERY_CUSTOMER: 'ISSUE',
+    SHIPMENT_CUSTOMER: 'ISSUE',
+    TRANSFER: 'WIP_TRANSFER',
+    ADJUSTMENT: 'COUNT_ADJUSTMENT',
+    REVERSAL: 'COUNT_ADJUSTMENT',
+  };
+
+  const warehouseTypeFor = (code: string): 'RAW_MATERIALS' | 'WIP' | 'FINISHED_GOODS' | 'SCRAP' | 'TOOLING_DIES' => {
+    if (code.includes('FINISHED')) return 'FINISHED_GOODS';
+    if (code.includes('SCRAP')) return 'SCRAP';
+    if (code.includes('DIES') || code.includes('TOOL')) return 'TOOLING_DIES';
+    if (code.includes('WIP')) return 'WIP';
+    return 'RAW_MATERIALS';
+  };
 
   try {
-    const result = await prisma.$transaction(async tx => {
-      // 1. Prevent duplicate posting
+    await prisma.$transaction(async tx => {
       const existingDoc = await tx.inventoryDocument.findUnique({
         where: { documentNumber: document.documentNumber },
+        include: { transactions: true },
       });
 
-      if (existingDoc && existingDoc.postingStatus === 'POSTED') {
-        throw new Error(`سند شماره «${document.documentNumber}» قبلاً قطعی (POSTED) شده است.`);
+      if (existingDoc?.postingStatus === 'POSTED') {
+        throw new Error(`سند شماره «${document.documentNumber}» قبلاً در PostgreSQL قطعی شده است.`);
+      }
+      if (existingDoc?.transactions.length) {
+        throw new Error('برای این سند گردش انبار قبلاً ایجاد شده است؛ از ثبت مجدد جلوگیری شد.');
       }
 
-      // 2. Fetch or create warehouse in DB
-      let warehouse = await tx.warehouse.findUnique({
-        where: { code: document.warehouseId },
-      });
-      if (!warehouse) {
-        warehouse = await tx.warehouse.create({
-          data: {
-            code: document.warehouseId,
-            name: document.warehouseName || document.warehouseId,
-            type: 'RAW_MATERIALS',
-          },
+      const resolveWarehouse = async (code: string, name: string) => {
+        let warehouse = await tx.warehouse.findFirst({
+          where: { OR: [{ code }, { id: code }] },
         });
-      }
+        if (!warehouse) {
+          warehouse = await tx.warehouse.create({
+            data: { code, name: name || code, type: warehouseTypeFor(code) },
+          });
+        }
+        return warehouse;
+      };
 
-      // 3. Find or create User
+      const warehouse = await resolveWarehouse(document.warehouseId, document.warehouseName);
+      const targetWarehouse = document.documentType === 'TRANSFER' && document.targetWarehouseId
+        ? await resolveWarehouse(document.targetWarehouseId, document.targetWarehouseName || document.targetWarehouseId)
+        : null;
+
       let dbUser = await tx.user.findFirst({
-        where: { email: `${user.uid}@kpims.local` },
+        where: { OR: [{ username: user.uid }, { email: `${user.uid}@kpims.local` }] },
       });
       if (!dbUser) {
-        let defaultRole = await tx.role.findFirst();
+        let defaultRole = await tx.role.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
         if (!defaultRole) {
           defaultRole = await tx.role.create({
-            data: {
-              name: 'ADMIN',
-              displayName: 'مدیر ارشد سیستم',
-              description: 'System Administrator',
-            },
+            data: { name: 'ADMIN', displayName: 'مدیر ارشد سیستم', description: 'System Administrator' },
           });
         }
         dbUser = await tx.user.create({
@@ -1430,67 +1455,306 @@ export async function postDocumentInDbTransaction(
         });
       }
 
-      // 4. Create or update document
-      const docType =
-        document.documentType === 'ISSUE_RAW_MATERIAL'
-          ? 'ISSUE'
-          : document.documentType === 'TRANSFER'
-          ? 'WIP_TRANSFER'
-          : 'RECEIPT';
+      const documentData = {
+        documentType: docTypeMap[document.documentType] as any,
+        documentDate: new Date(document.documentDate),
+        documentStatus: 'CONFIRMED' as const,
+        postingStatus: 'POSTED' as const,
+        warehouseId: warehouse.id,
+        targetWarehouseId: targetWarehouse?.id,
+        referenceNumber: document.referenceNumber,
+        postedByUserId: dbUser.id,
+        postedAt: now,
+        notes: document.adjustmentReason || document.auditNote || document.referenceNumber,
+      };
 
-      const createdDoc = await tx.inventoryDocument.upsert({
-        where: { documentNumber: document.documentNumber },
-        create: {
-          documentNumber: document.documentNumber,
-          documentType: docType as any,
-          documentDate: new Date(document.documentDate),
-          documentStatus: 'CONFIRMED',
-          postingStatus: 'POSTED',
-          warehouseId: warehouse.id,
-          referenceNumber: document.referenceNumber,
-          createdByUserId: dbUser.id,
-          postedByUserId: dbUser.id,
-          postedAt: new Date(),
-          notes: document.adjustmentReason || document.auditNote,
-        },
-        update: {
-          documentStatus: 'CONFIRMED',
-          postingStatus: 'POSTED',
-          postedByUserId: dbUser.id,
-          postedAt: new Date(),
-        },
-      });
+      let dbDocument;
+      if (existingDoc) {
+        dbDocument = await tx.inventoryDocument.update({
+          where: { id: existingDoc.id },
+          data: { ...documentData, createdByUserId: existingDoc.createdByUserId },
+        });
+        await tx.inventoryDocumentLine.deleteMany({ where: { documentId: dbDocument.id } });
+      } else {
+        dbDocument = await tx.inventoryDocument.create({
+          data: {
+            ...documentData,
+            documentNumber: document.documentNumber,
+            createdByUserId: dbUser.id,
+          },
+        });
+      }
 
-      // 5. Create audit log
+      const resolveLocation = async (code: string | undefined, warehouseId: string) => {
+        if (!code) return null;
+        const location = await tx.warehouseLocation.findFirst({
+          where: { code, warehouseId, active: true },
+        });
+        if (!location) {
+          throw new Error(`موقعیت انبار «${code}» در انبار انتخاب‌شده تعریف نشده است.`);
+        }
+        return location;
+      };
+
+      const createMovement = async (args: {
+        line: InventoryDocumentLine;
+        lineId: string;
+        partId: string;
+        unitId: string;
+        warehouseId: string;
+        locationId: string | null;
+        signedQuantity: number;
+        signedWeightKg: number;
+        suffix: string;
+        movementType: 'INBOUND' | 'OUTBOUND' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'ADJUSTMENT_POS' | 'ADJUSTMENT_NEG';
+      }) => {
+        const {
+          line, lineId, partId, unitId, warehouseId, locationId,
+          signedQuantity, signedWeightKg, suffix, movementType,
+        } = args;
+        const resolvedLot = line.materialLotId
+          ? await tx.materialLot.findFirst({
+              where: { OR: [{ id: line.materialLotId }, { lotNumber: line.materialLotId }] },
+            })
+          : line.lotNumber
+            ? await tx.materialLot.findUnique({ where: { lotNumber: line.lotNumber } })
+            : null;
+        const lotId = resolvedLot?.id || null;
+
+        if ((line.materialLotId || line.lotNumber) && !resolvedLot) {
+          throw new Error(`بچ/کویل «${line.lotNumber || line.materialLotId}» در پایگاه داده ثبت نشده است؛ ابتدا اطلاعات ردیابی آن را ایجاد کنید.`);
+        }
+
+        const ownership = line.ownership || document.ownership || 'COMPANY_OWNED';
+        const contractId = line.contractId || document.contractId || null;
+        const contractNumber = line.contractNumber || document.contractNumber || null;
+        const qualityStatus = line.qualityStatus || 'AVAILABLE';
+
+        if (signedQuantity < 0 && qualityStatus !== 'AVAILABLE') {
+          throw new Error(`خروج کالای دارای وضعیت کیفی «${qualityStatus}» مجاز نیست؛ ابتدا وضعیت کنترل کیفیت را تعیین تکلیف کنید.`);
+        }
+
+        const existingBalance = await tx.stockBalance.findFirst({
+          where: {
+            partId,
+            warehouseId,
+            locationId,
+            materialLotId: lotId,
+            ownership,
+            contractId,
+            qualityStatus,
+          },
+        });
+        const currentQty = Number(existingBalance?.quantityOnHand || 0);
+        const currentReserved = Number(existingBalance?.quantityReserved || 0);
+        const currentKg = Number(existingBalance?.weightKgOnHand || 0);
+        const currentReservedKg = Number(existingBalance?.weightKgReserved || 0);
+        const nextQty = currentQty + signedQuantity;
+        const nextKg = currentKg + signedWeightKg;
+
+        if (nextQty - currentReserved < -0.000001 || nextKg - currentReservedKg < -0.000001) {
+          throw new Error(`موجودی پایگاه داده برای قطعه «${line.partCode}» در این انبار/بچ کافی نیست. موجودی آزاد: ${Math.max(0, currentQty-currentReserved)}، مقدار درخواستی: ${Math.abs(signedQuantity)}.`);
+        }
+
+        const quantityAbs = Math.abs(signedQuantity);
+        const weightAbs = Math.abs(signedWeightKg);
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `${document.documentNumber}-L${String(line.lineNumber).padStart(3, '0')}-${suffix}`,
+            documentId: dbDocument.id,
+            documentLineId: lineId,
+            partId,
+            materialLotId: lotId,
+            warehouseId,
+            locationId,
+            transactionType: movementType,
+            quantity: quantityAbs,
+            quantitySigned: signedQuantity,
+            unitId,
+            weightKg: weightAbs,
+            weightKgSigned: signedWeightKg,
+            ownership,
+            contractId,
+            contractNumber,
+            qualityStatus,
+            balanceAfter: nextQty,
+            balanceKgAfter: nextKg,
+            transactionDate: now,
+            postingStatus: 'POSTED',
+            createdByUserId: dbUser.id,
+          },
+        });
+
+        if (existingBalance) {
+          await tx.stockBalance.update({
+            where: { id: existingBalance.id },
+            data: {
+              quantityOnHand: nextQty,
+              quantityAvailable: qualityStatus === 'AVAILABLE' ? nextQty - currentReserved : 0,
+              weightKgOnHand: nextKg,
+              weightKgAvailable: qualityStatus === 'AVAILABLE' ? nextKg - currentReservedKg : 0,
+              lastTransactionAt: now,
+            },
+          });
+        } else {
+          await tx.stockBalance.create({
+            data: {
+              partId,
+              warehouseId,
+              locationId,
+              materialLotId: lotId,
+              quantityOnHand: nextQty,
+              quantityReserved: 0,
+              quantityAvailable: qualityStatus === 'AVAILABLE' ? nextQty : 0,
+              weightKgOnHand: nextKg,
+              weightKgReserved: 0,
+              weightKgAvailable: qualityStatus === 'AVAILABLE' ? nextKg : 0,
+              ownership,
+              contractId,
+              contractNumber,
+              qualityStatus,
+              lastTransactionAt: now,
+            },
+          });
+        }
+
+        // A transfer changes warehouse balances but not the physical coil's total remaining weight.
+        // Receipts, issues and adjustments update the lot's remaining weight in the same DB transaction.
+        if (lotId && movementType !== 'TRANSFER_IN' && movementType !== 'TRANSFER_OUT') {
+          const materialLot = await tx.materialLot.findUnique({ where: { id: lotId } });
+          if (!materialLot) throw new Error(`بچ/کویل مرتبط با ردیف «${line.partCode}» یافت نشد.`);
+          const nextLotWeight = Number(materialLot.remainingWeightKg) + signedWeightKg;
+          if (nextLotWeight < -0.000001) {
+            throw new Error(`وزن قابل مصرف کویل «${materialLot.lotNumber}» کافی نیست. مانده: ${materialLot.remainingWeightKg}، درخواست: ${Math.abs(signedWeightKg)} کیلوگرم.`);
+          }
+          await tx.materialLot.update({
+            where: { id: lotId },
+            data: { remainingWeightKg: Math.max(0, nextLotWeight) },
+          });
+        }
+      };
+
+      for (const line of document.lines) {
+        const part = await tx.part.findFirst({
+          where: { OR: [{ partNumber: line.partCode }, { id: line.partId }] },
+        });
+        if (!part) {
+          throw new Error(`کد کالا «${line.partCode}» در Master Data دیتابیس وجود ندارد. ابتدا Seed/اطلاعات پایه را همگام کنید.`);
+        }
+
+        const unit = await tx.unitOfMeasure.findUnique({ where: { code: line.unit } });
+        if (!unit) {
+          throw new Error(`واحد «${line.unit}» برای کالا «${line.partCode}» در دیتابیس تعریف نشده است.`);
+        }
+
+        const location = await resolveLocation(line.locationCode, warehouse.id);
+        const lot = line.materialLotId
+          ? await tx.materialLot.findFirst({
+              where: { OR: [{ id: line.materialLotId }, { lotNumber: line.materialLotId }] },
+            })
+          : line.lotNumber
+            ? await tx.materialLot.findUnique({ where: { lotNumber: line.lotNumber } })
+            : null;
+        if ((line.materialLotId || line.lotNumber) && !lot) {
+          throw new Error(`بچ/کویل «${line.lotNumber || line.materialLotId}» یافت نشد.`);
+        }
+
+        const lineOwnership = line.ownership || document.ownership || 'COMPANY_OWNED';
+        const lineContractId = line.contractId || document.contractId || null;
+        const lineContractNumber = line.contractNumber || document.contractNumber || null;
+        const dbLine = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: dbDocument.id,
+            lineNumber: line.lineNumber,
+            partId: part.id,
+            materialLotId: lot?.id,
+            locationId: location?.id,
+            targetLocationId: document.documentType === 'TRANSFER'
+              ? (await resolveLocation(line.targetLocationCode, targetWarehouse!.id))?.id
+              : null,
+            quantity: Math.abs(Number(line.quantity)),
+            unitId: unit.id,
+            weightKg: Math.abs(Number(line.quantityKg)),
+            ownership: lineOwnership,
+            contractId: lineContractId,
+            contractNumber: lineContractNumber,
+            qualityStatus: line.qualityStatus || 'AVAILABLE',
+            unitCost: line.unitCost,
+            notes: line.notes,
+          },
+        });
+
+        const qty = Number(line.quantity);
+        const kg = Number(line.quantityKg);
+        const movementSign = Math.sign(qty || kg);
+        if (!movementSign) throw new Error(`مقدار ردیف ${line.lineNumber} صفر است.`);
+
+        if (document.documentType === 'TRANSFER') {
+          if (!targetWarehouse) throw new Error('انبار مقصد برای سند انتقال مشخص نشده است.');
+          const absQty = Math.abs(qty);
+          const absKg = Math.abs(kg);
+          await createMovement({
+            line, lineId: dbLine.id, partId: part.id, unitId: unit.id,
+            warehouseId: warehouse.id, locationId: location?.id || null,
+            signedQuantity: -absQty, signedWeightKg: -absKg, suffix: 'OUT', movementType: 'TRANSFER_OUT',
+          });
+          const targetLocation = await resolveLocation(line.targetLocationCode, targetWarehouse.id);
+          await createMovement({
+            line, lineId: dbLine.id, partId: part.id, unitId: unit.id,
+            warehouseId: targetWarehouse.id, locationId: targetLocation?.id || null,
+            signedQuantity: absQty, signedWeightKg: absKg, suffix: 'IN', movementType: 'TRANSFER_IN',
+          });
+        } else {
+          let sign = movementSign;
+          let movementType: 'INBOUND' | 'OUTBOUND' | 'ADJUSTMENT_POS' | 'ADJUSTMENT_NEG';
+          if (document.documentType === 'RECEIPT_RAW_MATERIAL' || document.documentType === 'RECEIPT_FINISHED_GOODS' || document.documentType === 'OPENING_BALANCE') {
+            sign = 1;
+            movementType = 'INBOUND';
+          } else if (document.documentType === 'ISSUE_RAW_MATERIAL' || document.documentType === 'ISSUE_FINISHED_GOODS' || document.documentType === 'DELIVERY_CUSTOMER' || document.documentType === 'SHIPMENT_CUSTOMER') {
+            sign = -1;
+            movementType = 'OUTBOUND';
+          } else {
+            movementType = sign > 0 ? 'ADJUSTMENT_POS' : 'ADJUSTMENT_NEG';
+          }
+          await createMovement({
+            line, lineId: dbLine.id, partId: part.id, unitId: unit.id,
+            warehouseId: warehouse.id, locationId: location?.id || null,
+            signedQuantity: Math.abs(qty) * sign,
+            signedWeightKg: Math.abs(kg) * sign,
+            suffix: 'POST', movementType,
+          });
+        }
+      }
+
       await tx.auditLog.create({
         data: {
           userId: dbUser.id,
           action: 'DOCUMENT_POST',
           entityName: 'InventoryDocument',
-          entityId: createdDoc.id,
+          entityId: dbDocument.id,
           newValues: {
             documentNumber: document.documentNumber,
+            documentType: document.documentType,
+            lineCount: document.lines.length,
             totalQuantity: document.totalQuantity,
             totalWeightKg: document.totalWeightKg,
           },
         },
       });
-
-      return createdDoc;
-    });
+    }, { isolationLevel: 'Serializable' });
 
     document.postingStatus = 'POSTED';
     document.documentStatus = 'CONFIRMED';
-    document.postedAt = new Date().toISOString();
+    document.postedByUid = user.uid;
+    document.postedByName = user.displayName;
+    document.postedAt = now.toISOString();
+    document.updatedAt = now.toISOString();
 
-    return {
-      success: true,
-      postedDocument: document,
-    };
+    return { success: true, postedDocument: document };
   } catch (err: any) {
     return {
       success: false,
-      error: err.message || 'خطای تراکنش پایگاه داده در ثبت سند انبار',
+      error: err?.message || 'خطای تراکنش PostgreSQL هنگام ثبت قطعی سند انبار',
     };
   }
 }
