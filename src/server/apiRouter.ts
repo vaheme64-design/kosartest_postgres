@@ -3797,7 +3797,11 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           if (!Number.isFinite(netWeightPerPiece) || netWeightPerPiece <= 0) throw new Error('وزن خالص مهندسی قطعه باید تعریف شود.');
           const totalNetMaterialKg = request.issuedWeightKg - request.varianceWeightKg;
           if (totalNetMaterialKg <= 0) throw new Error('وزن خالص مواد پس از کسر افت باید مثبت باشد.');
-          wipPostingContext = { snapshotPayload, wipOrder, wipOperation, location: locationRows[0], netWeightPerPiece, totalNetMaterialKg };
+          wipPostingContext = {
+            snapshotPayload, wipOrder, wipOperation, location: locationRows[0], netWeightPerPiece, totalNetMaterialKg,
+            wipManufacturingOrderId: link.wipManufacturingOrderId,
+            wipOperationId: operationLink.wipOperationId,
+          };
         }
 
         for (const source of balanceRemainders) {
@@ -3944,8 +3948,8 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           wipPostingContext.wipOrder.updatedAt = issuedAt.toISOString();
           await tx.wipStateSnapshot.update({ where: { id: 'production-wip-state' }, data: { payload: wipPostingContext.snapshotPayload } });
           postedWipInput = {
-            wipManufacturingOrderId: link.wipManufacturingOrderId,
-            wipOperationId: operationLink.wipOperationId,
+            wipManufacturingOrderId: wipPostingContext.wipManufacturingOrderId,
+            wipOperationId: wipPostingContext.wipOperationId,
             quantityPcs: request.initialInputQuantityPcs,
           };
         }
