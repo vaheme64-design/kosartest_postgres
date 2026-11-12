@@ -3260,10 +3260,63 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
   }
 });
 
-apiRouter.get('/inventory/coils', (req: Request, res: Response) => {
+apiRouter.get('/inventory/coils', async (req: Request, res: Response) => {
   try {
     const { partId, materialGrade, warehouseId, ownership, packNumber, search } = req.query;
-    let list = [...physicalCoilsStore];
+    let list: PhysicalCoil[];
+    if (isDatabaseUrlConfigured()) {
+      // Read through to PostgreSQL so a server instance never serves an old coil balance
+      // from its process-local cache after another instance posts an issue or return.
+      const prisma = getPrismaClient();
+      const rows = await prisma.physicalCoil.findMany({
+        include: {
+          part: { select: { id: true, partNumber: true, name: true } },
+          material: { select: { grade: true } },
+          warehouse: { select: { id: true, code: true, name: true } },
+          warehouseLocation: { select: { code: true } },
+          contractAllocations: {
+            include: { contract: { select: { id: true, contractNumber: true } } },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+        orderBy: { receiptDate: 'asc' },
+      });
+      list = rows.map((row: any) => {
+        const appPart = partsStore.find(part => part.code === row.part?.partNumber);
+        return {
+          id: row.id,
+          coilId: row.coilId,
+          coilPackNumber: row.coilPackNumber,
+          partId: appPart?.id || row.partId || '',
+          partCode: row.part?.partNumber || '',
+          partName: row.part?.name || '',
+          materialGrade: row.material?.grade || '',
+          heatNumber: row.heatNumber || '',
+          thicknessMm: Number(row.thicknessMm),
+          widthMm: Number(row.widthMm),
+          originalWeightKg: Number(row.originalWeightKg),
+          remainingWeightKg: Number(row.remainingWeightKg),
+          warehouseId: row.warehouseId,
+          warehouseName: row.warehouse?.name || '',
+          warehouseLocationCode: row.warehouseLocation?.code || '',
+          ownership: row.ownership,
+          qualityStatus: row.qualityStatus,
+          physicalStatus: row.physicalStatus,
+          supplierName: row.supplierName || '',
+          receiptDate: row.receiptDate.toISOString(),
+          allocations: row.contractAllocations.map((allocation: any) => ({
+            contractId: allocation.contractId,
+            contractNumber: allocation.contract?.contractNumber || allocation.contractId,
+            coilId: row.id,
+            allocatedWeightKg: Number(allocation.allocatedWeightKg),
+            ownership: allocation.ownership,
+            notes: allocation.notes || undefined,
+          })),
+        } as PhysicalCoil;
+      });
+    } else {
+      list = [...physicalCoilsStore];
+    }
 
     if (partId && typeof partId === 'string' && partId !== 'ALL') {
       list = list.filter(c => c.partId === partId || c.partCode === partId);
