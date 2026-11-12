@@ -50,14 +50,31 @@ jobs:
       - name: Validate Prisma schema
         run: bunx prisma validate
 
+      - name: Generate initial migration preview
+        run: |
+          mkdir -p prisma/migrations/00000000000000_initial
+          bunx prisma migrate diff \
+            --from-empty \
+            --to-schema-datamodel prisma/schema.prisma \
+            --script > prisma/migrations/00000000000000_initial/migration.sql
+          test -s prisma/migrations/00000000000000_initial/migration.sql
+
+      - name: Apply migration preview to a clean PostgreSQL database
+        run: bunx prisma migrate deploy
+
+      - name: Upload migration preview for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: prisma-initial-migration-preview
+          path: prisma/migrations/00000000000000_initial/migration.sql
+          if-no-files-found: error
+          retention-days: 14
+
       - name: TypeScript check
         run: bun run lint
 
       - name: Production build
         run: bun run build
-
-      - name: Prepare disposable test database
-        run: bunx prisma db push
 
       - name: Seed canonical master data
         run: bun run seed
