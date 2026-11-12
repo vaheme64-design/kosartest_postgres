@@ -7478,7 +7478,7 @@ apiRouter.get('/reports/scrap-by-part-operation', async (req: Request, res: Resp
       const detailedScrapPieces = report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.quantity), 0);
       const detailedScrapWeight = report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.weightKg), 0);
       row.totalInputQty += Number(report.goodQuantity) + Number(report.scrapQuantity);
-      row.scrapPieces += report.scraps.length ? detailedScrapPieces : Number(report.scrapQuantity);
+      row.scrapPieces += Math.max(detailedScrapPieces, Number(report.scrapQuantity));
       row.scrapWeightKg += detailedScrapWeight;
       for (const scrap of report.scraps) {
         const reason = String(scrap.scrapReason);
