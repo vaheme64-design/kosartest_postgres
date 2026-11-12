@@ -19,6 +19,7 @@ export interface RelationalNetRequirement {
     requestedQty: number;
     deliveredQty: number;
     remainingQty: number;
+    alreadyPlannedQty: number;
     plannedQty: number;
     dueDate: string;
   }>;
@@ -68,7 +69,13 @@ export async function getRelationalPlanningReadModel() {
         customer: { select: { id: true, name: true } },
         orderLines: {
           where: { status: { notIn: ['COMPLETED', 'CANCELLED'] } },
-          include: { part: { include: { material: true } } },
+          include: {
+            part: { include: { material: true } },
+            productionPlanLines: {
+              where: { status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS'] } },
+              select: { plannedQty: true, producedQty: true },
+            },
+          },
           orderBy: [{ requestedDate: 'asc' }, { lineNumber: 'asc' }],
         },
       },
@@ -182,7 +189,12 @@ export async function getRelationalPlanningReadModel() {
 
   for (const order of orders) {
     for (const line of order.orderLines) {
-      const remaining = Math.max(0, n(line.orderedQty) - n(line.deliveredQty));
+      const orderedRemainder = Math.max(0, n(line.orderedQty) - n(line.deliveredQty));
+      const alreadyPlannedQty = (line.productionPlanLines || []).reduce(
+        (sum: number, planLine: any) => sum + Math.max(0, n(planLine.plannedQty) - n(planLine.producedQty)),
+        0,
+      );
+      const remaining = Math.max(0, orderedRemainder - alreadyPlannedQty);
       if (remaining <= 0 || !partById.has(line.partId)) continue;
       const current = demand.get(line.partId) || {
         gross: 0,
@@ -204,6 +216,7 @@ export async function getRelationalPlanningReadModel() {
         requestedQty: n(line.orderedQty),
         deliveredQty: n(line.deliveredQty),
         remainingQty: remaining,
+        alreadyPlannedQty: round1(alreadyPlannedQty),
         plannedQty: 0,
         dueDate: line.requestedDate,
       });
@@ -304,6 +317,7 @@ export async function getRelationalPlanningReadModel() {
         requestedQty: round1(line.requestedQty),
         deliveredQty: round1(line.deliveredQty),
         remainingQty: round1(line.remainingQty),
+        alreadyPlannedQty: round1(line.alreadyPlannedQty),
         plannedQty: round1(line.plannedQty),
         dueDate: line.dueDate.toISOString().slice(0, 10),
       })),
