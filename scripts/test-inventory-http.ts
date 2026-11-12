@@ -187,7 +187,7 @@ async function main() {
     assert(Number(lot?.remainingWeightKg) === 95, `Expected material lot balance 95 kg, got ${lot?.remainingWeightKg}.`);
     assert(balanceKg === 95, `Expected stock ledger balance 95 kg, got ${balanceKg}.`);
     assert(issueRecords.length > 0 && Number(issueRecords[0].outstandingWeightKg) === 5 && Number(issueRecords[0].returnedWeightKg) === 15, 'Issue/return genealogy must reconcile to 5 kg outstanding and 15 kg returned.');
-    console.log('PASS: HTTP lifecycle reconciles coil, lot, stock ledger and issue/return genealogy to 85 kg.');
+    console.log('PASS: HTTP lifecycle reconciles coil, lot, stock ledger and issue/return genealogy to 95 kg after concurrent returns.');
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
     if (coilId) {
