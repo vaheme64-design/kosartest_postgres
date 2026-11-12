@@ -3708,7 +3708,18 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
           include: { contract: { select: { id: true, contractNumber: true, title: true, status: true } } },
           orderBy: { createdAt: 'asc' },
         },
-        issueReturnRecords: { orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }] },
+        issueReturnRecords: {
+          include: { inventoryDocument: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } } },
+          orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }],
+        },
+        inventoryTransactions: {
+          include: { document: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } } },
+          orderBy: [{ transactionDate: 'asc' }],
+        },
+        inventoryDocumentLines: {
+          include: { document: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } } },
+          orderBy: [{ lineNumber: 'asc' }],
+        },
       },
     });
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی در PostgreSQL یافت نشد.' });
@@ -3729,6 +3740,20 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
     const totalVarianceKg = issueEvents.reduce((sum: number, row: any) => sum + row.varianceWeightKg, 0);
     const remainingWeightKg = Number(coil.remainingWeightKg);
     const originalWeightKg = Number(coil.originalWeightKg);
+    const relatedDocumentsMap = new Map<string, any>();
+    for (const row of coil.issueReturnRecords) if (row.inventoryDocument) relatedDocumentsMap.set(row.inventoryDocument.id, row.inventoryDocument);
+    for (const row of coil.inventoryTransactions) if (row.document) relatedDocumentsMap.set(row.document.id, row.document);
+    for (const row of coil.inventoryDocumentLines) if (row.document) relatedDocumentsMap.set(row.document.id, row.document);
+    const relatedDocuments = [...relatedDocumentsMap.values()].sort((a: any, b: any) => a.documentDate.getTime() - b.documentDate.getTime());
+    const ledgerTransactions = coil.inventoryTransactions.map((tx: any) => ({
+      transactionNumber: tx.transactionNumber,
+      documentNumber: tx.document?.documentNumber || tx.transactionNumber,
+      transactionType: tx.transactionType,
+      quantitySigned: Number(tx.quantitySigned),
+      weightKgSigned: Number(tx.weightKgSigned),
+      contractNumber: tx.contractNumber,
+      transactionDate: tx.transactionDate.toISOString(),
+    }));
     const allocations = coil.contractAllocations.map((row: any) => ({
       id: row.id,
       contractId: row.contractId,
@@ -4667,6 +4692,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
               document: { select: { documentNumber: true, documentType: true, referenceNumber: true } },
               part: { select: { partNumber: true, name: true } },
               materialLot: { select: { lotNumber: true, heatNumber: true, coilSerialNumber: true } },
+              physicalCoil: { select: { coilId: true, coilPackNumber: true, heatNumber: true } },
               warehouse: { select: { code: true, name: true } },
               unit: { select: { code: true, symbol: true } },
               manufacturingOrder: { select: { moNumber: true } },
@@ -4698,8 +4724,9 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
           quantity: Number(tx.quantitySigned ?? tx.quantity),
           unit: tx.unitId,
           weightKg: Number(tx.weightKgSigned ?? tx.weightKg),
-          coilNumber: tx.materialLot?.coilSerialNumber || tx.materialLot?.lotNumber || '—',
-          heatNumber: tx.materialLot?.heatNumber || '—',
+          coilNumber: tx.physicalCoil?.coilId || tx.materialLot?.coilSerialNumber || tx.materialLot?.lotNumber || '—',
+          coilPackNumber: tx.physicalCoil?.coilPackNumber || '—',
+          heatNumber: tx.physicalCoil?.heatNumber || tx.materialLot?.heatNumber || '—',
           manufacturingOrder: tx.manufacturingOrder?.moNumber || tx.manufacturingOrderId || tx.document?.referenceNumber || '—',
           warehouse: tx.warehouse ? `${tx.warehouse.code} - ${tx.warehouse.name}` : tx.warehouseId,
           contractNumber: tx.contractNumber || '—',
