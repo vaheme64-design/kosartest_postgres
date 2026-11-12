@@ -24,6 +24,9 @@ export interface RelationalNetRequirement {
     stepNumber: number;
     stepCode: string;
     stepName: string;
+    operationId: string;
+    operationCode: string;
+    dieId: string | null;
     processType: string;
     requiredTonnage: number;
     eligibleMachines: Array<{ id: string; code: string; name: string; tonnageCapacity: number | null; preferred: boolean }>;
@@ -182,6 +185,9 @@ export async function getRelationalPlanningReadModel() {
       stepNumber: step.stepNumber,
       stepCode: step.stepCode,
       stepName: step.stepName,
+      operationId: step.operationId,
+      operationCode: step.operation.code,
+      dieId: step.dieId || null,
       processType: step.operation.processType,
       requiredTonnage: n(step.die?.tonnageRequired),
       eligibleMachines: machines
