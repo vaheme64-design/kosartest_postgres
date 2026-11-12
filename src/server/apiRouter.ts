@@ -7440,9 +7440,9 @@ apiRouter.get('/reports/scrap-by-part-operation', async (req: Request, res: Resp
             ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
           },
         } : {}),
-        ...(filters.partId ? { manufacturingOrder: { part: { is: { OR: [{ id: filters.partId }, { partNumber: filters.partId }] } } } } : {}),
+        ...(filters.partId ? { manufacturingOrder: { is: { part: { is: { OR: [{ id: filters.partId }, { partNumber: filters.partId }] } } } } } : {}),
         ...(filters.machineId ? { machineId: filters.machineId } : {}),
-        ...(filters.processType ? { productionOperation: { operation: { is: { processType: filters.processType } } } } : {}),
+        ...(filters.processType ? { productionOperation: { is: { operation: { is: { processType: filters.processType } } } } } : {}),
       },
       include: {
         manufacturingOrder: { include: { part: true } },
