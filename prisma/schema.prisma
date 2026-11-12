@@ -865,6 +865,8 @@ model InventoryDocument {
   postedAt           DateTime?
   isReversed         Boolean           @default(false)
   reversalOfId       String?           @unique // ارجاع به سند ابطال‌شده
+  issueRequestKey    String?           @unique // Idempotency key for physical-coil issue requests
+  issueRequestFingerprint String?      @db.Text // Prevents reusing a key with a different payload
   notes              String?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
