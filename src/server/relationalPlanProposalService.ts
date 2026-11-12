@@ -225,7 +225,7 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
         lines: {
           include: {
             customerOrderLine: { include: { order: true } },
-            route: { include: { operations: { include: { operation: true }, orderBy: { stepNumber: 'asc' } } } },
+            route: { include: { operations: { include: { operation: true, die: true }, orderBy: { stepNumber: 'asc' } } } },
             part: { select: { thicknessMm: true } },
           },
           orderBy: [{ priority: 'asc' }, { plannedEndDate: 'asc' }],
