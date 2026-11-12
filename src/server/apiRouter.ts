@@ -3540,7 +3540,6 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
     };
     inventoryDocsStore.unshift(autoDoc);
 
-    await persistInventoryAppState();
     res.status(201).json({
       success: true,
       message: `کلاف فیزیکی شماره «${newCoil.coilId}» (پکینگ ${newCoil.coilPackNumber}) در انبار و گزارش‌ها با موفقیت ثبت گردید.`,
