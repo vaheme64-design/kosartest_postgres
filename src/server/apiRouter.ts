@@ -6441,6 +6441,9 @@ apiRouter.post('/wip/operations/production', async (req: Request, res: Response)
             productionLogs: productionLogsStore,
           },
         });
+        if (ledgerResult?.duplicate) {
+          throw new Error('WIP_IDEMPOTENCY_DUPLICATE');
+        }
       },
     );
     if (!result.success) {
@@ -6457,7 +6460,20 @@ apiRouter.post('/wip/operations/production', async (req: Request, res: Response)
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'خطا در ثبت اتمیک عملکرد تولید';
-    const status = /not found|missing|invalid|must |required|insufficient|mismatch|no validated|exactly one|does not match|changed during/i.test(message) ? 409 : 500;
+    const key = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
+    if (key) {
+      const previous = await findWipProductionReportByKey(key).catch(() => null);
+      if (previous) {
+        return res.json({
+          success: true,
+          duplicate: true,
+          message: 'این گزارش قبلاً توسط درخواست هم‌زمان دیگری ثبت شده است؛ ثبت تکراری انجام نشد.',
+          report: previous,
+          inventoryPosted: true,
+        });
+      }
+    }
+    const status = /not found|missing|invalid|must |required|insufficient|mismatch|no validated|exactly one|does not match|changed during|conserve/i.test(message) ? 409 : 500;
     return res.status(status).json({ success: false, error: message, inventoryPosted: false });
   }
 });
