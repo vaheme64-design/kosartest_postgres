@@ -213,6 +213,10 @@ async function run() {
     const issue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', issuePayload);
     assert(`Coil issue and operator-confirmed 15 PCS WIP input post successfully: HTTP ${issue.response.status} ${JSON.stringify(issue.payload)}`, issue.response.status === 200 && issue.payload.success === true && issue.payload.duplicate !== true);
 
+    const coilListAfterIssue = await requestJson(baseUrl, `/api/inventory/coils?search=${encodeURIComponent(nonce)}`);
+    const listedCoilAfterIssue = coilListAfterIssue.payload.data?.find((row: any) => row.id === coilId);
+    assert('Coil inventory inquiry reads the committed 30 kg balance from PostgreSQL', coilListAfterIssue.response.status === 200 && Number(listedCoilAfterIssue?.remainingWeightKg) === 30);
+
     const duplicateIssue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', issuePayload);
     const coilAfterDuplicate = await prisma.physicalCoil.findUnique({ where: { id: coilId } });
     const wipQtyAfterDuplicate = Number((await prisma.stockBalance.aggregate({
@@ -265,6 +269,9 @@ async function run() {
       prisma.stockBalance.findMany({ where: { physicalCoilId: coilId, partId: rawPart.id, qualityStatus: 'AVAILABLE' } }),
     ]);
     assert('Remnant return reconciles coil and lot to 35 kg without changing WIP PCS', Number(coilAfterReturn?.remainingWeightKg) === 35 && Number(lotAfterReturn?.remainingWeightKg) === 35 && Number((await prisma.stockBalance.aggregate({ where: { physicalCoilId: coilId, partId: relationalOrder.partId }, _sum: { quantityOnHand: true } }))._sum.quantityOnHand) === 15);
+    const coilListAfterReturn = await requestJson(baseUrl, `/api/inventory/coils?search=${encodeURIComponent(nonce)}`);
+    const listedCoilAfterReturn = coilListAfterReturn.payload.data?.find((row: any) => row.id === coilId);
+    assert('Coil inventory inquiry reads the committed 35 kg remnant balance from PostgreSQL', coilListAfterReturn.response.status === 200 && Number(listedCoilAfterReturn?.remainingWeightKg) === 35);
     assert('Returned raw material is available again under its original contract identity', rawAfterReturn.some(row => row.contractId === contractA.id || row.contractId === contractB.id));
 
     // Force a failure after the WIP and raw-stock updates have begun inside the transaction.
