@@ -3587,7 +3587,7 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
         data: {
           remainingWeightKg: { increment: returnedKg },
           warehouseId: targetWarehouseId,
-          warehouseLocationId: targetLocationId ?? dbCoil.warehouseLocationId,
+          warehouseLocationId: targetWarehouseId === dbCoil.warehouseId ? (targetLocationId ?? dbCoil.warehouseLocationId) : targetLocationId,
           physicalStatus: 'AVAILABLE',
         },
       });
@@ -4335,6 +4335,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
               part: { select: { partNumber: true, name: true } },
               materialLot: { select: { lotNumber: true, heatNumber: true, coilSerialNumber: true } },
               warehouse: { select: { code: true, name: true } },
+              unit: { select: { code: true, symbol: true } },
               manufacturingOrder: { select: { moNumber: true } },
             },
             orderBy: [{ transactionDate: 'desc' }],
