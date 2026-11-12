@@ -3214,7 +3214,6 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
       include: {
         part: { select: { partNumber: true, name: true, weightNetKg: true, weightGrossKg: true } },
         operations: {
-          where: { status: { in: ['PENDING', 'READY', 'IN_PROGRESS'] } },
           include: {
             operation: { select: { code: true, name: true, processType: true } },
             plannedMachine: { select: { code: true, name: true } },
@@ -3243,6 +3242,7 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
         operationName: operation.operation.name,
         processType: operation.operation.processType,
         status: operation.status,
+        isFirstOperation: operation.stepNumber === firstStep,
         plannedMachine: operation.plannedMachine ? `${operation.plannedMachine.code} - ${operation.plannedMachine.name}` : null,
       })),
     };
@@ -3636,6 +3636,8 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
               partRef: p.partId || p.partCode || null,
               issuedWeightKg: goodWeight + scrapShare,
               varianceWeightKg: scrapShare,
+              initialInputQuantityPcs: 0,
+              wipManufacturingOrderId: null,
               notes: String(p.notes || p.partName || ''),
             };
           });
@@ -3721,6 +3723,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
 
       const balanceRemainders = balances.map((balance: any) => ({ balance, initialOnHand: Number(balance.weightKgOnHand), initialAvailable: Number(balance.weightKgAvailable), remaining: Number(balance.weightKgAvailable) }));
       const entries: any[] = [];
+      let postedWipInput: any = null;
       let lineNumber = 0;
       const createdRecords: any[] = [];
       for (const request of requested) {
@@ -3738,6 +3741,14 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         const operation = await tx.productionOperation.findUnique({ where: { id: request.operationRef } });
         if (!operation || operation.manufacturingOrderId !== mo.id) {
           throw new Error(`عملیات «${request.operationRef}» به دستور ساخت ${mo.moNumber} تعلق ندارد یا یافت نشد.`);
+        }
+        const firstOperationForOrder = await tx.productionOperation.findFirst({
+          where: { manufacturingOrderId: mo.id },
+          orderBy: { stepNumber: 'asc' },
+          select: { id: true },
+        });
+        if (requested.length === 1 && firstOperationForOrder?.id === operation.id && (!Number.isFinite(request.initialInputQuantityPcs) || request.initialInputQuantityPcs <= 0)) {
+          throw new Error('برای صدور ورق به اولین مرحله، تعداد قطعات ورودی را بررسی و تأیید کنید.');
         }
         if (request.initialInputQuantityPcs > 0) {
           const firstOperation = await tx.productionOperation.findFirst({
@@ -3932,6 +3943,11 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           wipPostingContext.wipOrder.initialInputQuantity = Number(wipPostingContext.wipOrder.initialInputQuantity || 0) + request.initialInputQuantityPcs;
           wipPostingContext.wipOrder.updatedAt = issuedAt.toISOString();
           await tx.wipStateSnapshot.update({ where: { id: 'production-wip-state' }, data: { payload: wipPostingContext.snapshotPayload } });
+          postedWipInput = {
+            wipManufacturingOrderId: link.wipManufacturingOrderId,
+            wipOperationId: operationLink.wipOperationId,
+            quantityPcs: request.initialInputQuantityPcs,
+          };
         }
       }
 
@@ -3950,12 +3966,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
       });
       if (coilUpdate.count !== 1) throw new Error('مانده کلاف هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و دوباره تلاش کنید.');
       const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
-      return { coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries,
-        wipInput: requested[0]?.initialInputQuantityPcs > 0 ? {
-          wipManufacturingOrderId: requested[0].wipManufacturingOrderId,
-          operationRef: requested[0].operationRef,
-          quantityPcs: requested[0].initialInputQuantityPcs,
-        } : null };
+      return { coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries, wipInput: postedWipInput };
     });
 
     coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
@@ -3963,7 +3974,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     coil.updatedAt = new Date().toISOString();
     if (persisted.wipInput) {
       const wipOrder = manufacturingOrdersStore.find(row => row.id === persisted.wipInput.wipManufacturingOrderId);
-      const linkedOperation = wipOrder?.operations.find(row => row.id === persisted.wipInput.operationRef);
+      const linkedOperation = wipOrder?.operations.find(row => row.id === persisted.wipInput.wipOperationId);
       if (wipOrder && linkedOperation) {
         linkedOperation.waitingInputQty += persisted.wipInput.quantityPcs;
         linkedOperation.status = 'READY';
