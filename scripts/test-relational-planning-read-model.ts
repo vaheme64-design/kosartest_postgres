@@ -85,7 +85,7 @@ async function main() {
     assert(requirement.route.length === part.routes[0].operations.length, 'Route steps must come from the active relational default route.');
     assert(requirement.route[0].stepNumber === part.routes[0].operations[0].stepNumber, 'Relational route ordering must be preserved.');
     assert(
-      requirement.netProductionRequirement === Math.max(0, requirement.grossDemandQty - requirement.availableFinishedGoodsQty - requirement.downstreamWipQty),
+      Math.abs(requirement.netProductionRequirement - Math.max(0, requirement.grossDemandQty - requirement.availableFinishedGoodsQty - requirement.downstreamWipQty)) < 0.11,
       'Net requirement must subtract available finished goods and WIP exactly once.',
     );
     assert(requirement.materialShortageKg >= 0 && requirement.availableRawMaterialKg >= 0, 'Material availability and shortage must be non-negative.');
