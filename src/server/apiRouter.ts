@@ -6398,6 +6398,27 @@ apiRouter.post('/wip/operations/production', async (req: Request, res: Response)
       return res.status(400).json({ success: false, error: 'شناسه شیفت (shiftId) و کاربر ثبت‌کننده (createdByUserId) الزامی است.' });
     }
 
+    const wipMoId = typeof body.moId === 'string' ? body.moId : '';
+    const relationalManufacturingOrderId = typeof body.relationalManufacturingOrderId === 'string'
+      ? body.relationalManufacturingOrderId.trim()
+      : '';
+    const prisma = getPrismaClient();
+    const existingIdentityLink = await prisma.wipManufacturingOrderLink.findUnique({
+      where: { wipManufacturingOrderId: wipMoId },
+    });
+    if (!existingIdentityLink) {
+      if (!relationalManufacturingOrderId) {
+        return res.status(400).json({
+          success: false,
+          error: 'برای اتصال اولیه، انتخاب دستور ساخت متناظر در دیتابیس الزامی است.',
+          inventoryPosted: false,
+        });
+      }
+      await linkWipManufacturingOrderToRelational(wipMoId, relationalManufacturingOrderId, createdByUserId);
+    } else if (relationalManufacturingOrderId && existingIdentityLink.manufacturingOrderId !== relationalManufacturingOrderId) {
+      return res.status(409).json({ success: false, error: 'این دستور WIP قبلاً به دستور ساخت دیگری متصل شده است.', inventoryPosted: false });
+    }
+
     const previous = await findWipProductionReportByKey(idempotencyKey);
     if (previous) {
       return res.json({
@@ -9569,6 +9590,36 @@ apiRouter.get('/erp-services/capacity-overlaps', async (req: Request, res: Respo
  * Explicitly maps one snapshot WIP order and all its operations to normalized
  * production records. This endpoint does not post inventory or production quantities.
  */
+apiRouter.get('/wip/production-posting-context', async (req: Request, res: Response) => {
+  try {
+    const wipMoId = typeof req.query.wipMoId === 'string' ? req.query.wipMoId : '';
+    const wipOrder = manufacturingOrdersStore.find(order => order.id === wipMoId);
+    if (!wipOrder) return res.status(404).json({ success: false, error: 'دستور WIP یافت نشد.' });
+
+    const prisma = getPrismaClient();
+    const [manufacturingOrders, shifts, users, machines] = await Promise.all([
+      prisma.manufacturingOrder.findMany({
+        where: { part: { partNumber: wipOrder.partCode } },
+        include: {
+          part: { select: { partNumber: true, name: true } },
+          operations: {
+            include: { operation: { select: { processType: true, name: true } }, plannedMachine: { select: { id: true, code: true, name: true } } },
+            orderBy: { stepNumber: 'asc' },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.shift.findMany({ where: { active: true }, select: { id: true, code: true, name: true, startTime: true, endTime: true }, orderBy: { startTime: 'asc' } }),
+      prisma.user.findMany({ where: { active: true }, select: { id: true, username: true, fullName: true, personnelCode: true }, orderBy: { fullName: 'asc' } }),
+      prisma.machine.findMany({ where: { active: true, status: 'ACTIVE' }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } }),
+    ]);
+    return res.json({ success: true, data: { manufacturingOrders, shifts, users, machines } });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت اطلاعات ثبت تولید' });
+  }
+});
+
 apiRouter.post('/wip/identity-links', async (req: Request, res: Response) => {
   try {
     const { wipManufacturingOrderId, manufacturingOrderId, createdBy, notes } = req.body || {};
