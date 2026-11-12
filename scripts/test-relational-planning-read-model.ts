@@ -84,6 +84,19 @@ async function main() {
     assert(requirement.partCode === part.partNumber, 'Requirement part identity must be the relational part number, not a legacy sample ID.');
     assert(requirement.route.length === part.routes[0].operations.length, 'Route steps must come from the active relational default route.');
     assert(requirement.route[0].stepNumber === part.routes[0].operations[0].stepNumber, 'Relational route ordering must be preserved.');
+    for (const step of requirement.route) {
+      assert(step.operationId && step.operationCode, 'Every route operation must retain its relational operation identity.');
+      assert(
+        step.machineSelectionStatus === (step.eligibleMachines.length > 0 ? 'CANDIDATES_FOUND' : 'NO_ELIGIBLE_MACHINE'),
+        'Machine selection status must agree with the relational eligible-candidate list.',
+      );
+      for (const candidate of step.eligibleMachines) {
+        const machine = readModel.payload.data.masterData.machines.find((item: any) => item.id === candidate.id);
+        assert(machine?.status === 'ACTIVE', 'Only active machines may be returned as eligible candidates.');
+        assert(machine.capabilities.some((capability: any) => capability.operationCode === step.operationCode), 'Every candidate must have a relational capability for the route operation.');
+        assert(!step.dieId || machine.compatibleDieIds.includes(step.dieId), 'A candidate must have a relational compatibility record for the assigned die.');
+      }
+    }
     assert(
       Math.abs(requirement.netProductionRequirement - Math.max(0, requirement.grossDemandQty - requirement.availableFinishedGoodsQty - requirement.downstreamWipQty)) < 0.11,
       'Net requirement must subtract available finished goods and WIP exactly once.',
