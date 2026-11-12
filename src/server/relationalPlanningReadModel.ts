@@ -32,7 +32,9 @@ export interface RelationalNetRequirement {
   availableRawMaterialKg: number;
   materialShortageKg: number;
   hasMaterialShortage: boolean;
+  routeId: string | null;
   route: Array<{
+    routeOperationId: string;
     stepNumber: number;
     stepCode: string;
     stepName: string;
@@ -227,6 +229,7 @@ export async function getRelationalPlanningReadModel() {
     }
     const routeRow = part.routes?.[0];
     const route = (routeRow?.operations || []).map((step: any) => ({
+      routeOperationId: step.id,
       stepNumber: step.stepNumber,
       stepCode: step.stepCode,
       stepName: step.stepName,
@@ -314,6 +317,7 @@ export async function getRelationalPlanningReadModel() {
       availableRawMaterialKg: round1(availableRawKg),
       materialShortageKg: part.materialId && n(part.weightGrossKg) > 0 ? round1(Math.max(0, requiredMaterialKg - availableRawKg)) : 0,
       hasMaterialShortage: Boolean(part.materialId && n(part.weightGrossKg) > 0 && requiredMaterialKg > availableRawKg),
+      routeId: routeRow?.id || null,
       route,
       dataWarnings: warnings,
     });
