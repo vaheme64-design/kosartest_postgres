@@ -15,6 +15,7 @@ export interface WipProductionLedgerInput {
   rejectedQty: number;
   scrapReason?: string;
   operatorName: string;
+  expectedSnapshotVersion: number;
   snapshotPayload: {
     manufacturingOrders: unknown[];
     wipTransfers: unknown[];
@@ -49,7 +50,7 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
   const {
     wipManufacturingOrderId, wipOperationId, idempotencyKey,
     machineId, shiftId, createdByUserId, goodQty, scrapQty,
-    reworkQty, rejectedQty, snapshotPayload,
+    reworkQty, rejectedQty, snapshotPayload, expectedSnapshotVersion,
   } = input;
 
   if (!idempotencyKey || idempotencyKey.trim().length < 8 || idempotencyKey.length > 160) {
@@ -382,11 +383,13 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
     });
 
     // Snapshot and relational report/ledger commit together: no half-posted state.
-    await tx.wipStateSnapshot.upsert({
-      where: { id: 'production-wip-state' },
-      create: { id: 'production-wip-state', payload: snapshotPayload },
-      update: { payload: snapshotPayload },
+    const snapshotUpdate = await tx.wipStateSnapshot.updateMany({
+      where: { id: 'production-wip-state', version: expectedSnapshotVersion },
+      data: { payload: snapshotPayload, version: { increment: 1 } },
     });
+    if (snapshotUpdate.count !== 1) {
+      throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: another server committed a newer WIP snapshot; production posting was rolled back.');
+    }
 
     return { duplicate: false, report, transactionCount: transactionIndex };
   }, { isolationLevel: 'Serializable' });
