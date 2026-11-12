@@ -6808,9 +6808,16 @@ apiRouter.get('/reports/plan-vs-actual', async (req: Request, res: Response) => 
     if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش برنامه در برابر واقعی فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
     const prisma = getPrismaClient();
+    const planStatusMap: Record<string, string> = {
+      DRAFT_SUGGESTION: 'DRAFT',
+      APPROVED: 'APPROVED',
+      COMPLETED: 'COMPLETED',
+      REJECTED: 'CANCELLED',
+    };
+    const dbPlanStatus = filters.status && filters.status !== 'ALL' ? planStatusMap[filters.status] : undefined;
     const plans = await prisma.productionPlan.findMany({
       where: {
-        ...(filters.status && filters.status !== 'ALL' ? { status: filters.status as any } : {}),
+        ...(dbPlanStatus ? { status: dbPlanStatus as any } : {}),
         ...(filters.startDate || filters.endDate ? {
           endDate: {
             ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
