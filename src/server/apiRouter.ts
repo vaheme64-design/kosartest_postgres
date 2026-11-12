@@ -3212,7 +3212,7 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
         operations: { some: { status: { in: ['PENDING', 'READY', 'IN_PROGRESS'] } } },
       },
       include: {
-        part: { select: { partNumber: true, name: true } },
+        part: { select: { partNumber: true, name: true, weightNetKg: true, weightGrossKg: true } },
         operations: {
           where: { status: { in: ['PENDING', 'READY', 'IN_PROGRESS'] } },
           include: {
@@ -3232,6 +3232,9 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
       moNumber: order.moNumber,
       partCode: order.part.partNumber,
       partName: order.part.name,
+      weightNetKg: Number(order.part.weightNetKg || 0),
+      weightGrossKg: Number(order.part.weightGrossKg || 0),
+      wipManufacturingOrderId: manufacturingOrdersStore.find(wip => wip.moNumber === order.moNumber && wip.partCode === order.part.partNumber)?.id || null,
       status: order.status,
       operations: eligibleOperations.map((operation: any) => ({
         id: operation.id,
@@ -3616,7 +3619,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
   try {
     if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'صدور کلاف بدون اتصال PostgreSQL مجاز نیست.' });
     const { id } = req.params;
-    const { issuedWeightKg, moId, moOperationId, scrappedKg, multiParts } = req.body;
+    const { issuedWeightKg, moId, moOperationId, scrappedKg, multiParts, initialInputQuantityPcs, wipManufacturingOrderId } = req.body;
     const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
@@ -3643,6 +3646,8 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           partRef: req.body.partId || req.body.partCode || null,
           issuedWeightKg: Number(issuedWeightKg) || 0,
           varianceWeightKg: Number(scrappedKg) || 0,
+          initialInputQuantityPcs: Number(initialInputQuantityPcs) || 0,
+          wipManufacturingOrderId: typeof wipManufacturingOrderId === 'string' ? wipManufacturingOrderId : null,
           notes: '',
         }];
     if (requested.some((row: any) => !Number.isFinite(row.issuedWeightKg) || row.issuedWeightKg <= 0 || !Number.isFinite(row.varianceWeightKg) || row.varianceWeightKg < 0 || row.varianceWeightKg > row.issuedWeightKg)) {
@@ -3651,6 +3656,29 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     const totalIssuedKg = requested.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
     const prisma = getPrismaClient();
     const issuedAt = new Date();
+
+    for (const request of requested) {
+      if (!request.initialInputQuantityPcs) continue;
+      if (requested.length !== 1 || !Number.isFinite(request.initialInputQuantityPcs) || request.initialInputQuantityPcs <= 0) {
+        throw new Error('تعداد ورودی مرحله اول باید مثبت و برای یک دستور ساخت باشد.');
+      }
+      if (!request.wipManufacturingOrderId) throw new Error('دستور WIP متناظر با دستور ساخت پیدا نشد.');
+      const relationalMo = await prisma.manufacturingOrder.findFirst({
+        where: { OR: [{ id: request.manufacturingOrderRef }, { moNumber: request.manufacturingOrderRef }] },
+        include: { part: { select: { partNumber: true } } },
+      });
+      const wipOrder = manufacturingOrdersStore.find(row => row.id === request.wipManufacturingOrderId);
+      if (!relationalMo || !wipOrder || wipOrder.moNumber !== relationalMo.moNumber || wipOrder.partCode !== relationalMo.part.partNumber) {
+        throw new Error('ارتباط دستور WIP و دستور ساخت معتبر نیست.');
+      }
+      const existingLink = await prisma.wipManufacturingOrderLink.findUnique({ where: { manufacturingOrderId: relationalMo.id } });
+      if (!existingLink) {
+        await linkWipManufacturingOrderToRelational(wipOrder.id, relationalMo.id, 'coil-issue', 'Automatic identity link before first-operation raw-material issue');
+      } else if (existingLink.wipManufacturingOrderId !== wipOrder.id) {
+        throw new Error('دستور ساخت قبلاً به یک دستور WIP دیگر متصل شده است.');
+      }
+    }
+
     const persisted = await prisma.$transaction(async (tx: any) => {
       const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
       if (!dbCoil) throw new Error('کلاف در پایگاه داده عملیاتی وجود ندارد؛ ابتدا رسید کلاف را ثبت کنید.');
@@ -3711,6 +3739,14 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         if (!operation || operation.manufacturingOrderId !== mo.id) {
           throw new Error(`عملیات «${request.operationRef}» به دستور ساخت ${mo.moNumber} تعلق ندارد یا یافت نشد.`);
         }
+        if (request.initialInputQuantityPcs > 0) {
+          const firstOperation = await tx.productionOperation.findFirst({
+            where: { manufacturingOrderId: mo.id },
+            orderBy: { stepNumber: 'asc' },
+            select: { id: true },
+          });
+          if (firstOperation?.id !== operation.id) throw new Error('تعداد ورودی اولیه فقط برای اولین عملیات مجاز است.');
+        }
         if (operation.status === 'COMPLETED' || operation.status === 'SKIPPED') {
           throw new Error(`عملیات ${operation.stepNumber} دستور ساخت ${mo.moNumber} خاتمه یافته یا رد شده است و دریافت مواد برای آن مجاز نیست.`);
         }
@@ -3723,6 +3759,34 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           if (firstOperation?.id !== operation.id) {
             throw new Error('عملیات انتخاب‌شده هنوز منتظر تکمیل مرحله قبلی است.');
           }
+        }
+
+        let wipPostingContext: any = null;
+        if (request.initialInputQuantityPcs > 0) {
+          const link = await tx.wipManufacturingOrderLink.findUnique({
+            where: { manufacturingOrderId: mo.id },
+            include: { operationLinks: true },
+          });
+          const operationLink = link?.operationLinks.find((row: any) => row.productionOperationId === operation.id);
+          if (!link || link.wipManufacturingOrderId !== request.wipManufacturingOrderId || !operationLink) {
+            throw new Error('ارتباط هویتی عملیات WIP معتبر نیست.');
+          }
+          const snapshot = await tx.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+          const snapshotPayload: any = snapshot?.payload;
+          const wipOrder = snapshotPayload?.manufacturingOrders?.find((row: any) => row.id === link.wipManufacturingOrderId);
+          const wipOperation = wipOrder?.operations?.find((row: any) => row.id === operationLink.wipOperationId);
+          if (!snapshot || !wipOrder || !wipOperation || wipOperation.sequence !== 1) {
+            throw new Error('مرحله اول در تصویر پایدار WIP یافت نشد.');
+          }
+          const locationRows = await tx.warehouseLocation.findMany({ where: { code: wipOperation.warehouseLocation, active: true } });
+          if (locationRows.length !== 1) throw new Error(`محل مرحله اول «${wipOperation.warehouseLocation}» باید دقیقاً یک موقعیت فعال داشته باشد.`);
+          const pcsUnit = await tx.unitOfMeasure.findUnique({ where: { id: targetPart.unitId } });
+          if (!pcsUnit || pcsUnit.code !== 'PCS') throw new Error('واحد قطعه دستور ساخت باید PCS باشد.');
+          const netWeightPerPiece = Number(targetPart.weightNetKg || 0);
+          if (!Number.isFinite(netWeightPerPiece) || netWeightPerPiece <= 0) throw new Error('وزن خالص مهندسی قطعه باید تعریف شود.');
+          const totalNetMaterialKg = request.issuedWeightKg - request.varianceWeightKg;
+          if (totalNetMaterialKg <= 0) throw new Error('وزن خالص مواد پس از کسر افت باید مثبت باشد.');
+          wipPostingContext = { snapshotPayload, wipOrder, wipOperation, location: locationRows[0], netWeightPerPiece, totalNetMaterialKg };
         }
 
         for (const source of balanceRemainders) {
@@ -3815,9 +3879,60 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
             },
           });
           createdRecords.push(record);
+          if (wipPostingContext) {
+            const netMaterialKg = Math.max(0, weight - varianceForSegment);
+            const pcsShare = request.initialInputQuantityPcs * (netMaterialKg / wipPostingContext.totalNetMaterialKg);
+            if (pcsShare > 0) {
+              const wipWeightKg = pcsShare * wipPostingContext.netWeightPerPiece;
+              const wipIdentity = {
+                partId: targetPart.id, warehouseId: wipPostingContext.location.warehouseId,
+                locationId: wipPostingContext.location.id, materialLotId: dbCoil.materialLotId,
+                physicalCoilId: dbCoil.id, ownership: balance.ownership, contractId: balance.contractId,
+                contractNumber: balance.contractNumber, qualityStatus: 'AVAILABLE',
+              };
+              const existingWipBalance = await tx.stockBalance.findFirst({ where: wipIdentity });
+              const wipBalanceAfter = Number(existingWipBalance?.quantityOnHand || 0) + pcsShare;
+              if (existingWipBalance) {
+                await tx.stockBalance.update({
+                  where: { id: existingWipBalance.id },
+                  data: {
+                    quantityOnHand: { increment: pcsShare }, quantityAvailable: { increment: pcsShare },
+                    weightKgOnHand: { increment: wipWeightKg }, weightKgAvailable: { increment: wipWeightKg },
+                    lastTransactionAt: issuedAt,
+                  },
+                });
+              } else {
+                await tx.stockBalance.create({
+                  data: { ...wipIdentity, quantityOnHand: pcsShare, quantityReserved: 0, quantityAvailable: pcsShare,
+                    weightKgOnHand: wipWeightKg, weightKgReserved: 0, weightKgAvailable: wipWeightKg, lastTransactionAt: issuedAt },
+                });
+              }
+              await tx.inventoryTransaction.create({
+                data: {
+                  transactionNumber: `TRX-WIP-INPUT-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+                  partId: targetPart.id, materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+                  productionOperationId: operation.id, warehouseId: wipPostingContext.location.warehouseId,
+                  locationId: wipPostingContext.location.id, transactionType: 'INBOUND',
+                  quantity: pcsShare, quantitySigned: pcsShare, unitId: targetPart.unitId,
+                  weightKg: wipWeightKg, weightKgSigned: wipWeightKg, ownership: balance.ownership,
+                  contractId: balance.contractId, contractNumber: balance.contractNumber, qualityStatus: 'AVAILABLE',
+                  balanceAfter: wipBalanceAfter, balanceKgAfter: wipBalanceAfter * wipPostingContext.netWeightPerPiece,
+                  transactionDate: issuedAt, createdByUserId: user.id, manufacturingOrderId: mo.id,
+                },
+              });
+            }
+          }
           entries.push({ weight, contractNumber: balance.contractNumber });
         }
         if (requestRemaining > 0.001) throw new Error(`موجودی قابل تخصیص برای سفارش ${request.manufacturingOrderRef || 'نامشخص'} کافی نیست.`);
+        if (wipPostingContext) {
+          wipPostingContext.wipOperation.waitingInputQty = Number(wipPostingContext.wipOperation.waitingInputQty || 0) + request.initialInputQuantityPcs;
+          wipPostingContext.wipOperation.status = 'READY';
+          wipPostingContext.wipOperation.lastActivityAt = issuedAt.toISOString();
+          wipPostingContext.wipOrder.initialInputQuantity = Number(wipPostingContext.wipOrder.initialInputQuantity || 0) + request.initialInputQuantityPcs;
+          wipPostingContext.wipOrder.updatedAt = issuedAt.toISOString();
+          await tx.wipStateSnapshot.update({ where: { id: 'production-wip-state' }, data: { payload: wipPostingContext.snapshotPayload } });
+        }
       }
 
       if (dbCoil.materialLotId) {
@@ -3835,12 +3950,28 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
       });
       if (coilUpdate.count !== 1) throw new Error('مانده کلاف هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و دوباره تلاش کنید.');
       const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
-      return { coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries };
+      return { coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries,
+        wipInput: requested[0]?.initialInputQuantityPcs > 0 ? {
+          wipManufacturingOrderId: requested[0].wipManufacturingOrderId,
+          operationRef: requested[0].operationRef,
+          quantityPcs: requested[0].initialInputQuantityPcs,
+        } : null };
     });
 
     coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
     coil.physicalStatus = persisted.coil.physicalStatus;
     coil.updatedAt = new Date().toISOString();
+    if (persisted.wipInput) {
+      const wipOrder = manufacturingOrdersStore.find(row => row.id === persisted.wipInput.wipManufacturingOrderId);
+      const linkedOperation = wipOrder?.operations.find(row => row.id === persisted.wipInput.operationRef);
+      if (wipOrder && linkedOperation) {
+        linkedOperation.waitingInputQty += persisted.wipInput.quantityPcs;
+        linkedOperation.status = 'READY';
+        linkedOperation.lastActivityAt = new Date().toISOString();
+        wipOrder.initialInputQuantity += persisted.wipInput.quantityPcs;
+        wipOrder.updatedAt = new Date().toISOString();
+      }
+    }
     const issueRecords: CoilIssueReturnRecord[] = persisted.records.map((row: any) => ({
       ...row,
       issuedWeightKg: Number(row.issuedWeightKg),
