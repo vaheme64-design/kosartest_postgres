@@ -6,9 +6,8 @@ import { INITIAL_PARTS } from '../src/server/sampleData';
 const prisma = getPrismaClient();
 const nonce = `HTTP-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
 let coilId: string | undefined;
-let lotId: string | undefined;
 let contractId: string | undefined;
-let server: ReturnType<ReturnType<typeof express>['listen']> | undefined;
+let server: import('node:http').Server | undefined;
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -27,11 +26,11 @@ async function requestJson(baseUrl: string, path: string, method = 'GET', body?:
 async function main() {
   assert(process.env.DATABASE_URL, 'DATABASE_URL is required for HTTP inventory integration tests.');
 
-  const [warehouse, location, dbPart, customer, mo] = await Promise.all([
+  const [warehouse, location, customer, mo, partCandidates] = await Promise.all([
     prisma.warehouse.findFirst({ where: { code: 'WH-RAW', active: true } }),
     prisma.warehouseLocation.findFirst({ where: { code: 'LOC-RAW-A1', active: true, warehouse: { code: 'WH-RAW' } } }),
-    prisma.part.findFirst({
-      where: { active: true, category: 'RAW_MATERIAL', unit: { code: 'KG' }, materialId: { not: null }, partNumber: { in: INITIAL_PARTS.filter(p => p.unit === 'KG' && p.materialGrade).map(p => p.code) } },
+    prisma.part.findMany({
+      where: { active: true, category: 'RAW_MATERIAL', materialId: { not: null }, partNumber: { in: INITIAL_PARTS.filter(p => p.unit === 'KG' && p.materialGrade).map(p => p.code) } },
       include: { unit: true, material: true },
     }),
     prisma.customer.findFirst({ where: { active: true } }),
@@ -40,6 +39,7 @@ async function main() {
       include: { operations: { where: { status: 'IN_PROGRESS' }, orderBy: { stepNumber: 'asc' }, take: 1 } },
     }),
   ]);
+  const dbPart = partCandidates.find(row => row.unit.code === 'KG' && row.material);
   assert(warehouse && location && dbPart?.material && customer && mo?.operations[0], 'CI seed must contain WH-RAW/LOC-RAW-A1, a KG raw material, a customer and an in-progress MO operation.');
 
   const appPart = INITIAL_PARTS.find(p => p.code === dbPart.partNumber);
@@ -165,7 +165,6 @@ async function main() {
       if (documents.length) await prisma.inventoryDocument.deleteMany({ where: { id: { in: documents.map(row => row.id) } } });
       await prisma.physicalCoil.deleteMany({ where: { id: coilId } });
     }
-    if (lotId) await prisma.materialLot.deleteMany({ where: { id: lotId } });
     if (coilId) await prisma.materialLot.deleteMany({ where: { lotNumber: `${nonce}-COIL` } });
     if (contractId) {
       await prisma.materialContractTransaction.deleteMany({ where: { contractId } });
