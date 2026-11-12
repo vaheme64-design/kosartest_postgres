@@ -6934,6 +6934,7 @@ apiRouter.get('/reports/production-backlog', async (req: Request, res: Response)
       : [];
     const availableByMaterial = new Map<string, number>();
     for (const rawPart of rawParts) {
+      if (!rawPart.materialId) continue;
       const available = rawBalances.filter((balance: any) => balance.partId === rawPart.id)
         .reduce((sum: number, balance: any) => sum + Number(balance.weightKgAvailable), 0);
       availableByMaterial.set(rawPart.materialId, (availableByMaterial.get(rawPart.materialId) || 0) + available);
