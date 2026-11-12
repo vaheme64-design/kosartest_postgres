@@ -4181,6 +4181,8 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
         });
       }
 
+      const part = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+      if (!part) throw new Error('کالای پایه کلاف یافت نشد.');
       const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
       if (!user) throw new Error('برای ثبت سند اصلاح تخصیص، حداقل یک کاربر فعال در PostgreSQL لازم است.');
       const docNumber = `ADJ-COIL-ALLOC-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
@@ -4209,7 +4211,7 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
             documentId: doc.id, lineNumber, partId: dbCoil.partId,
             physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
             locationId: old.locationId, quantity: Number(old.weightKgOnHand),
-            unitId: (await tx.part.findUnique({ where: { id: dbCoil.partId } }))!.unitId,
+            unitId: part.unitId,
             weightKg: Number(old.weightKgOnHand), ownership: old.ownership,
             contractId: old.contractId, contractNumber: old.contractNumber,
             qualityStatus: old.qualityStatus,
@@ -4233,8 +4235,6 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
 
       await tx.stockBalance.deleteMany({ where: { physicalCoilId: dbCoil.id } });
       await tx.contractCoilAllocation.deleteMany({ where: { coilId: dbCoil.id } });
-      const part = await tx.part.findUnique({ where: { id: dbCoil.partId } });
-      if (!part) throw new Error('کالای پایه کلاف یافت نشد.');
       for (const segment of targetSegments) {
         lineNumber += 1;
         const weight = segment.allocatedWeightKg;
