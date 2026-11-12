@@ -6679,9 +6679,7 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
             where: {
               contractId: { in: contractIds },
               postingStatus: 'POSTED',
-              transactionType: 'OUTBOUND',
             },
-            include: { document: { select: { documentType: true } } },
             select: { contractId: true, weightKg: true, weightKgSigned: true, transactionDate: true, transactionType: true, document: { select: { documentType: true } } },
           }),
           prisma.stockBalance.findMany({
