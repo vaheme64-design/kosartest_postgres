@@ -59,6 +59,11 @@ async function main() {
     assert(address && typeof address === 'object', 'Relational planning test server did not bind to an ephemeral port.');
     const baseUrl = `http://127.0.0.1:${address.port}`;
 
+    const baselineResponse = await requestJson(baseUrl, '/api/planning/read-model');
+    assert(baselineResponse.response.status === 200 && baselineResponse.payload.success, 'Baseline relational read model must load before adding test demand.');
+    const baselineRequirement = baselineResponse.payload.data.requirements.find((item: any) => item.partId === part.id);
+    const baselineGrossDemand = baselineRequirement?.grossDemandQty || 0;
+
     const create = await requestJson(baseUrl, '/api/planning/customer-orders', 'POST', {
       orderNumber: `${nonce}-SO`,
       customerCode: customer.code,
@@ -69,11 +74,6 @@ async function main() {
     });
     assert(create.response.status === 201 && create.payload.success, `Test demand order creation failed: ${JSON.stringify(create.payload)}`);
     orderId = create.payload.data.id;
-
-    const baselineResponse = await requestJson(baseUrl, '/api/planning/read-model');
-    assert(baselineResponse.response.status === 200 && baselineResponse.payload.success, 'Baseline relational read model must load before adding test demand.');
-    const baselineRequirement = baselineResponse.payload.data.requirements.find((item: any) => item.partId === part.id);
-    const baselineGrossDemand = baselineRequirement?.grossDemandQty || 0;
 
     const readModel = await requestJson(baseUrl, '/api/planning/read-model');
     assert(readModel.response.status === 200 && readModel.payload.success, `Relational read model failed: ${JSON.stringify(readModel.payload)}`);
