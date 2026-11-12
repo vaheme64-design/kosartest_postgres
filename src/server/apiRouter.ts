@@ -7048,9 +7048,93 @@ apiRouter.post('/planning/evaluate-machine-eligibility', (req: Request, res: Res
 /**
  * 18.10. Get Customer Orders
  */
-apiRouter.get('/planning/customer-orders', (_req: Request, res: Response) => {
+function mapRelationalCustomerOrder(row: any): CustomerOrder {
+  const lines = (row.orderLines || []).map((line: any) => {
+    const orderedQuantity = Number(line.orderedQty);
+    const deliveredQuantity = Number(line.deliveredQty);
+    return {
+      id: line.id,
+      orderId: row.id,
+      partId: line.partId,
+      partCode: line.part?.partNumber || '',
+      partName: line.part?.name || '',
+      orderedQuantity,
+      deliveredQuantity,
+      remainingQuantity: Math.max(0, orderedQuantity - deliveredQuantity),
+      dueDate: line.requestedDate.toISOString().slice(0, 10),
+      unitPriceRials: line.unitPrice == null ? undefined : Number(line.unitPrice),
+    };
+  });
+  const status: CustomerOrder['status'] = row.documentStatus === 'CANCELLED'
+    ? 'CANCELLED'
+    : row.documentStatus === 'CLOSED'
+      ? 'FULFILLED'
+      : lines.some((line: any) => line.deliveredQuantity > 0 && line.remainingQuantity > 0)
+        ? 'PARTIALLY_FULFILLED'
+        : 'OPEN';
+  return {
+    id: row.id,
+    orderNumber: row.orderNumber,
+    customerName: row.customer?.name || '',
+    contractNumber: row.customerContractNumber || '',
+    orderDate: row.orderDate.toISOString().slice(0, 10),
+    dueDate: row.requestedDeliveryDate.toISOString().slice(0, 10),
+    priority: Math.min(3, Math.max(1, Number(row.priority) || 2)) as 1 | 2 | 3,
+    status,
+    lines,
+    notes: row.notes || undefined,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+async function resolveRelationalOrderLines(tx: any, inputLines: any[], orderId?: string) {
+  if (!Array.isArray(inputLines) || inputLines.length === 0) {
+    throw new Error('سفارش باید حداقل یک ردیف قطعه داشته باشد.');
+  }
+  const result = [];
+  for (let index = 0; index < inputLines.length; index++) {
+    const line = inputLines[index];
+    const orderedQty = Number(line.orderedQuantity ?? line.orderedQty);
+    const deliveredQty = Number(line.deliveredQuantity ?? line.deliveredQty ?? 0);
+    if (!Number.isFinite(orderedQty) || orderedQty <= 0 || !Number.isFinite(deliveredQty) || deliveredQty < 0 || deliveredQty > orderedQty) {
+      throw new Error(`تعداد سفارش/تحویل در ردیف ${index + 1} معتبر نیست.`);
+    }
+    const partIdentifier = String(line.partId || line.partCode || '').trim();
+    if (!partIdentifier) throw new Error(`قطعه ردیف ${index + 1} مشخص نشده است.`);
+    const part = await tx.part.findFirst({
+      where: { OR: [{ id: partIdentifier }, { partNumber: partIdentifier }], active: true },
+      select: { id: true, partNumber: true },
+    });
+    if (!part) throw new Error(`قطعه «${partIdentifier}» در اطلاعات پایه فعال یافت نشد.`);
+    result.push({
+      partId: part.id,
+      lineNumber: index + 1,
+      orderedQty,
+      deliveredQty,
+      unitPrice: line.unitPriceRials == null ? undefined : Number(line.unitPriceRials),
+      requestedDate: new Date(line.dueDate || line.requestedDate || new Date(Date.now() + 7 * 86400000).toISOString()),
+      status: deliveredQty >= orderedQty ? 'COMPLETED' : deliveredQty > 0 ? 'PARTIALLY_FULFILLED' : 'PENDING',
+    });
+  }
+  return result;
+}
+
+/**
+ * 18.10. Get Customer Orders
+ */
+apiRouter.get('/planning/customer-orders', async (_req: Request, res: Response) => {
   try {
-    res.json({ success: true, count: customerOrdersStore.length, data: customerOrdersStore });
+    if (isDatabaseUrlConfigured()) {
+      const prisma = getPrismaClient();
+      const rows = await prisma.customerOrder.findMany({
+        include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        orderBy: [{ orderDate: 'desc' }, { createdAt: 'desc' }],
+      });
+      const data = rows.map(mapRelationalCustomerOrder);
+      customerOrdersStore.splice(0, customerOrdersStore.length, ...data);
+      return res.json({ success: true, count: data.length, data, source: 'postgresql' });
+    }
+    return res.json({ success: true, count: customerOrdersStore.length, data: customerOrdersStore, source: 'memory-fallback' });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -7062,106 +7146,133 @@ apiRouter.get('/planning/customer-orders', (_req: Request, res: Response) => {
 /**
  * 18.11. Create Customer Order
  */
-apiRouter.post('/planning/customer-orders', (req: Request, res: Response) => {
+apiRouter.post('/planning/customer-orders', async (req: Request, res: Response) => {
   try {
-    const payload = req.body;
+    const payload = req.body || {};
+    const orderNumber = String(payload.orderNumber || '').trim();
+    if (!orderNumber) return res.status(400).json({ success: false, error: 'شماره سفارش مشتری الزامی است.' });
+    const priority = Number(payload.priority ?? 2);
+    if (![1, 2, 3].includes(priority)) return res.status(400).json({ success: false, error: 'اولویت سفارش باید ۱، ۲ یا ۳ باشد.' });
+
+    if (isDatabaseUrlConfigured()) {
+      const prisma = getPrismaClient();
+      const created = await prisma.$transaction(async (tx: any) => {
+        const customerIdentifier = String(payload.customerCode || payload.customerName || 'CUST-SAPCO').trim();
+        const customer = await tx.customer.findFirst({
+          where: { OR: [{ id: customerIdentifier }, { code: customerIdentifier }, { name: customerIdentifier }], active: true },
+        });
+        if (!customer) throw new Error(`مشتری «${customerIdentifier}» در اطلاعات پایه فعال یافت نشد.`);
+        const orderLines = await resolveRelationalOrderLines(tx, payload.lines, undefined);
+        return tx.customerOrder.create({
+          data: {
+            orderNumber,
+            customerId: customer.id,
+            orderDate: new Date(payload.orderDate || new Date().toISOString()),
+            requestedDeliveryDate: new Date(payload.dueDate || new Date(Date.now() + 7 * 86400000).toISOString()),
+            customerContractNumber: payload.contractNumber || null,
+            priority,
+            documentStatus: payload.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED',
+            notes: payload.notes || null,
+            orderLines: { create: orderLines },
+          },
+          include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        });
+      }, { isolationLevel: 'Serializable' });
+      const data = mapRelationalCustomerOrder(created);
+      customerOrdersStore.unshift(data);
+      planSuggestionsStore.length = 0;
+      return res.status(201).json({ success: true, message: 'سفارش مشتری در PostgreSQL ثبت شد.', data, source: 'postgresql' });
+    }
+
     const newOrder: CustomerOrder = {
       id: `ORD-2026-${String(customerOrdersStore.length + 1).padStart(3, '0')}`,
-      orderNumber: payload.orderNumber || `SO-SAPCO-1405-${String(customerOrdersStore.length + 10)}`,
+      orderNumber,
       customerName: payload.customerName || 'ساپکو',
-      contractNumber: payload.contractNumber || 'CNT-SAP-2026-001',
+      contractNumber: payload.contractNumber || '',
       orderDate: payload.orderDate || new Date().toISOString().slice(0, 10),
-      dueDate: payload.dueDate || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10),
-      priority: payload.priority || 2,
-      status: 'OPEN',
+      dueDate: payload.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+      priority,
+      status: payload.status || 'OPEN',
       lines: payload.lines || [],
       notes: payload.notes,
       createdAt: new Date().toISOString(),
     };
-
     customerOrdersStore.unshift(newOrder);
-
-    // Refresh plan suggestions
     planSuggestionsStore.length = 0;
     planSuggestionsStore.push(...generateProductionPlanSuggestions());
-
-    res.status(201).json({ success: true, message: 'سفارش مشتری با موفقیت ثبت شد و نیازمندی‌های تولید به‌روز گردیدند.', data: newOrder });
+    res.status(201).json({ success: true, message: 'سفارش مشتری ثبت شد.', data: newOrder, source: 'memory-fallback' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت سفارش مشتری',
-    });
+    const message = error instanceof Error ? error.message : 'خطا در ثبت سفارش مشتری';
+    res.status(message.includes('یافت نشد') || message.includes('معتبر نیست') || message.includes('الزامی') ? 400 : 500).json({ success: false, error: message });
   }
 });
 
 /**
  * 18.12. Update Customer Order (Edit Order, Status & Track Quantity Revisions)
  */
-apiRouter.put('/planning/customer-orders/:id', (req: Request, res: Response) => {
+apiRouter.put('/planning/customer-orders/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const payload = req.body;
+    const payload = req.body || {};
+    if (isDatabaseUrlConfigured()) {
+      const prisma = getPrismaClient();
+      const updated = await prisma.$transaction(async (tx: any) => {
+        const current = await tx.customerOrder.findFirst({
+          where: { OR: [{ id }, { orderNumber: id }] },
+          include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        });
+        if (!current) return null;
+        const data: any = {};
+        if (payload.orderNumber !== undefined) data.orderNumber = String(payload.orderNumber).trim();
+        if (payload.orderDate !== undefined) data.orderDate = new Date(payload.orderDate);
+        if (payload.dueDate !== undefined) data.requestedDeliveryDate = new Date(payload.dueDate);
+        if (payload.contractNumber !== undefined) data.customerContractNumber = payload.contractNumber || null;
+        if (payload.priority !== undefined) {
+          const priority = Number(payload.priority);
+          if (![1, 2, 3].includes(priority)) throw new Error('اولویت سفارش باید ۱، ۲ یا ۳ باشد.');
+          data.priority = priority;
+        }
+        if (payload.notes !== undefined) data.notes = payload.notes || null;
+        if (payload.status !== undefined) {
+          data.documentStatus = payload.status === 'CANCELLED' ? 'CANCELLED' : payload.status === 'FULFILLED' ? 'CLOSED' : 'CONFIRMED';
+        }
+        if (Array.isArray(payload.lines)) {
+          const resolved = await resolveRelationalOrderLines(tx, payload.lines, current.id);
+          await tx.customerOrderLine.deleteMany({ where: { orderId: current.id } });
+          data.orderLines = { create: resolved };
+        }
+        return tx.customerOrder.update({
+          where: { id: current.id },
+          data,
+          include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        });
+      }, { isolationLevel: 'Serializable' });
+      if (!updated) return res.status(404).json({ success: false, error: 'سفارش فروش مورد نظر یافت نشد.' });
+      const data = mapRelationalCustomerOrder(updated);
+      const idx = customerOrdersStore.findIndex(order => order.id === data.id);
+      if (idx >= 0) customerOrdersStore[idx] = data;
+      else customerOrdersStore.unshift(data);
+      planSuggestionsStore.length = 0;
+      return res.json({ success: true, message: `سفارش شماره «${data.orderNumber}» در PostgreSQL به‌روزرسانی شد.`, data, source: 'postgresql' });
+    }
+
     const idx = customerOrdersStore.findIndex(o => o.id === id || o.orderNumber === id);
-    if (idx === -1) {
-      return res.status(404).json({ success: false, error: 'سفارش فروش مورد نظر یافت نشد.' });
-    }
-
+    if (idx === -1) return res.status(404).json({ success: false, error: 'سفارش فروش مورد نظر یافت نشد.' });
     const current = customerOrdersStore[idx];
-    const oldTotalQty = (current.lines || []).reduce((s, l) => s + l.orderedQuantity, 0);
-    const updatedLines = Array.isArray(payload.lines)
-      ? payload.lines.map((l: any) => ({
-          ...l,
-          orderedQuantity: Number(l.orderedQuantity) || 0,
-          deliveredQuantity: Number(l.deliveredQuantity) || 0,
-          remainingQuantity: Math.max(0, (Number(l.orderedQuantity) || 0) - (Number(l.deliveredQuantity) || 0)),
-        }))
-      : current.lines;
-    const newTotalQty = updatedLines.reduce((s: number, l: any) => s + l.orderedQuantity, 0);
-    const newStatus = payload.status || current.status;
-    const existingRevisions = Array.isArray(current.revisions) ? [...current.revisions] : [];
-
-    if (newTotalQty !== oldTotalQty || newStatus !== current.status || payload.revisionReasonFa) {
-      existingRevisions.unshift({
-        id: `REV-ORD-${Date.now()}`,
-        revisionNumber: existingRevisions.length + 1,
-        timestamp: new Date().toLocaleString('fa-IR'),
-        actor: payload.actor || 'کارشناس فروش و برنامه‌ریزی',
-        fieldLabelFa: newTotalQty !== oldTotalQty ? 'تیراژ کل اقلام سفارش' : 'وضعیت سفارش مشتری',
-        oldQty: oldTotalQty,
-        newQty: newTotalQty,
-        unit: 'عدد',
-        oldStatus: current.status,
-        newStatus,
-        reasonFa: payload.revisionReasonFa || payload.notes || 'ویرایش تیراژ و برنامه تحویل سفارش مشتری',
-      });
-    }
-
-    const updatedOrder: CustomerOrder = {
-      ...current,
-      ...payload,
-      id: current.id,
-      orderNumber: payload.orderNumber || current.orderNumber,
-      status: newStatus,
-      lines: updatedLines,
-      revisions: payload.revisions || existingRevisions,
-    };
-
+    const updatedLines = Array.isArray(payload.lines) ? payload.lines.map((line: any) => ({
+      ...line,
+      orderedQuantity: Number(line.orderedQuantity) || 0,
+      deliveredQuantity: Number(line.deliveredQuantity) || 0,
+      remainingQuantity: Math.max(0, (Number(line.orderedQuantity) || 0) - (Number(line.deliveredQuantity) || 0)),
+    })) : current.lines;
+    const updatedOrder: CustomerOrder = { ...current, ...payload, id: current.id, lines: updatedLines };
     customerOrdersStore[idx] = updatedOrder;
-
-    // Refresh plan suggestions
     planSuggestionsStore.length = 0;
     planSuggestionsStore.push(...generateProductionPlanSuggestions());
-
-    res.json({
-      success: true,
-      message: `سفارش شماره «${updatedOrder.orderNumber}» با موفقیت ویرایش شد و بازنگری تیراژ ثبت گردید.`,
-      data: updatedOrder,
-    });
+    res.json({ success: true, message: `سفارش شماره «${updatedOrder.orderNumber}» به‌روزرسانی شد.`, data: updatedOrder, source: 'memory-fallback' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ویرایش سفارش مشتری',
-    });
+    const message = error instanceof Error ? error.message : 'خطا در ویرایش سفارش مشتری';
+    res.status(message.includes('یافت نشد') || message.includes('معتبر نیست') ? 400 : 500).json({ success: false, error: message });
   }
 });
 
