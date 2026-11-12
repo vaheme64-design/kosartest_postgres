@@ -6589,11 +6589,67 @@ apiRouter.get('/reports/dashboard-summary', (req: Request, res: Response) => {
 });
 
 // 19.1 Plan vs Actual
-apiRouter.get('/reports/plan-vs-actual', (req: Request, res: Response) => {
+apiRouter.get('/reports/plan-vs-actual', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش برنامه در برابر واقعی فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getPlanVsActualReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const plans = await prisma.productionPlan.findMany({
+      where: {
+        ...(filters.status && filters.status !== 'ALL' ? { status: filters.status as any } : {}),
+        ...(filters.startDate || filters.endDate ? {
+          endDate: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+      },
+      include: {
+        planLines: {
+          where: filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : undefined,
+          include: {
+            part: { select: { id: true, partNumber: true, name: true } },
+            manufacturingOrders: { select: { id: true, moNumber: true, completedQty: true, scrapQty: true } },
+          },
+          orderBy: [{ priority: 'desc' }, { plannedEndDate: 'asc' }],
+        },
+      },
+      orderBy: [{ startDate: 'desc' }, { planNumber: 'asc' }],
+    });
+    const data = plans.flatMap((plan: any) => plan.planLines.map((line: any) => {
+      const actualProducedQuantity = line.manufacturingOrders.reduce((sum: number, mo: any) => sum + Number(mo.completedQty), 0);
+      const actualScrapQuantity = line.manufacturingOrders.reduce((sum: number, mo: any) => sum + Number(mo.scrapQty), 0);
+      const plannedQuantity = Number(line.plannedQty);
+      return {
+        planId: plan.id,
+        planNumber: plan.planNumber,
+        planVersion: '—',
+        partId: line.part.id,
+        partCode: line.part.partNumber,
+        partName: line.part.name,
+        plannedQuantity,
+        actualProducedQuantity,
+        actualScrapQuantity,
+        achievementRatePercent: plannedQuantity > 0 ? Math.round((actualProducedQuantity / plannedQuantity) * 1000) / 10 : 0,
+        varianceQuantity: actualProducedQuantity - plannedQuantity,
+        status: plan.status === 'COMPLETED' ? 'COMPLETED' : plan.status === 'DRAFT' ? 'DRAFT_SUGGESTION' : plan.status === 'CANCELLED' ? 'REJECTED' : 'APPROVED',
+        targetDueDate: line.plannedEndDate.toISOString(),
+        isEstimate: line.manufacturingOrders.length === 0,
+        linkedMoNumbers: line.manufacturingOrders.map((mo: any) => mo.moNumber),
+      };
+    }));
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_PLANS_AND_MANUFACTURING_ORDERS',
+      meta: {
+        reportTitle: 'تطبیق برنامه تولید با عملکرد واقعی دستورات ساخت',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'نسخه برنامه در مدل فعلی ثبت نمی‌شود؛ مقدار نسخه با — نمایش داده شده است.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش برنامه در برابر واقعی' });
   }
