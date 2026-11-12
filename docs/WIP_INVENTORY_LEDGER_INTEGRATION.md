@@ -1,65 +1,69 @@
-# WIP and Inventory Ledger Integration Plan
+# WIP and Inventory Ledger Integration
 
 ## Status
 
-Design checkpoint only. No production database migration or ledger posting is performed by this document.
+The first atomic production-posting slice is implemented on this feature branch and covered by CI schema validation, TypeScript, build, and the existing regression suite. This is not yet a production cutover and no migration has been applied to a factory database.
 
-The current branch contains two different persistence paths:
+The application retains two persistence representations:
+- WIP execution snapshot: \`WipStateSnapshot\` stores stage queues and execution state.
+- Normalized relational records: \`ManufacturingOrder\`, \`ProductionOperation\`, \`ProductionReport\`, \`InventoryTransaction\`, and \`StockBalance\` store the production report and inventory ledger.
 
-- Stage-level WIP execution is stored in `WipStateSnapshot` as a JSON payload. Its work-order identifiers are application-generated strings such as `MO-2026-001` and seeded identifiers such as `MO-ECU-MAIN-01`; operation identifiers are likewise generated strings such as `MOP-...`.
-- The normalized inventory ledger uses relational `Part`, `Warehouse`, `WarehouseLocation`, `InventoryDocument`, `InventoryTransaction`, and `StockBalance` records. Its transaction relations expect actual database IDs. The normalized manufacturing models (`ManufacturingOrder`, `ProductionOperation`, `ProductionReport`) also use database IDs and foreign keys.
+Explicit identity mapping is provided by \`WipManufacturingOrderLink\` and \`WipOperationLink\`. The mapping endpoint validates part number, operation count, step number, and process type. The production form can select the corresponding relational MO on first posting; an existing mapping is preselected on later postings.
 
-The normalized `ProductionReport` model requires machine and shift relations, while the current WIP production registration accepts an operator name and optional machine ID and does not create a relational production report. Therefore a direct dual-write from the current WIP snapshot engine into the normalized ledger is not safe yet.
+## Atomic production posting now implemented
 
-## Target operating rule
+\`POST /api/wip/operations/production\` now:
+1. Requires a stable idempotency key, active shift, and active posting user. It also requires a relational MO selection on first use.
+2. Resolves the WIP order/operation through the explicit identity bridge.
+3. Validates the linked relational operation, part/process identity, active machine, shift, and user. The planned relational machine is used when present; otherwise the production form must supply a relational machine ID.
+4. Applies the WIP mutation in memory, then passes the proposed snapshot to a single Prisma \`Serializable\` transaction.
+5. Creates the relational \`ProductionReport\`, updates relational operation/MO cumulative quantities, writes the updated WIP snapshot, and posts inventory movements plus \`StockBalance\` updates in the same database transaction.
+6. Rolls back the in-memory WIP mutation if the relational transaction fails.
+7. Uses a unique \`ProductionReport.wipIdempotencyKey\` so retrying a completed request returns the existing report and does not re-post stock movements.
 
-A posted operation report is the single business event that changes production quantities.
+The posted inventory movements:
+- Consume the full reported quantity from the current operation's \`AVAILABLE\` stock at its resolved source location.
+- Add good output to the next operation's location, or to \`LOC-FIN-P1\` for the final operation.
+- Add scrap to the first active location in the active \`SCRAP\` warehouse.
+- Keep rework and rejected quantities at the source location in separate \`REWORK\` and \`REJECTED\` quality-status balances.
+- Preserve ownership, contract, material-lot, and physical-coil identity across split source balances.
+- Link every movement to the relational production report, MO, and operation.
 
-For an operation report with input quantity (I), good output (G), scrap (S), rework (R), and rejected quantity (X):
+No destination receipt confirmation is required. A report is rejected if the source location does not have enough available stock, a location code is ambiguous/missing, or required relational master data is inactive/missing. The transaction rolls back completely in those cases.
 
-- (I = G + S + R + X) for a fully reported processing batch. Partial reporting is permitted only when the unreported remainder stays in the operation's in-progress balance.
-- Good output is transferred automatically to the next operation's waiting-input balance. The destination does not confirm routine receipt.
-- Scrap is posted to the scrap stock/location; it must not remain in WIP.
-- Rework and rejected quantities remain separately classified and must not be counted as good output. Rework must have an explicit disposition/return-to-operation path before it can re-enter good production.
-- The same report must never post twice. Every posting needs a stable idempotency key and a unique database constraint.
-- WIP stage balances and inventory balances must be derived from the same posted movement records, not maintained as independent totals.
+## Required master-data and operational prerequisites
 
-## Required normalized posting model
+- The WIP order must be explicitly linked to a normalized relational MO with the same part number and a one-to-one operation mapping.
+- The corresponding relational operation must match by step number and process type.
+- WIP stage location codes must resolve to exactly one active \`WarehouseLocation\`.
+- The source location must already contain sufficient \`AVAILABLE\` stock for the reported quantity. This implementation intentionally does not invent opening stock.
+- A final-stage output requires the configured \`LOC-FIN-P1\` location.
+- Scrap requires an active \`SCRAP\` warehouse with at least one active location.
+- A valid active machine, shift, and posting user are required. The machine can be inherited from the relational operation's planned machine.
+- The current WIP data model uses one MO part code across stages. If a route changes item/part number between operations, stage-specific input/output part mapping is a further schema enhancement and must be configured before those routes are posted.
 
-Use one database transaction for the report and its inventory effects. A report posting should:
+## Known limitations / next hardening steps
 
-1. Resolve a real `ManufacturingOrder` and its `ProductionOperation` by database IDs. The external MO number may be used to look up the record, but must never be written into a foreign-key field.
-2. Validate that the operation belongs to the MO, is executable, and has sufficient in-progress input.
-3. Create the immutable `ProductionReport` (or a dedicated operation-posting record if the current report model cannot represent all required dispositions).
-4. Update the operation and MO cumulative quantities/status in the same transaction.
-5. Create balanced inventory transactions for the source operation location, next operation location (or finished-goods warehouse), and scrap location. Each movement must use real `Part`, `Warehouse`, `WarehouseLocation`, and `UnitOfMeasure` IDs.
-6. Update affected `StockBalance` rows in the same transaction, using a deterministic lock/upsert strategy to prevent concurrent lost updates.
-7. Create an audit event and retain a link from each movement to its source report and MO.
+- The current WIP engine remains process-memory based with a JSON snapshot. The production endpoint serializes requests within one server process and commits its proposed snapshot atomically with the ledger. Multi-instance execution still needs database-backed locking/version checks for the snapshot to prevent stale in-memory state from competing across application instances.
+- Operation-input loading and initial raw-material issue are not yet dual-posted by this slice. The source stock balance must already exist at the WIP operation location; first-stage raw material/coil issue integration remains a separate step.
+- Rework and rejected stock are distinguished by quality status at the source location. A dedicated rework route and a dedicated QC quarantine location/workflow are future enhancements.
+- Stage-specific input/output part identities are not yet modeled. Routes where the physical part identity changes between operations must not be posted through this fallback.
+- The transaction uses \`Serializable\` isolation and source-balance checks; concurrency tests for two simultaneous WIP reports against the same balance, rollback on movement failure, and idempotent replay should be added to the integration suite.
+- The implementation creates report-linked inventory transactions directly; it does not yet create a separate \`InventoryDocument\` wrapper for each production report.
+- No production database migration, backfill, or live cutover has been performed.
 
-Routine stage-to-stage movement is automatic. `ProductionTransfer` may be retained as traceability metadata, but must not introduce a second quantity posting or a receiving-approval requirement.
+## Quantity rule
 
-## Critical schema gaps to resolve before implementation
+For a report with input quantity I and dispositions G (good), S (scrap), R (rework), and X (rejected):
 
-- The WIP snapshot's generated MO/operation IDs do not match normalized UUID-based foreign keys.
-- The WIP snapshot represents operation queues and in-progress quantities that are not directly represented by the current `StockBalance` dimensions.
-- The current normalized report model has mandatory `machineId` and `shiftId`; the WIP endpoint does not currently guarantee both.
-- The ledger transaction model has `productionReportId` and `manufacturingOrderId`, but no explicit idempotency key or source-operation posting key.
-- The codebase has overlapping master-data families (`Part` versus `Item`, `ManufacturingOrder` versus `WorkOrder`, `ProductionOperation` versus `RoutingOperation`/ `ProductionLog`). The integration must select one canonical family for production and inventory. It must not create a third parallel model or silently mix IDs.
-- Location codes in the WIP engine (for example `LOC-WIP-BLANK`) must be resolved to actual `WarehouseLocation` rows. A code string alone is not a valid relational foreign key.
+\`I = G + S + R + X\`
 
-## Safe implementation sequence
+for a fully reported batch. Partial reporting is supported when the unreported balance remains in progress. The ledger consumes exactly the reported quantity and recreates each disposition in its destination quality/location bucket; the WIP snapshot and relational ledger commit together.
 
-1. **Canonical model decision:** retain the existing normalized `Part` / `ManufacturingOrder` / `ProductionOperation` / `InventoryTransaction` family as the canonical production-ledger path, unless a repository-wide usage audit demonstrates that another family is already authoritative. Do not migrate or delete the parallel `Item` / `WorkOrder` family in this step.
-2. **Identity bridge:** add explicit stable links from each WIP MO and operation to normalized records, or replace the snapshot execution identifiers with normalized IDs. Backfill only when a unique, validated match exists; leave unmatched snapshots untouched and report them for reconciliation.
-3. **Ledger posting service:** implement a dedicated Prisma transaction service with idempotency constraints, quantity-conservation validation, row locking/concurrency control, and balanced movement creation.
-4. **Controlled cutover:** stop accepting new writes through snapshot-only WIP mutation after the normalized posting path is proven. Keep a read-only snapshot compatibility path during transition.
-5. **Reconciliation:** compare operation queue balances, WIP inventory by location, finished goods, scrap, and posted reports. Block cutover if any unexplained variance remains.
-6. **Tests:** cover full and partial reports, automatic next-stage movement, final-stage finished-goods posting, scrap, rework/rejection dispositions, duplicate request replay, concurrent postings, missing mappings, rollback on any failed movement, and exact conservation.
+## Safety constraints
 
-## Explicit safety constraints
-
-- Do not run schema migrations against a live or user production database as part of this integration work.
-- Do not auto-seed or infer real warehouse, part, machine, shift, or user IDs from sample data.
-- Do not dual-write snapshot and normalized ledger independently; either both are committed atomically or neither is changed.
-- Do not count both a snapshot balance and a ledger balance in dashboards.
-- Do not add a two-sided receipt approval for routine production flow.
+- Do not run the generated migration against the live factory database as part of this implementation.
+- Do not infer or auto-seed real warehouse, part, machine, shift, or user IDs from demo data.
+- Do not treat the snapshot and relational ledger as independent write targets for production reports.
+- Do not count both snapshot quantities and posted inventory quantities in the same inventory total.
+- Do not introduce routine two-sided receiving approval.
