@@ -137,6 +137,32 @@ export interface MaterialConsumptionVsStandardItem {
   isOverConsumption: boolean;
 }
 
+// 6a. Actual material consumption from the posted inventory ledger and production reports
+export interface MaterialConsumptionActualItem {
+  moId: string;
+  moNumber: string;
+  productPartCode: string;
+  productPartName: string;
+  operationId: string;
+  operationStep: number;
+  operationCode: string;
+  operationName: string;
+  processType: ProcessType;
+  materialCode: string;
+  materialName: string;
+  materialGrade: string;
+  actualIssuedMaterialKg: number;
+  actualProducedGoodQty: number;
+  actualScrapQty: number;
+  actualScrapWeightKg: number;
+  actualMachineNames: string[];
+  actualOperatorNames: string[];
+  coilNumbers: string[];
+  contractNumbers: string[];
+  productionReportCount: number;
+  lastProductionReportAt?: string;
+}
+
 // 7. SAPCO Material Account
 export interface SapcoMaterialAccountItem {
   contractId: string;
