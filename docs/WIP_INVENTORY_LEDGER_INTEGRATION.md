@@ -53,6 +53,10 @@ CI includes a database concurrency test that simulates two independent writers r
 
 **Boundary:** this protects the shared WIP snapshot and the atomic production-posting path. It does not yet make every in-memory module (inventory UI caches, planning stores, etc.) distributed or multi-instance safe, nor does it add automatic replay of a rejected operator action. On HTTP 409, the client must refresh current WIP state and the operator should review/re-submit the action. Multi-instance production deployment still requires the remaining in-memory application stores to be externalized or guarded similarly.
 
+### Physical-coil inventory read consistency
+
+The physical-coil list endpoint now reads the current coil records, warehouse locations, material grades, and contract allocations directly from PostgreSQL whenever the database is configured. It no longer serves a stale process-local coil cache after another application instance posts an issue or remnant return. The first-operation integration test checks the list endpoint after both the 70 kg issue (30 kg remaining) and 5 kg remnant return (35 kg remaining).
+
 ### Coil issue idempotency
 
 Every physical-coil issue request now requires a stable `issueRequestKey` (accepted in the request body or `Idempotency-Key` header). The UI creates one key when the issue modal opens and reuses it for retries until the issue succeeds or the modal is reopened. The key is stored uniquely on the posted `InventoryDocument`, together with a normalized request fingerprint:
