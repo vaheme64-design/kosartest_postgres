@@ -81,6 +81,7 @@ async function run() {
 
     const snapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
     hadSnapshot = !!snapshot;
+    snapshotCaptured = true;
     originalSnapshot = snapshot?.payload ?? null;
 
     await prisma.stockBalance.create({
@@ -205,13 +206,13 @@ async function run() {
         data: originalOperationValues,
       });
     }
-    if (hadSnapshot) {
+    if (snapshotCaptured && hadSnapshot) {
       await prisma.wipStateSnapshot.upsert({
         where: { id: 'production-wip-state' },
         create: { id: 'production-wip-state', payload: originalSnapshot },
         update: { payload: originalSnapshot },
       });
-    } else {
+    } else if (snapshotCaptured) {
       await prisma.wipStateSnapshot.deleteMany({ where: { id: 'production-wip-state' } });
     }
     await prisma.$disconnect();
