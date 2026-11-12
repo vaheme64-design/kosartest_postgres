@@ -4131,6 +4131,7 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
     const persisted = await prisma.$transaction(async (tx: any) => {
       const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
       if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد؛ ابتدا رسید کلاف را ثبت کنید.');
+      if (!dbCoil.partId) throw new Error('کالای پایه کلاف در اطلاعات PostgreSQL تعریف نشده است.');
       if (Math.abs(Number(dbCoil.remainingWeightKg) - Number(dbCoil.originalWeightKg)) > 0.001) {
         throw new Error('تخصیص مجدد قرارداد پس از صدور یا تغییر وزن کلاف مجاز نیست؛ تخصیص باید پیش از اولین حواله انجام شود.');
       }
@@ -4138,7 +4139,7 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
       if (priorIssues > 0) throw new Error('پس از ثبت حواله تولید، تغییر قراردادهای تخصیص‌یافته مجاز نیست.');
       const oldBalances = await tx.stockBalance.findMany({ where: { physicalCoilId: dbCoil.id } });
       if (!oldBalances.length) throw new Error('مانده تفکیک‌شده کلاف در کاردکس یافت نشد؛ ابتدا رسید/موجودی کلاف را تطبیق دهید.');
-      if (oldBalances.some((row: any) => row.qualityStatus !== 'AVAILABLE' || Number(row.weightKgReserved) > 0)) {
+      if (oldBalances.some((row: any) => row.qualityStatus !== 'AVAILABLE' || Number(row.weightKgReserved) > 0 || Number(row.quantityReserved) > 0)) {
         throw new Error('تا زمانی که کلاف دارای موجودی رزروشده یا مسدود است، تغییر تخصیص قرارداد مجاز نیست.');
       }
       const oldBalanceTotal = oldBalances.reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
@@ -4186,7 +4187,7 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
       const doc = await tx.inventoryDocument.create({
         data: {
           documentNumber: docNumber,
-          documentType: 'ADJUSTMENT',
+          documentType: 'COUNT_ADJUSTMENT',
           documentDate: new Date(),
           documentStatus: 'CONFIRMED',
           postingStatus: 'POSTED',
