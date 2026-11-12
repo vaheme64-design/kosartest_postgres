@@ -7628,6 +7628,12 @@ apiRouter.get('/reports/lot-consumption', async (req: Request, res: Response) =>
         coil: {
           include: { material: { select: { grade: true } } },
         },
+        productionOperation: {
+          include: {
+            operation: { select: { code: true, name: true } },
+            plannedMachine: { select: { code: true, name: true } },
+          },
+        },
       },
       orderBy: [{ issuedAt: 'desc' }],
       take: 5000,
@@ -7649,7 +7655,9 @@ apiRouter.get('/reports/lot-consumption', async (req: Request, res: Response) =>
         materialGrade: record.coil?.material?.grade || '—',
         thicknessMm: Number(record.coil?.thicknessMm || 0),
         consumedKg: consumed,
-        destinationMachine: 'ثبت نشده',
+        destinationMachine: record.productionOperation?.plannedMachine ? `${record.productionOperation.plannedMachine.code} - ${record.productionOperation.plannedMachine.name}` : 'ثبت نشده',
+        operationStep: record.productionOperation?.stepNumber || null,
+        operationName: record.productionOperation?.operation?.name || 'ثبت نشده',
         targetMoNumber: mo?.moNumber || record.manufacturingOrderId || '—',
         targetPartCode: mo?.part?.partNumber || '—',
         targetPartName: mo?.part?.name || '—',
