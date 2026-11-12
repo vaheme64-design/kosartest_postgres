@@ -4104,9 +4104,7 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
 
 apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Response) => {
   try {
-    if (!isDatabaseUrlConfigured()) {
-      return res.status(503).json({ success: false, error: 'تخصیص قرارداد کلاف بدون اتصال PostgreSQL مجاز نیست.' });
-    }
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'تخصیص قرارداد کلاف بدون اتصال PostgreSQL مجاز نیست.' });
     const { id } = req.params;
     const { allocations } = req.body;
     if (!Array.isArray(allocations) || allocations.length === 0) {
@@ -4116,24 +4114,37 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
       contractId: String(row.contractId || ''),
       contractNumber: String(row.contractNumber || row.contractId || ''),
       allocatedWeightKg: Number(row.allocatedWeightKg),
-      ownership: String(row.ownership || 'SAPCO_SUPPLIER_OWNED'),
+      ownership: String(row.ownership || ''),
       notes: row.notes ? String(row.notes) : null,
     }));
     if (normalized.some((row: any) => !row.contractId || !Number.isFinite(row.allocatedWeightKg) || row.allocatedWeightKg <= 0)) {
       return res.status(400).json({ success: false, error: 'شناسه قرارداد و وزن مثبت برای تمام ردیف‌های تخصیص الزامی است.' });
     }
-    const totalAllocated = normalized.reduce((sum: number, row: any) => sum + row.allocatedWeightKg, 0);
     const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
+    const totalAllocated = normalized.reduce((sum: number, row: any) => sum + row.allocatedWeightKg, 0);
     if (totalAllocated > coil.originalWeightKg) {
-      return res.status(400).json({ success: false, error: `مجموع تخصیص (${totalAllocated} kg) از وزن اولیه کلاف (${coil.originalWeightKg} kg) بیشتر است.` });
+      return res.status(400).json({ success: false, error: 'مجموع تخصیص از وزن اولیه کلاف بیشتر است.' });
     }
 
     const prisma = getPrismaClient();
     const persisted = await prisma.$transaction(async (tx: any) => {
       const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
       if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد؛ ابتدا رسید کلاف را ثبت کنید.');
-      if (totalAllocated > Number(dbCoil.originalWeightKg)) throw new Error('مجموع تخصیص از وزن اولیه ثبت‌شده کلاف بیشتر است.');
+      if (Math.abs(Number(dbCoil.remainingWeightKg) - Number(dbCoil.originalWeightKg)) > 0.001) {
+        throw new Error('تخصیص مجدد قرارداد پس از صدور یا تغییر وزن کلاف مجاز نیست؛ تخصیص باید پیش از اولین حواله انجام شود.');
+      }
+      const priorIssues = await tx.coilIssueReturnRecord.count({ where: { coilId: dbCoil.id, issuedWeightKg: { gt: 0 } } });
+      if (priorIssues > 0) throw new Error('پس از ثبت حواله تولید، تغییر قراردادهای تخصیص‌یافته مجاز نیست.');
+      const oldBalances = await tx.stockBalance.findMany({ where: { physicalCoilId: dbCoil.id } });
+      if (!oldBalances.length) throw new Error('مانده تفکیک‌شده کلاف در کاردکس یافت نشد؛ ابتدا رسید/موجودی کلاف را تطبیق دهید.');
+      if (oldBalances.some((row: any) => row.qualityStatus !== 'AVAILABLE' || Number(row.weightKgReserved) > 0)) {
+        throw new Error('تا زمانی که کلاف دارای موجودی رزروشده یا مسدود است، تغییر تخصیص قرارداد مجاز نیست.');
+      }
+      const oldBalanceTotal = oldBalances.reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      if (Math.abs(oldBalanceTotal - Number(dbCoil.remainingWeightKg)) > 0.001) {
+        throw new Error('جمع مانده‌های کاردکس با وزن باقیمانده کلاف تطبیق ندارد؛ تغییر تخصیص لغو شد.');
+      }
 
       const resolved: any[] = [];
       for (const row of normalized) {
@@ -4141,48 +4152,157 @@ apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Respon
           where: { OR: [{ id: row.contractId }, { contractNumber: row.contractNumber }] },
         });
         if (!contract) throw new Error(`قرارداد «${row.contractNumber}» در PostgreSQL یافت نشد.`);
+        if (contract.materialId !== dbCoil.materialId) throw new Error(`گرید ماده قرارداد ${contract.contractNumber} با گرید کلاف یکسان نیست.`);
         const otherAllocations = await tx.contractCoilAllocation.aggregate({
           where: { contractId: contract.id, coilId: { not: dbCoil.id } },
           _sum: { allocatedWeightKg: true },
         });
         const alreadyAllocated = Number(otherAllocations._sum.allocatedWeightKg || 0);
         if (alreadyAllocated + row.allocatedWeightKg > Number(contract.totalAllocatedWeightKg)) {
-          throw new Error(`تخصیص قرارداد ${contract.contractNumber} از سقف وزنی قرارداد بیشتر می‌شود. باقیمانده قابل تخصیص: ${Math.max(0, Number(contract.totalAllocatedWeightKg) - alreadyAllocated)} kg.`);
+          throw new Error(`تخصیص قرارداد ${contract.contractNumber} از سقف تناژ قرارداد بیشتر می‌شود.`);
         }
-        resolved.push({ ...row, contractId: contract.id });
+        resolved.push({ ...row, contractId: contract.id, contractNumber: contract.contractNumber, ownership: dbCoil.ownership });
+      }
+      const duplicateContracts = new Set<string>();
+      for (const row of resolved) {
+        if (duplicateContracts.has(row.contractId)) throw new Error('برای هر قرارداد فقط یک ردیف تخصیص ثبت کنید.');
+        duplicateContracts.add(row.contractId);
+      }
+      const unallocatedWeight = Number(dbCoil.remainingWeightKg) - totalAllocated;
+      const targetSegments = [...resolved];
+      if (unallocatedWeight > 0.001) {
+        targetSegments.push({
+          contractId: null,
+          contractNumber: null,
+          allocatedWeightKg: unallocatedWeight,
+          ownership: dbCoil.ownership,
+          notes: 'بخش تخصیص‌نیافته کلاف',
+        });
       }
 
-      await tx.contractCoilAllocation.deleteMany({ where: { coilId: dbCoil.id } });
-      await tx.contractCoilAllocation.createMany({
-        data: resolved.map(row => ({
-          contractId: row.contractId,
-          coilId: dbCoil.id,
-          allocatedWeightKg: row.allocatedWeightKg,
-          ownership: row.ownership,
-          notes: row.notes,
-        })),
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای ثبت سند اصلاح تخصیص، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+      const docNumber = `ADJ-COIL-ALLOC-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      const doc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: docNumber,
+          documentType: 'ADJUSTMENT',
+          documentDate: new Date(),
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: dbCoil.warehouseId,
+          referenceType: 'SAPCO_COIL',
+          referenceNumber: dbCoil.coilId,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: new Date(),
+          notes: `اصلاح تخصیص قراردادهای کلاف ${dbCoil.coilId}`,
+        },
       });
-      return resolved.map(row => ({
-        ...row,
-        coilId: dbCoil.id,
-        contractNumber: normalized.find((n: any) => n.contractId === row.contractId || n.contractNumber === row.contractNumber)?.contractNumber || row.contractNumber,
-      }));
+
+      let lineNumber = 0;
+      for (const old of oldBalances) {
+        lineNumber += 1;
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: doc.id, lineNumber, partId: dbCoil.partId,
+            physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
+            locationId: old.locationId, quantity: Number(old.weightKgOnHand),
+            unitId: (await tx.part.findUnique({ where: { id: dbCoil.partId } }))!.unitId,
+            weightKg: Number(old.weightKgOnHand), ownership: old.ownership,
+            contractId: old.contractId, contractNumber: old.contractNumber,
+            qualityStatus: old.qualityStatus,
+            notes: `خروج اصلاحی از تخصیص قبلی ${old.contractNumber || 'بدون قرارداد'}`,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TRX-COIL-ALLOC-OUT-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
+            materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+            warehouseId: dbCoil.warehouseId, locationId: old.locationId,
+            transactionType: 'ADJUSTMENT_NEG', quantity: Number(old.weightKgOnHand),
+            quantitySigned: -Number(old.weightKgOnHand), unitId: line.unitId,
+            weightKg: Number(old.weightKgOnHand), weightKgSigned: -Number(old.weightKgOnHand),
+            ownership: old.ownership, contractId: old.contractId, contractNumber: old.contractNumber,
+            qualityStatus: old.qualityStatus, transactionDate: new Date(), createdByUserId: user.id,
+          },
+        });
+      }
+
+      await tx.stockBalance.deleteMany({ where: { physicalCoilId: dbCoil.id } });
+      await tx.contractCoilAllocation.deleteMany({ where: { coilId: dbCoil.id } });
+      const part = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+      if (!part) throw new Error('کالای پایه کلاف یافت نشد.');
+      for (const segment of targetSegments) {
+        lineNumber += 1;
+        const weight = segment.allocatedWeightKg;
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: doc.id, lineNumber, partId: dbCoil.partId,
+            physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
+            locationId: dbCoil.warehouseLocationId, quantity: weight,
+            unitId: part.unitId, weightKg: weight, ownership: segment.ownership,
+            contractId: segment.contractId, contractNumber: segment.contractNumber,
+            qualityStatus: 'AVAILABLE',
+            notes: `ورود اصلاحی به تخصیص ${segment.contractNumber || 'بدون قرارداد'}`,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TRX-COIL-ALLOC-IN-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
+            materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+            warehouseId: dbCoil.warehouseId, locationId: dbCoil.warehouseLocationId,
+            transactionType: 'ADJUSTMENT_POS', quantity: weight, quantitySigned: weight,
+            unitId: part.unitId, weightKg: weight, weightKgSigned: weight,
+            ownership: segment.ownership, contractId: segment.contractId,
+            contractNumber: segment.contractNumber, qualityStatus: 'AVAILABLE',
+            balanceAfter: weight, balanceKgAfter: weight,
+            transactionDate: new Date(), createdByUserId: user.id,
+          },
+        });
+        await tx.stockBalance.create({
+          data: {
+            partId: dbCoil.partId, warehouseId: dbCoil.warehouseId,
+            locationId: dbCoil.warehouseLocationId, materialLotId: dbCoil.materialLotId,
+            physicalCoilId: dbCoil.id, quantityOnHand: weight, quantityReserved: 0,
+            quantityAvailable: weight, weightKgOnHand: weight, weightKgReserved: 0,
+            weightKgAvailable: weight, ownership: segment.ownership,
+            contractId: segment.contractId, contractNumber: segment.contractNumber,
+            qualityStatus: 'AVAILABLE', lastTransactionAt: new Date(),
+          },
+        });
+        if (segment.contractId) {
+          await tx.contractCoilAllocation.create({
+            data: {
+              contractId: segment.contractId, coilId: dbCoil.id,
+              allocatedWeightKg: weight, ownership: segment.ownership,
+              sourceDocumentId: doc.id, notes: segment.notes,
+            },
+          });
+        }
+      }
+      return {
+        documentNumber: docNumber,
+        allocations: targetSegments.filter((row: any) => row.contractId).map((row: any) => ({
+          ...row, coilId: dbCoil.id,
+        })),
+      };
     });
 
-    coil.allocations = persisted;
+    coil.allocations = persisted.allocations;
     coil.updatedAt = new Date().toISOString();
     res.json({
       success: true,
-      message: `تخصیص ${persisted.length} قرارداد برای کلاف «${coil.coilId}» به‌صورت تراکنشی در PostgreSQL ثبت شد.`,
+      message: `تخصیص کلاف «${coil.coilId}» با سند اصلاحی ${persisted.documentNumber} در کاردکس و قراردادها ثبت شد.`,
       coil,
-      allocations: persisted,
-      persistence: 'POSTGRESQL_TRANSACTIONAL',
+      allocations: persisted.allocations,
+      documentNumber: persisted.documentNumber,
+      persistence: 'POSTGRESQL_CONTRACT_REALLOCATION_ADJUSTMENT_LEDGER',
     });
   } catch (error) {
-    res.status(409).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت تخصیص قراردادهای کلاف',
-    });
+    res.status(409).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت تخصیص قراردادهای کلاف' });
   }
 });
 
