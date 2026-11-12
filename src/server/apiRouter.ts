@@ -7524,13 +7524,85 @@ apiRouter.get('/reports/scrap-by-part-operation', async (req: Request, res: Resp
 });
 
 // 19.10 Machine Workload & Available Capacity
-apiRouter.get('/reports/machine-workload-capacity', (req: Request, res: Response) => {
+apiRouter.get('/reports/machine-workload-capacity', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش ظرفیت ماشین‌آلات فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getMachineWorkloadCapacityReport(filters);
-    res.json({ success: true, ...report });
+    const startDate = filters.startDate ? new Date(filters.startDate) : new Date(new Date().setHours(0, 0, 0, 0));
+    const endDate = filters.endDate ? new Date(filters.endDate + 'T23:59:59.999Z') : new Date(startDate.getTime() + 6 * 24 * 3600 * 1000);
+    if (endDate < startDate) return res.status(400).json({ success: false, error: 'تاریخ پایان باید بعد از تاریخ شروع باشد.' });
+    const periodDays = Math.max(1, Math.floor((endDate.getTime() - startDate.getTime()) / (24 * 3600 * 1000)) + 1);
+    const prisma = getPrismaClient();
+    const machines = await prisma.machine.findMany({
+      where: {
+        active: true,
+        ...(filters.machineId ? { OR: [{ id: filters.machineId }, { code: filters.machineId }] } : {}),
+      },
+      include: {
+        machineAssignments: {
+          where: {
+            assignedDate: { gte: startDate, lte: endDate },
+            status: { in: ['SCHEDULED', 'ACTIVE'] },
+          },
+          include: { shift: { select: { productiveHours: true } } },
+        },
+      },
+      orderBy: [{ code: 'asc' }],
+    });
+    const processTypeMap: Record<string, string> = {
+      PRESS: 'PRESS',
+      SPOT_WELDING: 'WELDING',
+      CO2_WELDING: 'WELDING',
+      WELDING: 'WELDING',
+      PAINTING: 'PAINT',
+      CUTTING: 'CUTTING',
+      BENDING: 'BENDING',
+      PUNCHING: 'FORMING',
+      FORMING: 'FORMING',
+    };
+    const nominalDailyCapacityHours = 15;
+    const data = machines.map((machine: any) => {
+      const scheduledWorkloadHours = machine.machineAssignments.reduce((sum: number, assignment: any) => sum + Number(assignment.shift.productiveHours), 0);
+      const nominalCapacity = nominalDailyCapacityHours * periodDays;
+      const availableCapacityHours = Math.max(0, nominalCapacity - scheduledWorkloadHours);
+      const utilizationRatePercent = nominalCapacity > 0 ? scheduledWorkloadHours / nominalCapacity * 100 : 0;
+      const workloadCategory = utilizationRatePercent >= 100
+        ? 'OVERLOADED'
+        : utilizationRatePercent >= 80
+          ? 'HIGH_LOAD'
+          : utilizationRatePercent >= 40
+            ? 'OPTIMAL'
+            : 'UNDER_UTILIZED';
+      return {
+        machineId: machine.id,
+        machineCode: machine.code,
+        machineName: machine.name,
+        hall: machine.hallLocation,
+        processType: processTypeMap[machine.machineType] || 'OTHER',
+        tonnage: machine.tonnageCapacity == null ? undefined : Number(machine.tonnageCapacity),
+        nominalDailyCapacityHours,
+        scheduledWorkloadHours: Number(scheduledWorkloadHours.toFixed(2)),
+        availableCapacityHours: Number(availableCapacityHours.toFixed(2)),
+        utilizationRatePercent: Number(utilizationRatePercent.toFixed(1)),
+        isReliableCapacityData: false,
+        workloadCategory,
+        machineStatus: machine.status === 'ACTIVE' ? 'ACTIVE' : machine.status === 'MAINTENANCE' ? 'MAINTENANCE' : 'IDLE',
+      };
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_MACHINE_ASSIGNMENTS_AND_SHIFT_CALENDARS',
+      meta: {
+        reportTitle: 'بارکاری زمان‌بندی‌شده و ظرفیت اسمی ماشین‌آلات',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: { ...filters, startDate: startDate.toISOString(), endDate: endDate.toISOString() },
+        note: 'بارکاری از شیفت‌های تخصیص‌یافته محاسبه شده است؛ ظرفیت ۱۵ ساعت در روز، فرض برنامه‌ریزی دوشیفته است و تا زمان ثبت تقویم واقعی، توقفات و زمان تنظیم، داده ظرفیت قابل اتکای قطعی نیست.',
+      },
+      data,
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش لود کاری ماشین‌آلات' });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش بارکاری ماشین‌آلات' });
   }
 });
 
