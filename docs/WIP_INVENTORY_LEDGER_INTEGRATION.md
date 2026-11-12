@@ -42,6 +42,15 @@ No destination receipt confirmation is required. A report is rejected if the sou
 
 This flow preserves the requested one-way operational handoff: once the production report is posted, good output automatically moves to the next stage; no receiving confirmation is added.
 
+### Coil issue idempotency
+
+Every physical-coil issue request now requires a stable `issueRequestKey` (accepted in the request body or `Idempotency-Key` header). The UI creates one key when the issue modal opens and reuses it for retries until the issue succeeds or the modal is reopened. The key is stored uniquely on the posted `InventoryDocument`, together with a normalized request fingerprint:
+- Replaying the same key and same payload returns the original document and issue records without reducing stock or adding WIP PCS again.
+- Reusing the key with a changed coil, weight, MO, operation, variance, or PCS payload is rejected with HTTP 409.
+- A unique database constraint is the final duplicate guard; if concurrent requests race, only one can create the document and commit stock movements. A losing concurrent request may need to retry with the same key to receive the original document response.
+
+The schema change adds nullable unique `InventoryDocument.issueRequestKey` and `issueRequestFingerprint` columns. Existing inventory documents remain valid because both fields are nullable. The generated CI migration preview validates the schema change; no live database migration is run here.
+
 ### End-to-end CI coverage
 
 `scripts/test-first-operation-coil-wip.ts` exercises the HTTP route against disposable PostgreSQL data. It allocates one 100 kg coil across two contracts (60/40 kg), issues 70 kg to the first operation, and verifies that the operator-confirmed 15 PCS are posted as 12/3 PCS while preserving each contract, coil, lot, and MO identity. It then returns a 5 kg remnant and verifies that the coil and lot reconcile to 35 kg without changing WIP PCS. Finally, it forces the material-lot guard to fail after the issue transaction has begun and verifies that coil, raw stock, WIP stock, and issue-document counts remain unchanged. The fixture temporarily reopens the seeded first operation in the disposable CI database and restores its original status during cleanup.
@@ -63,7 +72,7 @@ This flow preserves the requested one-way operational handoff: once the producti
 - The physical-coil issue flow now supports first-operation input posting when a matching WIP order exists. The operator sees an editable PCS suggestion calculated from (issued coil weight - recorded weight variance) / the part's engineering gross weight per piece. On confirmation, the same database transaction posts the raw-coil issue by contract/lot and creates the first-stage PCS stock balance and inbound inventory transaction, preserving coil, lot, ownership, and contract lineage. The WIP snapshot's initial input and first-operation waiting queue are updated in that transaction. This path requires a matching WIP order number/part, a valid one-to-one WIP identity mapping, a PCS unit, positive engineering net weight, and a unique active first-stage location. Multi-part coil issues and non-coil material issue are not yet integrated with the WIP queue.
 - Rework and rejected stock are distinguished by quality status at the source location. A dedicated rework route and a dedicated QC quarantine location/workflow are future enhancements.
 - Stage-specific input/output part identities are not yet modeled. Routes where the physical part identity changes between operations must not be posted through this fallback.
-- The transaction uses \`Serializable\` isolation and source-balance checks; concurrency tests for two simultaneous WIP reports against the same balance, rollback on movement failure, and idempotent replay should be added to the integration suite.
+- The transaction uses \`Serializable\` isolation and source-balance checks. Coil issue idempotency and conflicting-key replay are covered by the first-operation integration test; simultaneous concurrent request stress tests and multi-instance WIP snapshot locking/version checks remain future hardening.
 - The implementation creates report-linked inventory transactions directly; it does not yet create a separate \`InventoryDocument\` wrapper for each production report.
 - No production database migration, backfill, or live cutover has been performed.
 
