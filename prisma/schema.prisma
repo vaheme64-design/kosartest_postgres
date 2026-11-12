@@ -683,7 +683,6 @@ model ManufacturingOrder {
   wipExecutionLink     WipManufacturingOrderLink?
   operations           ProductionOperation[]
   coilIssueReturnRecords CoilIssueReturnRecord[]
-  wipExecutionLink     WipOperationLink?
   reports              ProductionReport[]
   transfers            ProductionTransfer[]
   reservations         InventoryReservation[]
@@ -716,6 +715,7 @@ model ProductionOperation {
   startDate            DateTime?
   endDate              DateTime?
 
+  wipExecutionLink     WipOperationLink?
   reports              ProductionReport[]
   assignments          MachineAssignment[]
   scraps               ProductionScrap[]
