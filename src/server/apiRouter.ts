@@ -4250,7 +4250,7 @@ apiRouter.get('/traceability/full-chain', (_req: Request, res: Response) => {
 /**
  * 16.14. Customizable Inventory & ERP Reports (Including 3-Tier Stock, End-to-End Traceability & BOM Backflush)
  */
-apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
+apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) => {
   try {
     const {
       reportType = 'THREE_TIER_STOCK',
@@ -4265,6 +4265,152 @@ apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
       contractId,
       search,
     } = req.query;
+
+    if (['THREE_TIER_STOCK', 'END_TO_END_TRACEABILITY', 'BOM_BACKFLUSH_VARIANCE'].includes(String(reportType))) {
+      if (!isDatabaseUrlConfigured()) {
+        return res.status(503).json({ success: false, error: 'این گزارش فقط از داده‌های عملیاتی PostgreSQL قابل تولید است.' });
+      }
+      const prisma = getPrismaClient();
+      const searchStr = search ? String(search).toLowerCase().trim() : '';
+
+      if (reportType === 'THREE_TIER_STOCK') {
+        const parts = await prisma.part.findMany({
+          where: { active: true },
+          include: {
+            unit: { select: { code: true, symbol: true } },
+            stockBalances: true,
+            transactions: {
+              where: { postingStatus: 'POSTED', transactionType: { in: ['INBOUND', 'OUTBOUND'] } },
+              include: { document: { select: { documentNumber: true } } },
+            },
+          },
+          orderBy: [{ category: 'asc' }, { partNumber: 'asc' }],
+        });
+        const rows = parts.map((part: any) => {
+          const onHand = part.stockBalances.reduce((sum: number, row: any) => sum + Number(row.quantityOnHand || 0), 0);
+          const available = part.stockBalances.reduce((sum: number, row: any) => sum + Number(row.quantityAvailable || 0), 0);
+          const entered = part.transactions.filter((tx: any) => tx.transactionType === 'INBOUND').reduce((sum: number, tx: any) => sum + Math.abs(Number(tx.quantitySigned || tx.quantity)), 0);
+          const issued = part.transactions.filter((tx: any) => tx.transactionType === 'OUTBOUND').reduce((sum: number, tx: any) => sum + Math.abs(Number(tx.quantitySigned || tx.quantity)), 0);
+          const docs = [...new Set(part.transactions.map((tx: any) => tx.document?.documentNumber).filter(Boolean))];
+          const tier = part.category === 'RAW_MATERIAL' || part.category === 'CONSUMABLE'
+            ? '۱. مواد اولیه و اتصالات'
+            : part.category === 'WIP_PART' ? '۲. نیمه‌ساخته حین تولید (WIP)' : '۳. محصول نهایی';
+          const row = {
+            tier,
+            partCode: part.partNumber,
+            partName: part.name,
+            unit: part.unit?.code || part.unit?.symbol || '—',
+            totalReceived: Number(entered.toFixed(3)),
+            totalIssued: Number(issued.toFixed(3)),
+            onHand: Number(onHand.toFixed(3)),
+            available: Number(available.toFixed(3)),
+            minStock: Number(part.minSafetyStock || 0),
+            controlStatus: onHand < Number(part.minSafetyStock || 0) ? 'کمتر از نقطه سفارش' : 'موجودی استاندارد و کافی',
+            documents: docs,
+          };
+          return row;
+        }).filter((row: any) => !searchStr || Object.values(row).some(v => String(v).toLowerCase().includes(searchStr)));
+        return res.json({
+          success: true,
+          reportType,
+          source: 'POSTGRESQL_STOCK_BALANCES_AND_INVENTORY_TRANSACTIONS',
+          rowCount: rows.length,
+          columns: ['tier', 'partCode', 'partName', 'unit', 'totalReceived', 'totalIssued', 'onHand', 'available', 'minStock', 'controlStatus', 'documents'],
+          summary: {
+            totalItems: rows.length,
+            rawItems: rows.filter((row: any) => row.tier.startsWith('۱')).length,
+            wipItems: rows.filter((row: any) => row.tier.startsWith('۲')).length,
+            finishedItems: rows.filter((row: any) => row.tier.startsWith('۳')).length,
+          },
+          data: rows,
+        });
+      }
+
+      if (reportType === 'END_TO_END_TRACEABILITY') {
+        const [transactions, coils] = await Promise.all([
+          prisma.inventoryTransaction.findMany({
+            where: { postingStatus: 'POSTED' },
+            include: {
+              document: { select: { documentNumber: true, documentType: true, referenceNumber: true } },
+              part: { select: { partNumber: true, name: true } },
+              materialLot: { select: { lotNumber: true, heatNumber: true, coilSerialNumber: true } },
+              warehouse: { select: { code: true, name: true } },
+              manufacturingOrder: { select: { moNumber: true } },
+            },
+            orderBy: [{ transactionDate: 'desc' }],
+            take: 10000,
+          }),
+          prisma.coilIssueReturnRecord.findMany({
+            include: {
+              coil: {
+                include: {
+                  material: { select: { grade: true } },
+                  part: { select: { partNumber: true, name: true } },
+                  warehouse: { select: { code: true, name: true } },
+                  contractAllocations: { include: { contract: { select: { contractNumber: true } } } },
+                },
+              },
+            },
+            orderBy: [{ issuedAt: 'desc' }],
+            take: 10000,
+          }),
+        ]);
+        const transactionRows = transactions.map((tx: any) => ({
+          sourceType: 'INVENTORY_TRANSACTION',
+          documentNumber: tx.document?.documentNumber || tx.transactionNumber,
+          documentType: tx.document?.documentType || tx.transactionType,
+          partCode: tx.part?.partNumber || tx.partId,
+          partName: tx.part?.name || '',
+          quantity: Number(tx.quantitySigned ?? tx.quantity),
+          unit: tx.unitId,
+          weightKg: Number(tx.weightKgSigned ?? tx.weightKg),
+          coilNumber: tx.materialLot?.coilSerialNumber || tx.materialLot?.lotNumber || '—',
+          heatNumber: tx.materialLot?.heatNumber || '—',
+          manufacturingOrder: tx.manufacturingOrder?.moNumber || tx.manufacturingOrderId || tx.document?.referenceNumber || '—',
+          warehouse: tx.warehouse ? `${tx.warehouse.code} - ${tx.warehouse.name}` : tx.warehouseId,
+          contractNumber: tx.contractNumber || '—',
+          date: tx.transactionDate.toISOString(),
+        }));
+        const coilRows = coils.map((record: any) => ({
+          sourceType: 'PHYSICAL_COIL_ISSUE_RETURN',
+          documentNumber: record.documentNumber,
+          documentType: Number(record.issuedWeightKg) > 0 ? 'COIL_ISSUE' : 'COIL_RETURN',
+          partCode: record.coil?.part?.partNumber || '—',
+          partName: record.coil?.part?.name || record.coil?.material?.grade || '',
+          quantity: Number(record.issuedWeightKg) > 0 ? -Number(record.issuedWeightKg) : Number(record.returnedWeightKg),
+          unit: 'KG',
+          weightKg: Number(record.issuedWeightKg) > 0 ? -Number(record.issuedWeightKg) : Number(record.returnedWeightKg),
+          coilNumber: record.coil?.coilId || record.coilId,
+          heatNumber: record.coil?.heatNumber || '—',
+          manufacturingOrder: record.manufacturingOrderId || '—',
+          warehouse: record.coil?.warehouse ? `${record.coil.warehouse.code} - ${record.coil.warehouse.name}` : '—',
+          contractNumber: record.coil?.contractAllocations?.map((a: any) => a.contract.contractNumber).join(', ') || '—',
+          date: (record.returnedAt || record.issuedAt).toISOString(),
+        }));
+        const rows = [...transactionRows, ...coilRows]
+          .filter((row: any) => !searchStr || Object.values(row).some(v => String(v).toLowerCase().includes(searchStr)))
+          .sort((a: any, b: any) => b.date.localeCompare(a.date))
+          .slice(0, 10000);
+        return res.json({
+          success: true,
+          reportType,
+          source: 'POSTGRESQL_INVENTORY_LEDGER_AND_PHYSICAL_COIL_RECORDS',
+          rowCount: rows.length,
+          truncated: transactions.length === 10000 || coils.length === 10000,
+          columns: ['sourceType', 'documentNumber', 'documentType', 'partCode', 'partName', 'quantity', 'unit', 'weightKg', 'coilNumber', 'heatNumber', 'manufacturingOrder', 'warehouse', 'contractNumber', 'date'],
+          summary: { inventoryTransactions: transactions.length, coilIssueReturnRecords: coils.length, totalRows: rows.length },
+          data: rows,
+          limitations: ['پیوند مستقیم فیزیکی کویل با تراکنش کاردکس هنوز برقرار نشده است؛ دو منبع داده در گزارش به‌صورت مجزا و با sourceType مشخص نمایش داده می‌شوند.'],
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        reportType,
+        error: 'گزارش انحراف مصرف BOM تا زمان ثبت مصرف واقعی از BOM نسخه‌دار و ارتباط آن با گزارش تولید و تراکنش انبار غیرفعال است؛ داده نمونه یا عدد ساختگی نمایش داده نمی‌شود.',
+        source: 'NOT_AVAILABLE_UNTIL_BOM_BACKFLUSH_IS_RELATIONAL',
+      });
+    }
 
     const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
     const searchStr = search ? String(search).toLowerCase().trim() : '';
