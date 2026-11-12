@@ -3198,6 +3198,68 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
       allocations: payload.allocations || [],
     };
 
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'ثبت کلاف فیزیکی بدون اتصال PostgreSQL مجاز نیست؛ اطلاعات در حافظه موقت ذخیره نخواهد شد.' });
+    }
+
+    const prisma = getPrismaClient();
+    const dbCoil = await prisma.$transaction(async (tx: any) => {
+      const dbWarehouse = await tx.warehouse.findFirst({
+        where: { OR: [{ id: payload.warehouseId }, { code: warehouse?.code || payload.warehouseId }] },
+      });
+      if (!dbWarehouse) throw new Error('انبار انتخاب‌شده در اطلاعات پایه PostgreSQL یافت نشد.');
+      const dbPart = await tx.part.findFirst({
+        where: { OR: [{ id: payload.partId }, { partNumber: part?.code || payload.partCode || payload.partId }] },
+      });
+      if (!dbPart) throw new Error('قطعه یا ماده پایه کلاف در PostgreSQL یافت نشد.');
+      const grade = newCoil.materialGrade;
+      const dbMaterial = dbPart.materialId
+        ? await tx.material.findUnique({ where: { id: dbPart.materialId } })
+        : await tx.material.findFirst({ where: { OR: [{ grade }, { code: `MAT-${grade}` }] } });
+      const dbLocation = newCoil.warehouseLocationCode
+        ? await tx.warehouseLocation.findFirst({ where: { warehouseId: dbWarehouse.id, code: newCoil.warehouseLocationCode } })
+        : null;
+
+      const created = await tx.physicalCoil.create({
+        data: {
+          id: newCoil.id,
+          coilId: newCoil.coilId,
+          coilPackNumber: newCoil.coilPackNumber,
+          partId: dbPart.id,
+          materialId: dbMaterial?.id || undefined,
+          heatNumber: newCoil.heatNumber || null,
+          thicknessMm: newCoil.thicknessMm,
+          widthMm: newCoil.widthMm,
+          originalWeightKg: newCoil.originalWeightKg,
+          remainingWeightKg: newCoil.remainingWeightKg,
+          warehouseId: dbWarehouse.id,
+          warehouseLocationId: dbLocation?.id || null,
+          ownership: newCoil.ownership,
+          qualityStatus: newCoil.qualityStatus,
+          physicalStatus: newCoil.physicalStatus,
+          supplierName: newCoil.supplierName,
+          receiptDate: new Date(newCoil.receiptDate),
+        },
+      });
+
+      for (const allocation of (newCoil.allocations || [])) {
+        const contract = await tx.materialContract.findFirst({
+          where: { OR: [{ id: allocation.contractId }, { contractNumber: allocation.contractNumber || allocation.contractId }] },
+        });
+        if (!contract) throw new Error(`قرارداد ${allocation.contractNumber || allocation.contractId} در PostgreSQL یافت نشد؛ ثبت کلاف لغو شد.`);
+        await tx.contractCoilAllocation.create({
+          data: {
+            contractId: contract.id,
+            coilId: created.id,
+            allocatedWeightKg: Number(allocation.allocatedWeightKg),
+            ownership: allocation.ownership || newCoil.ownership,
+            notes: allocation.notes || null,
+          },
+        });
+      }
+      return created;
+    });
+
     physicalCoilsStore.unshift(newCoil);
 
     // Also create a corresponding posted RECEIPT_RAW_MATERIAL document in inventoryDocsStore so StockInquiryView and IssueFormModal see the new coil immediately
