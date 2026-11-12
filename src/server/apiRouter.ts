@@ -6655,22 +6655,181 @@ apiRouter.get('/reports/material-consumption-vs-standard', (req: Request, res: R
 });
 
 // 19.7 SAPCO Material Account
-apiRouter.get('/reports/sapco-material-account', (req: Request, res: Response) => {
+apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش حساب مواد ساپکو فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getSapcoMaterialAccountReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const contracts = await prisma.materialContract.findMany({
+      where: {
+        ...(filters.status && filters.status !== 'ALL' ? { status: filters.status as any } : {}),
+        ...(filters.partId ? { OR: [{ materialId: filters.partId }, { material: { code: filters.partId } }, { material: { grade: filters.partId } }] } : {}),
+      },
+      include: {
+        material: { select: { code: true, grade: true, name: true } },
+        supplierCustomer: { select: { name: true, code: true } },
+        transactions: { orderBy: { receiptDate: 'asc' } },
+      },
+      orderBy: [{ endDate: 'asc' }, { contractNumber: 'asc' }],
+    });
+    const contractIds = contracts.map((row: any) => row.id);
+    const [inventoryTransactions, balances] = contractIds.length
+      ? await Promise.all([
+          prisma.inventoryTransaction.findMany({
+            where: {
+              contractId: { in: contractIds },
+              postingStatus: 'POSTED',
+              transactionType: 'OUTBOUND',
+              ...(filters.startDate || filters.endDate ? {
+                transactionDate: {
+                  ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+                  ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+                },
+              } : {}),
+            },
+            select: { contractId: true, weightKg: true, transactionDate: true },
+          }),
+          prisma.stockBalance.findMany({
+            where: { contractId: { in: contractIds } },
+            select: { contractId: true, weightKgOnHand: true },
+          }),
+        ])
+      : [[], []];
+
+    const data = contracts.filter((contract: any) => {
+      const start = filters.startDate ? new Date(filters.startDate) : null;
+      const end = filters.endDate ? new Date(filters.endDate + 'T23:59:59.999Z') : null;
+      return contract.transactions.some((tx: any) => {
+        const date = tx.receiptDate.getTime();
+        return (!start || date >= start.getTime()) && (!end || date <= end.getTime());
+      }) || !filters.startDate && !filters.endDate || Number(contract.receivedWeightKg) === 0;
+    }).map((contract: any) => {
+      const contractTx = contract.transactions;
+      const isReceipt = (tx: any) => tx.transactionType === 'RECEIPT';
+      const isReturn = (tx: any) => tx.transactionType === 'RETURN';
+      const inRange = (tx: any) => {
+        const time = tx.receiptDate.getTime();
+        return (!filters.startDate || time >= new Date(filters.startDate).getTime()) &&
+          (!filters.endDate || time <= new Date(filters.endDate + 'T23:59:59.999Z').getTime());
+      };
+      const openingBalanceKg = filters.startDate
+        ? contractTx.filter((tx: any) => isReceipt(tx) && tx.receiptDate < new Date(filters.startDate!)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0)
+        : 0;
+      const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const issued = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const totalReceivedKg = contractTx.length
+        ? receivedInRange
+        : filters.startDate || filters.endDate ? 0 : Number(contract.receivedWeightKg);
+      const closingBookBalanceKg = openingBalanceKg + totalReceivedKg - supplierReturns - issued;
+      const physicalStockInPlantKg = balances.filter((row: any) => row.contractId === contract.id).reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      return {
+        contractId: contract.id,
+        contractNumber: contract.contractNumber,
+        title: contract.title,
+        materialGrade: contract.material.grade,
+        allocatedQuotaKg: Number(contract.totalAllocatedWeightKg),
+        openingBalanceKg: Number(openingBalanceKg.toFixed(3)),
+        totalReceivedKg: Number(totalReceivedKg.toFixed(3)),
+        totalIssuedKg: Number(issued.toFixed(3)),
+        closingBookBalanceKg: Number(closingBookBalanceKg.toFixed(3)),
+        physicalStockInPlantKg: Number(physicalStockInPlantKg.toFixed(3)),
+        discrepancyKg: Number((physicalStockInPlantKg - closingBookBalanceKg).toFixed(3)),
+        status: contract.status,
+        supplier: contract.supplierCustomer.name,
+      };
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_MATERIAL_CONTRACT_TRANSACTIONS_INVENTORY_LEDGER_AND_STOCK_BALANCES',
+      meta: {
+        reportTitle: 'حساب مواد ساپکو بر اساس قرارداد، رسید، حواله و مانده فیزیکی',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش حساب ساپکو' });
   }
 });
 
 // 19.8 Inventory Valuation Quantities
-apiRouter.get('/reports/inventory-valuation-quantities', (req: Request, res: Response) => {
+apiRouter.get('/reports/inventory-valuation-quantities', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش تفکیک مقداری موجودی فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getInventoryValuationQuantitiesReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const balances = await prisma.stockBalance.findMany({
+      where: {
+        ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { partNumber: filters.partId } }] } : {}),
+        ...(filters.startDate || filters.endDate ? {
+          updatedAt: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+      },
+      include: {
+        part: { include: { unit: true } },
+      },
+      orderBy: [{ part: { partNumber: 'asc' } }, { updatedAt: 'desc' }],
+    });
+    const grouped = new Map<string, any>();
+    for (const balance of balances) {
+      const key = balance.partId;
+      if (!grouped.has(key)) {
+        const category = balance.part.category === 'FINISHED_GOOD'
+          ? 'FINISHED_GOODS'
+          : balance.part.category === 'WIP_PART'
+            ? 'WIP_PARTS'
+            : 'RAW_SHEET_METAL';
+        grouped.set(key, {
+          category,
+          partOrMaterialCode: balance.part.partNumber,
+          description: balance.part.name,
+          unit: balance.part.unit.code,
+          physicalQuantity: 0,
+          companyOwnedQuantity: 0,
+          sapcoConsignmentQuantity: 0,
+          qualityBlockedQuantity: 0,
+          reservedQuantity: 0,
+          availableFreeQuantity: 0,
+          totalPhysicalWeightKg: 0,
+        });
+      }
+      const row = grouped.get(key);
+      const onHand = Number(balance.quantityOnHand);
+      row.physicalQuantity += onHand;
+      row.reservedQuantity += Number(balance.quantityReserved);
+      row.totalPhysicalWeightKg += Number(balance.weightKgOnHand);
+      if (balance.ownership === 'SAPCO_SUPPLIER_OWNED') row.sapcoConsignmentQuantity += onHand;
+      else row.companyOwnedQuantity += onHand;
+      if (balance.qualityStatus !== 'AVAILABLE') row.qualityBlockedQuantity += onHand;
+      else row.availableFreeQuantity += Number(balance.quantityAvailable);
+    }
+    const data = [...grouped.values()].map(row => ({
+      ...row,
+      physicalQuantity: Number(row.physicalQuantity.toFixed(3)),
+      companyOwnedQuantity: Number(row.companyOwnedQuantity.toFixed(3)),
+      sapcoConsignmentQuantity: Number(row.sapcoConsignmentQuantity.toFixed(3)),
+      qualityBlockedQuantity: Number(row.qualityBlockedQuantity.toFixed(3)),
+      reservedQuantity: Number(row.reservedQuantity.toFixed(3)),
+      availableFreeQuantity: Number(row.availableFreeQuantity.toFixed(3)),
+      totalPhysicalWeightKg: Number(row.totalPhysicalWeightKg.toFixed(3)),
+    }));
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_STOCK_BALANCES',
+      meta: {
+        reportTitle: 'گزارش تفکیک مقداری موجودی بر اساس مالکیت و وضعیت کیفی',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش تفکیک مقداری موجودی' });
   }
