@@ -6656,11 +6656,100 @@ apiRouter.get('/reports/plan-vs-actual', async (req: Request, res: Response) => 
 });
 
 // 19.2 Customer Order Fulfillment
-apiRouter.get('/reports/customer-order-fulfillment', (req: Request, res: Response) => {
+apiRouter.get('/reports/customer-order-fulfillment', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش تحقق سفارش مشتری فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getCustomerOrderFulfillmentReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const orders = await prisma.customerOrder.findMany({
+      where: {
+        ...(filters.customerId ? { customerId: filters.customerId } : {}),
+        ...(filters.customerName ? { customer: { is: { name: { contains: filters.customerName, mode: 'insensitive' } } } } : {}),
+        ...(filters.status === 'CANCELLED' ? { documentStatus: 'CANCELLED' } : {}),
+      },
+      include: {
+        customer: { select: { name: true } },
+        orderLines: {
+          where: filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : undefined,
+          include: { part: { select: { id: true, partNumber: true, name: true } } },
+          orderBy: { lineNumber: 'asc' },
+        },
+      },
+      orderBy: [{ requestedDeliveryDate: 'asc' }, { orderNumber: 'asc' }],
+    });
+    const references = orders.flatMap((order: any) => [order.orderNumber, order.id]);
+    const deliveryDocuments = references.length
+      ? await prisma.inventoryDocument.findMany({
+          where: {
+            postingStatus: 'POSTED',
+            referenceType: 'CUSTOMER_ORDER',
+            referenceNumber: { in: references },
+          },
+          include: { lines: { select: { partId: true, quantity: true } } },
+        })
+      : [];
+    const deliveredByOrderPart = new Map<string, number>();
+    for (const doc of deliveryDocuments) {
+      for (const line of doc.lines) {
+        const key = `${doc.referenceNumber}|${line.partId}`;
+        deliveredByOrderPart.set(key, (deliveredByOrderPart.get(key) || 0) + Number(line.quantity));
+      }
+    }
+
+    const now = Date.now();
+    const data = orders.flatMap((order: any) => order.orderLines.map((line: any) => {
+      const dueDate = line.requestedDate;
+      const dueTime = dueDate.getTime();
+      const deliveredQuantity = deliveredByOrderPart.get(`${order.orderNumber}|${line.partId}`) ??
+        deliveredByOrderPart.get(`${order.id}|${line.partId}`) ?? Number(line.deliveredQty);
+      const orderedQuantity = Number(line.orderedQty);
+      const remainingQuantity = Math.max(0, orderedQuantity - deliveredQuantity);
+      const isDelayed = now > dueTime && remainingQuantity > 0;
+      const daysOverdue = isDelayed ? Math.floor((now - dueTime) / (24 * 3600 * 1000)) : 0;
+      const fulfillmentPercent = orderedQuantity > 0 ? Math.round((deliveredQuantity / orderedQuantity) * 1000) / 10 : 0;
+      const status = remainingQuantity <= 0
+        ? 'FULFILLED'
+        : isDelayed ? 'DELAYED'
+        : deliveredQuantity > 0 ? 'PARTIALLY_FULFILLED'
+        : order.documentStatus === 'CANCELLED' ? 'CANCELLED'
+        : order.documentStatus === 'DRAFT' ? 'OPEN'
+        : 'ACTIVE';
+      return {
+        orderId: order.id,
+        orderLineId: line.id,
+        orderNumber: order.orderNumber,
+        contractNumber: order.customerContractNumber || '—',
+        customerName: order.customer.name,
+        partId: line.partId,
+        partCode: line.part.partNumber,
+        partName: line.part.name,
+        orderedQuantity,
+        deliveredQuantity,
+        remainingQuantity,
+        fulfillmentPercent,
+        dueDate: dueDate.toISOString(),
+        status,
+        daysOverdue,
+        isDelayed,
+      };
+    })).filter((row: any) => {
+      const date = new Date(row.dueDate).getTime();
+      return (!filters.startDate || date >= new Date(filters.startDate).getTime()) &&
+        (!filters.endDate || date <= new Date(filters.endDate + 'T23:59:59.999Z').getTime()) &&
+        (!filters.status || filters.status === 'ALL' || row.status === filters.status);
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_CUSTOMER_ORDERS_AND_POSTED_DELIVERY_DOCUMENTS',
+      meta: {
+        reportTitle: 'گزارش تحقق سفارشات مشتری بر اساس اسناد تحویل ثبت‌شده',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'تحویل بر اساس اسناد POSTED با مرجع سفارش مشتری محاسبه می‌شود؛ در صورت ثبت نکردن referenceNumber سفارش روی سند تحویل، مقدار تحویل در گزارش لحاظ نخواهد شد.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش تحقق سفارشات' });
   }
