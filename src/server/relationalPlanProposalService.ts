@@ -57,7 +57,12 @@ export async function createRelationalPlanProposal(notes?: string) {
         plannedEndDate: new Date(Math.max(today().getTime(), new Date(demandLine.dueDate).getTime())),
         priority: demandLine.priority,
         operationAssignments: buildAssignments(requirement.route),
-        warnings: requirement.dataWarnings,
+        warnings: [
+          ...requirement.dataWarnings,
+          ...(requirement.hasMaterialShortage ? [`کسری متریال برآوردی: ${requirement.materialShortageKg} کیلوگرم`] : []),
+          ...requirement.route.filter((step: any) => step.machineSelectionStatus === 'NO_ELIGIBLE_MACHINE')
+            .map((step: any) => `برای عملیات ${step.stepCode} ماشین واجد شرایط پیدا نشد.`),
+        ],
       });
     }
   }
@@ -70,6 +75,14 @@ export async function createRelationalPlanProposal(notes?: string) {
   const id = randomUUID();
   const proposalNumber = makeNumber('PRP', now);
   const proposal = await prisma.$transaction(async tx => {
+    const approvedPendingRelease = await tx.productionPlanProposal.count({ where: { status: 'APPROVED' } });
+    if (approvedPendingRelease > 0) {
+      throw new Error('یک پیشنهاد تاییدشده هنوز صادر نشده است؛ ابتدا آن را صادر یا لغو کنید، سپس پیشنهاد جدید بسازید.');
+    }
+    await tx.productionPlanProposal.updateMany({
+      where: { status: 'DRAFT' },
+      data: { status: 'SUPERSEDED' },
+    });
     return tx.productionPlanProposal.create({
       data: {
         id,
