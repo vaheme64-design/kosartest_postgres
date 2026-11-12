@@ -3207,12 +3207,12 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
     const orders = await prisma.manufacturingOrder.findMany({
       where: {
         status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS'] },
-        operations: { some: { status: { in: ['READY', 'IN_PROGRESS'] } } },
+        operations: { some: { status: { in: ['PENDING', 'READY', 'IN_PROGRESS'] } } },
       },
       include: {
         part: { select: { partNumber: true, name: true } },
         operations: {
-          where: { status: { in: ['READY', 'IN_PROGRESS'] } },
+          where: { status: { in: ['PENDING', 'READY', 'IN_PROGRESS'] } },
           include: {
             operation: { select: { code: true, name: true, processType: true } },
             plannedMachine: { select: { code: true, name: true } },
@@ -3222,13 +3222,16 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
       },
       orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
     });
-    const data = orders.map((order: any) => ({
+    const data = orders.map((order: any) => {
+      const firstStep = Math.min(...order.operations.map((operation: any) => operation.stepNumber));
+      const eligibleOperations = order.operations.filter((operation: any) => operation.status === 'READY' || operation.status === 'IN_PROGRESS' || (operation.status === 'PENDING' && operation.stepNumber === firstStep));
+      return {
       id: order.id,
       moNumber: order.moNumber,
       partCode: order.part.partNumber,
       partName: order.part.name,
       status: order.status,
-      operations: order.operations.map((operation: any) => ({
+      operations: eligibleOperations.map((operation: any) => ({
         id: operation.id,
         stepNumber: operation.stepNumber,
         operationCode: operation.operation.code,
@@ -3237,7 +3240,8 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
         status: operation.status,
         plannedMachine: operation.plannedMachine ? `${operation.plannedMachine.code} - ${operation.plannedMachine.name}` : null,
       })),
-    }));
+    };
+    }).filter((order: any) => order.operations.length > 0);
     res.json({ success: true, source: 'POSTGRESQL_MANUFACTURING_ORDERS_AND_READY_OPERATIONS', count: data.length, data });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت گزینه‌های صدور کلاف' });
@@ -3704,6 +3708,19 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         const operation = await tx.productionOperation.findUnique({ where: { id: request.operationRef } });
         if (!operation || operation.manufacturingOrderId !== mo.id) {
           throw new Error(`عملیات «${request.operationRef}» به دستور ساخت ${mo.moNumber} تعلق ندارد یا یافت نشد.`);
+        }
+        if (operation.status === 'COMPLETED' || operation.status === 'SKIPPED') {
+          throw new Error(`عملیات ${operation.stepNumber} دستور ساخت ${mo.moNumber} خاتمه یافته یا رد شده است و دریافت مواد برای آن مجاز نیست.`);
+        }
+        if (operation.status === 'PENDING') {
+          const firstOperation = await tx.productionOperation.findFirst({
+            where: { manufacturingOrderId: mo.id },
+            orderBy: { stepNumber: 'asc' },
+            select: { id: true },
+          });
+          if (firstOperation?.id !== operation.id) {
+            throw new Error('عملیات انتخاب‌شده هنوز منتظر تکمیل مرحله قبلی است.');
+          }
         }
 
         for (const source of balanceRemainders) {
