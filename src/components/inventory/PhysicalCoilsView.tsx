@@ -816,6 +816,10 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                             onClick={() => {
                               setSelectedCoil(coil);
                               setIssueWeight(String(coil.remainingWeightKg));
+                              setIssueMoId('');
+                              setIssueOperationId('');
+                              setIssueScrap('0');
+                              setInitialInputQuantityPcs('');
                               setIssueMode('SINGLE');
                               setIssueModalOpen(true);
                             }}
