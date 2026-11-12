@@ -103,3 +103,6 @@ jobs:
 
       - name: Inventory HTTP lifecycle integration test
         run: bunx tsx scripts/test-inventory-http.ts
+
+      - name: First-operation coil-to-WIP integration test
+        run: bunx tsx scripts/test-first-operation-coil-wip.ts
