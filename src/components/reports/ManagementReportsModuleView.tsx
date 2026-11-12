@@ -28,7 +28,7 @@ import {
   ProductionBacklogItem,
   WipByPartAndOperationItem,
   WipAgingItem,
-  MaterialConsumptionVsStandardItem,
+  MaterialConsumptionActualItem,
   SapcoMaterialAccountItem,
   InventoryValuationQuantitiesItem,
   ScrapByPartAndOperationItem,
@@ -108,7 +108,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
   const [backlogData, setBacklogData] = useState<ProductionBacklogItem[]>([]);
   const [wipOpData, setWipOpData] = useState<WipByPartAndOperationItem[]>([]);
   const [wipAgingData, setWipAgingData] = useState<WipAgingItem[]>([]);
-  const [consumptionData, setConsumptionData] = useState<MaterialConsumptionVsStandardItem[]>([]);
+  const [consumptionData, setConsumptionData] = useState<MaterialConsumptionActualItem[]>([]);
   const [sapcoAccountData, setSapcoAccountData] = useState<SapcoMaterialAccountItem[]>([]);
   const [valuationData, setValuationData] = useState<InventoryValuationQuantitiesItem[]>([]);
   const [scrapData, setScrapData] = useState<ScrapByPartAndOperationItem[]>([]);
@@ -133,7 +133,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
     { id: 'backlog', title: '۳. تعهدات معوق و عقب‌افتاده تولید (Backlog)', category: 'فروش', description: 'سفارشات باز و دارای تأخیر نسبت به موعد تحویل و پوشش با موجودی محصول و WIP' },
     { id: 'wip_operation', title: '۴. کار در جریان ساخت به تفکیک قطعه و مرحله (WIP)', category: 'تولید', description: 'ردیابی قطعات در صف برش، پرس ضربه‌ای، پرس هیدرولیک و جوشکاری' },
     { id: 'wip_aging', title: '۵. سن‌یابی و ماندگاری اقلام در خطوط (WIP Aging)', category: 'تولید', description: 'شناسایی پالت‌های راکد و خوابیده بین اوپراسیون‌ها بالای ۴۸ ساعت' },
-    { id: 'consumption', title: '۶. مصرف مواد در برابر استاندارد مهندسی', category: 'مواد', description: 'مقایسه مصرف واقعی ورق با ضرایب مصرف BOM و انحرافات وزنی' },
+    { id: 'consumption', title: '۶. مصرف واقعی مواد در عملیات تولید', category: 'مواد', description: 'مصرف ثبت‌شده در کاردکس به تفکیک دستور ساخت و عملیات، همراه با ماشین و اپراتور ثبت‌شده در گزارش تولید' },
     { id: 'sapco_account', title: '۷. حساب و بیلان امانی کلاف‌های ساپکو', category: 'مواد', description: 'کاردکس کیلوگرمی کلاف‌های امانی با تفکیک دریافتی، مصرفی و باقیمانده' },
     { id: 'valuation_qty', title: '۸. تفکیک مقداری موجودی انبارها و قرنطینه', category: 'انبار', description: 'موجودی رسمی فیزیکی، ملکی کارخانه، امانی ساپکو و توقیف کیفی' },
     { id: 'scrap_analysis', title: '۹. ضایعات به تفکیک قطعه و مرحله عملیات', category: 'تولید', description: 'سهم ضایعات سنبه‌ماتریس، اشکالات اپراتوری و نقص ورق ورودی' },
@@ -194,7 +194,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
           endpoint = `/api/reports/wip-aging?${queryParams}`;
           break;
         case 'consumption':
-          endpoint = `/api/reports/material-consumption-vs-standard?${queryParams}`;
+          endpoint = `/api/reports/material-consumption-actual?${queryParams}`;
           break;
         case 'sapco_account':
           endpoint = `/api/reports/sapco-material-account?${queryParams}`;
@@ -359,17 +359,23 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
         break;
       }
       case 'consumption': {
-        const headers = ['شماره MO', 'کد قطعه', 'نام قطعه', 'گرید ورق', 'تولید سالم', 'مصرف استاندارد (kg)', 'مصرف واقعی (kg)', 'انحراف (kg)', 'انحراف درصدی'];
+        const headers = ['شماره MO', 'کد محصول', 'نام محصول', 'مرحله عملیات', 'کد ماده', 'نام ماده', 'گرید', 'مصرف واقعی ثبت‌شده (kg)', 'تولید سالم ثبت‌شده', 'ضایعات ثبت‌شده (عدد)', 'وزن ضایعات (kg)', 'ماشین واقعی', 'اپراتور', 'شماره کلاف', 'قرارداد'];
         const rows = consumptionData.map(r => [
           r.moNumber,
-          r.partCode,
-          r.partName,
+          r.productPartCode,
+          r.productPartName,
+          `${r.operationStep} - ${r.operationName}`,
+          r.materialCode,
+          r.materialName,
           r.materialGrade,
-          r.totalProducedPieces,
-          r.theoreticalStandardConsumptionKg,
           r.actualIssuedMaterialKg,
-          r.varianceKg,
-          `${r.variancePercent}%`,
+          r.actualProducedGoodQty,
+          r.actualScrapQty,
+          r.actualScrapWeightKg,
+          r.actualMachineNames.join(' | '),
+          r.actualOperatorNames.join(' | '),
+          r.coilNumbers.join(' | '),
+          r.contractNumbers.join(' | '),
         ]);
         exportToCsv(filename, headers, rows);
         break;
@@ -1095,55 +1101,60 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
             </table>
           )}
 
-          {/* 6. Material Consumption vs Standard */}
+          {/* 6. Actual Material Consumption */}
           {activeReport === 'consumption' && (
-            <table className="w-full text-right text-xs">
-              <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold">
-                <tr>
-                  <th className="py-3 px-3">شماره MO</th>
-                  <th className="py-3 px-3">قطعه و گرید</th>
-                  <th className="py-3 px-3 text-center">تولید سالم</th>
-                  <th className="py-3 px-3 text-center">مصرف استاندارد BOM</th>
-                  <th className="py-3 px-3 text-center text-amber-700">مصرف واقعی کارگاه</th>
-                  <th className="py-3 px-3 text-center text-rose-600">ضایعات تولیدی</th>
-                  <th className="py-3 px-3 text-center font-bold">انحراف مصرف</th>
-                  <th className="py-3 px-3 text-center">ارزیابی نرم</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 font-mono text-slate-700">
-                {consumptionData.map((r, i) => (
-                  <tr key={i} className="hover:bg-slate-50/80 transition">
-                    <td className="py-3 px-3 font-bold text-slate-900">{r.moNumber}</td>
-                    <td className="py-3 px-3 font-sans">
-                      <div className="font-bold text-slate-900">{r.partName}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">{r.partCode} • {r.materialGrade}</div>
-                    </td>
-                    <td className="py-3 px-3 text-center font-bold text-slate-800">{formatNumber(r.totalProducedPieces)}</td>
-                    <td className="py-3 px-3 text-center text-slate-700">{formatNumber(r.theoreticalStandardConsumptionKg)} kg</td>
-                    <td className="py-3 px-3 text-center font-bold text-amber-700">{formatNumber(r.actualIssuedMaterialKg)} kg</td>
-                    <td className="py-3 px-3 text-center text-rose-600">{formatNumber(r.actualScrapKg)} kg</td>
-                    <td
-                      className={`py-3 px-3 text-center font-black ${
-                        r.varianceKg > 0 ? 'text-rose-600' : 'text-emerald-700'
-                      }`}
-                    >
-                      {formatNumber(r.varianceKg)} kg ({toPersianDigits(r.variancePercent)}%)
-                    </td>
-                    <td className="py-3 px-3 text-center font-sans">
-                      {r.isOverConsumption ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
-                          مازاد بر استاندارد
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                          منطبق با نرم
-                        </span>
-                      )}
-                    </td>
+            <>
+              <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                این گزارش فقط مقادیر ثبت‌شده در کاردکس و گزارش عملکرد واقعی تولید را نمایش می‌دهد. مقایسه با BOM تا اتصال نسخه تأییدشده BOM به مصرف واقعی غیرفعال است؛ ماشین و اپراتور نیز فقط از گزارش عملکرد ثبت‌شده خوانده می‌شوند.
+              </div>
+              <table className="w-full text-right text-xs">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold">
+                  <tr>
+                    <th className="py-3 px-3">دستور ساخت</th>
+                    <th className="py-3 px-3">محصول</th>
+                    <th className="py-3 px-3">مرحله</th>
+                    <th className="py-3 px-3">ماده مصرفی</th>
+                    <th className="py-3 px-3 text-center text-amber-700">مصرف واقعی (kg)</th>
+                    <th className="py-3 px-3 text-center">تولید سالم</th>
+                    <th className="py-3 px-3 text-center text-rose-600">ضایعات (عدد / kg)</th>
+                    <th className="py-3 px-3">ماشین واقعی</th>
+                    <th className="py-3 px-3">اپراتور</th>
+                    <th className="py-3 px-3">کلاف / قرارداد</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {consumptionData.map((r, i) => (
+                    <tr key={`${r.moId}-${r.operationId}-${r.materialCode}-${i}`} className="hover:bg-slate-50/80 transition">
+                      <td className="py-3 px-3 font-bold text-slate-900">{r.moNumber}</td>
+                      <td className="py-3 px-3">
+                        <div className="font-bold text-slate-900">{r.productPartName}</div>
+                        <div className="text-[10px] text-slate-500 font-mono">{r.productPartCode}</div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <div>{r.operationName}</div>
+                        <div className="text-[10px] text-slate-500">مرحله {formatNumber(r.operationStep)} · {r.operationCode}</div>
+                      </td>
+                      <td className="py-3 px-3">
+                        <div className="font-semibold">{r.materialName}</div>
+                        <div className="text-[10px] text-slate-500">{r.materialCode} · {r.materialGrade}</div>
+                      </td>
+                      <td className="py-3 px-3 text-center font-bold text-amber-700">{formatNumber(r.actualIssuedMaterialKg)}</td>
+                      <td className="py-3 px-3 text-center">{formatNumber(r.actualProducedGoodQty)}</td>
+                      <td className="py-3 px-3 text-center text-rose-600">{formatNumber(r.actualScrapQty)} / {formatNumber(r.actualScrapWeightKg)} kg</td>
+                      <td className="py-3 px-3">{r.actualMachineNames.length ? r.actualMachineNames.join('، ') : 'ثبت نشده'}</td>
+                      <td className="py-3 px-3">{r.actualOperatorNames.length ? r.actualOperatorNames.join('، ') : 'ثبت نشده'}</td>
+                      <td className="py-3 px-3">
+                        <div>{r.coilNumbers.join('، ') || '—'}</div>
+                        <div className="text-[10px] text-slate-500">{r.contractNumbers.join('، ') || 'بدون قرارداد'}</div>
+                      </td>
+                    </tr>
+                  ))}
+                  {consumptionData.length === 0 && (
+                    <tr><td colSpan={10} className="py-8 text-center text-slate-400">برای فیلترهای انتخاب‌شده، حواله مصرف قطعی متصل به دستور ساخت و عملیات تولید یافت نشد.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </>
           )}
 
           {/* 7. SAPCO Material Account */}
