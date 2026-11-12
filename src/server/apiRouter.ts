@@ -3480,6 +3480,17 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
             where: { id: segment.contractId },
             data: { receivedWeightKg: { increment: weight } },
           });
+          await tx.materialContractTransaction.create({
+            data: {
+              contractId: segment.contractId,
+              lotId: materialLot.id,
+              transactionType: 'RECEIPT',
+              weightKg: weight,
+              waybillNumber: payload.waybillNumber || null,
+              receiptDate: new Date(newCoil.receiptDate),
+              notes: `رسید کلاف ${newCoil.coilId}؛ پکینگ ${newCoil.coilPackNumber}`,
+            },
+          });
         }
       }
       return created;
