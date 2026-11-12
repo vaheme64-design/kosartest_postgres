@@ -33,6 +33,7 @@ async function main() {
   const createdContractIds: string[] = [];
   let physicalCoilId: string | undefined;
   let materialLotId: string | undefined;
+  let concurrencyIssueRecordId: string | undefined;
   const documentIds: string[] = [];
 
   try {
@@ -410,6 +411,7 @@ async function main() {
         where: { coilId: coil.id, contractId: contractA.id, issuedWeightKg: { gt: 0 } },
       });
       if (!issueRecord) throw new Error('Issue genealogy row was not created.');
+      concurrencyIssueRecordId = issueRecord.id;
       await tx.coilIssueReturnRecord.update({
         where: { id: issueRecord.id },
         data: { returnedWeightKg: 12, outstandingWeightKg: 8, status: 'PARTIALLY_RETURNED', returnedAt: now },
@@ -509,6 +511,33 @@ async function main() {
       if (contractLedger.length !== 2 || contractLedger.reduce((sum: number, row: any) => sum + Number(row.weightKg), 0) !== 100) throw new Error('Expected 100 kg in the supplier contract receipt ledger.');
       console.log('PASS: physical coil, material lot, two-contract reallocation, inventory documents, signed ledger, stock balances and issue/return genealogy reconcile to 82 kg (A=32 kg, B=50 kg).');
     });
+
+    // Two simultaneous partial returns must not both consume the same stale outstanding balance.
+    if (!concurrencyIssueRecordId) throw new Error('Concurrency fixture issue record was not captured.');
+    const attemptConcurrentReturn = () => prisma.$transaction(async tx => {
+      const result = await tx.coilIssueReturnRecord.updateMany({
+        where: { id: concurrencyIssueRecordId!, outstandingWeightKg: { gte: 5 } },
+        data: {
+          returnedWeightKg: { increment: 5 },
+          outstandingWeightKg: { decrement: 5 },
+          status: 'PARTIALLY_RETURNED',
+        },
+      });
+      return result.count === 1;
+    }, { isolationLevel: 'Serializable' });
+    const concurrentReturns = await Promise.allSettled([
+      attemptConcurrentReturn(),
+      attemptConcurrentReturn(),
+    ]);
+    const acceptedReturns = concurrentReturns.filter(result => result.status === 'fulfilled' && result.value === true);
+    if (acceptedReturns.length !== 1) {
+      throw new Error(`Expected exactly one of two concurrent 5 kg returns to be accepted against 8 kg outstanding; accepted ${acceptedReturns.length}.`);
+    }
+    const afterConcurrentReturns = await prisma.coilIssueReturnRecord.findUnique({ where: { id: concurrencyIssueRecordId } });
+    if (!afterConcurrentReturns || Number(afterConcurrentReturns.returnedWeightKg) !== 17 || Number(afterConcurrentReturns.outstandingWeightKg) !== 3) {
+      throw new Error(`Concurrent return guard did not reconcile; expected returned=17/outstanding=3, got returned=${afterConcurrentReturns?.returnedWeightKg}/outstanding=${afterConcurrentReturns?.outstandingWeightKg}.`);
+    }
+    console.log('PASS: concurrent partial-return guard accepts only one 5 kg return against 8 kg outstanding; no double-return or lost update.');
   } finally {
     if (physicalCoilId) {
       await prisma.inventoryTransaction.deleteMany({ where: { physicalCoilId: physicalCoilId } });
