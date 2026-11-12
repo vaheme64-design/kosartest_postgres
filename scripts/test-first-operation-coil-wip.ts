@@ -13,6 +13,7 @@ const contractIds: string[] = [];
 let originalSnapshot: any;
 let snapshotCaptured = false;
 let originalWipOrders: any[] = [];
+let operationStatusToRestore: { id: string; status: any } | undefined;
 
 function assert(description: string, condition: boolean) {
   if (!condition) throw new Error(`❌ ${description}`);
@@ -61,6 +62,7 @@ async function run() {
   originalSnapshot = originalRawSnapshot?.payload ?? null;
   originalWipOrders = JSON.parse(JSON.stringify(manufacturingOrdersStore));
 
+  operationStatusToRestore = { id: relationalOrder.operations[0].id, status: relationalOrder.operations[0].status };
   const wipMoId = `${nonce}-WIP-MO`;
   const wipOperationIds = relationalOrder.operations.map((row, index) => `${nonce}-WIP-OP-${index + 1}`);
   const wipOperations = relationalOrder.operations.map((row, index) => ({
@@ -193,6 +195,8 @@ async function run() {
     assert('One physical coil can be allocated across two contracts', allocation.response.status === 200 && allocation.payload.success === true);
 
     const operation10 = relationalOrder.operations[0];
+    // This seeded order's first operation is already closed; temporarily reopen it in the disposable CI DB.
+    await prisma.productionOperation.update({ where: { id: operation10.id }, data: { status: 'IN_PROGRESS' } });
     const issue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', {
       issuedWeightKg: 70,
       moId: relationalOrder.moNumber,
@@ -287,6 +291,9 @@ async function run() {
       await prisma.materialContract.deleteMany({ where: { id: { in: contractIds } } });
     }
     await prisma.wipManufacturingOrderLink.deleteMany({ where: { wipManufacturingOrderId: wipMoId } });
+    if (operationStatusToRestore) {
+      await prisma.productionOperation.update({ where: { id: operationStatusToRestore.id }, data: { status: operationStatusToRestore.status } });
+    }
     manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...originalWipOrders);
     if (snapshotCaptured) {
       if (originalSnapshot !== null) {
