@@ -48,8 +48,8 @@ export async function findWipProductionReportByKey(idempotencyKey: string) {
 export async function postWipProductionAtomically(input: WipProductionLedgerInput) {
   const {
     wipManufacturingOrderId, wipOperationId, idempotencyKey,
-    shiftId, createdByUserId, goodQty, scrapQty,
-    reworkQty, rejectedQty, operatorName, snapshotPayload,
+    machineId, shiftId, createdByUserId, goodQty, scrapQty,
+    reworkQty, rejectedQty, snapshotPayload,
   } = input;
 
   if (!idempotencyKey || idempotencyKey.trim().length < 8 || idempotencyKey.length > 160) {
