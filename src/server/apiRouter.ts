@@ -6972,7 +6972,7 @@ apiRouter.post('/planning/proposals/regenerate', async (req: Request, res: Respo
     return res.status(201).json({ success: true, message: 'پیشنهاد نسخه ۱ از داده‌های relational ایجاد شد.', data });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'خطا در تولید پیشنهاد برنامه';
-    return res.status(/وجود ندارد|پوشش می‌دهند|مسیر تولید ناقص/i.test(message) ? 409 : 500).json({ success: false, error: message });
+    return res.status(/وجود ندارد|پوشش می‌دهند|مسیر تولید ناقص|تاییدشده هنوز صادر نشده/i.test(message) ? 409 : 500).json({ success: false, error: message });
   }
 });
 
