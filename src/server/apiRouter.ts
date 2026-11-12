@@ -4056,15 +4056,23 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
         const outstanding = Number(issue.outstandingWeightKg);
         const applied = Math.min(outstanding, remainingToApply);
         const nextOutstanding = Math.max(0, Math.round((outstanding - applied) * 1000) / 1000);
-        await tx.coilIssueReturnRecord.update({
-          where: { id: issue.id },
+        // Guard each open issue row atomically. A stale read must never overwrite
+        // a newer outstanding balance when two remnant returns arrive together.
+        const issueUpdate = await tx.coilIssueReturnRecord.updateMany({
+          where: {
+            id: issue.id,
+            outstandingWeightKg: { gte: applied },
+          },
           data: {
             returnedWeightKg: { increment: applied },
-            outstandingWeightKg: nextOutstanding,
+            outstandingWeightKg: { decrement: applied },
             status: nextOutstanding === 0 ? 'FULLY_RETURNED' : 'PARTIALLY_RETURNED',
             returnedAt,
           },
         });
+        if (issueUpdate.count !== 1) {
+          throw new Error('مانده حواله هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و برگشت را دوباره ثبت کنید.');
+        }
         remainingToApply = Math.round((remainingToApply - applied) * 1000) / 1000;
         lineNumber += 1;
 
@@ -4163,7 +4171,7 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
       }
       const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
       return { coil: updatedCoil, records: returnRecords, documentNumber: docNumber };
-    });
+    }, { isolationLevel: 'Serializable' });
 
     coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
     coil.warehouseId = persisted.coil.warehouseId;
