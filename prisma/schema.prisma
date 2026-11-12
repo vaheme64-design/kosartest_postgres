@@ -598,7 +598,6 @@ model CustomerOrder {
 
   orderLines              CustomerOrderLine[]
   planLines               ProductionPlanLine[]
-  planProposalLines       ProductionPlanProposalLine[]
   reservations            InventoryReservation[]
 
   @@index([customerId, documentStatus])
