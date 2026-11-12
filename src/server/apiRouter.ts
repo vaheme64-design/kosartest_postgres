@@ -33,6 +33,7 @@ import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validati
 import { formatToJalali } from '../utils/jalali';
 import { linkWipManufacturingOrderToRelational } from './wipIdentityBridge';
 import { findWipProductionReportByKey, postWipProductionAtomically } from './wipProductionLedger';
+import { getRelationalPlanningReadModel } from './relationalPlanningReadModel';
 
 import {
   calculateDetailedStockBalances,
@@ -6900,6 +6901,13 @@ apiRouter.get('/wip/logs', (_req: Request, res: Response) => {
  */
 apiRouter.get('/planning/dashboard-metrics', (_req: Request, res: Response) => {
   try {
+    if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLANNING_DASHBOARD_PENDING',
+        error: 'داشبورد برنامه‌ریزی تا تکمیل محاسبات و ذخیره‌سازی relational فعال نیست؛ داده نمونه نمایش داده نمی‌شود.',
+      });
+    }
     const metrics = getPlanningDashboardMetrics();
     res.json({ success: true, data: metrics });
   } catch (error) {
@@ -6913,10 +6921,35 @@ apiRouter.get('/planning/dashboard-metrics', (_req: Request, res: Response) => {
 /**
  * 18.2. Get Multi-Stage Net Requirements (Gross Demand, Available FG, WIP Credit, Material Shortage)
  */
-apiRouter.get('/planning/net-requirements', (_req: Request, res: Response) => {
+apiRouter.get('/planning/read-model', async (_req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'مدل برنامه‌ریزی relational به اتصال PostgreSQL نیاز دارد.' });
+    }
+    const data = await getRelationalPlanningReadModel();
+    return res.json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در بارگذاری مدل relational برنامه‌ریزی',
+    });
+  }
+});
+
+apiRouter.get('/planning/net-requirements', async (_req: Request, res: Response) => {
+  try {
+    if (isDatabaseUrlConfigured()) {
+      const readModel = await getRelationalPlanningReadModel();
+      return res.json({
+        success: true,
+        count: readModel.requirements.length,
+        data: readModel.requirements,
+        source: 'postgresql',
+        generatedAt: readModel.generatedAt,
+      });
+    }
     const requirements = calculateNetRequirements();
-    res.json({ success: true, count: requirements.length, data: requirements });
+    res.json({ success: true, count: requirements.length, data: requirements, source: 'memory-fallback' });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -6929,6 +6962,14 @@ apiRouter.get('/planning/net-requirements', (_req: Request, res: Response) => {
  * 18.3. Get All Proposed Production Plan Suggestions
  */
 apiRouter.get('/planning/suggestions', (_req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     res.json({ success: true, count: planSuggestionsStore.length, data: planSuggestionsStore });
   } catch (error) {
@@ -6943,6 +6984,14 @@ apiRouter.get('/planning/suggestions', (_req: Request, res: Response) => {
  * 18.4. Get Single Suggestion Details
  */
 apiRouter.get('/planning/suggestions/:id', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const suggestion = planSuggestionsStore.find(s => s.id === req.params.id);
     if (!suggestion) {
@@ -6961,6 +7010,14 @@ apiRouter.get('/planning/suggestions/:id', (req: Request, res: Response) => {
  * 18.5. Regenerate Suggestions Based on Fresh Demand and WIP
  */
 apiRouter.post('/planning/suggestions/regenerate', (_req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     planSuggestionsStore.length = 0; // Clear
     const fresh = generateProductionPlanSuggestions();
@@ -6978,6 +7035,14 @@ apiRouter.post('/planning/suggestions/regenerate', (_req: Request, res: Response
  * 18.6. Approve Proposed Plan
  */
 apiRouter.post('/planning/suggestions/:id/approve', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const approvedBy = req.body.approvedBy || 'مهندس حسینی (مدیر تولید)';
     const result = approvePlanSuggestion(req.params.id, approvedBy);
@@ -6995,6 +7060,14 @@ apiRouter.post('/planning/suggestions/:id/approve', (req: Request, res: Response
  * 18.7. Release Approved Plan to Official Manufacturing Order
  */
 apiRouter.post('/planning/suggestions/:id/release-mo', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const releasedBy = req.body.releasedBy || 'مهندس حسینی (مدیر تولید)';
     const result = releasePlanToManufacturingOrder(req.params.id, releasedBy);
@@ -7017,6 +7090,14 @@ apiRouter.post('/planning/suggestions/:id/release-mo', (req: Request, res: Respo
  * 18.8. Revise Plan Operations / Versioning
  */
 apiRouter.post('/planning/suggestions/:id/revise', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const { modifiedOperations, note } = req.body;
     const result = revisePlanVersion(req.params.id, modifiedOperations, note || 'اصلاح دستی تخصیص ماشین‌آلات');
@@ -7034,6 +7115,14 @@ apiRouter.post('/planning/suggestions/:id/revise', (req: Request, res: Response)
  * 18.9. Dynamic Machine Eligibility Evaluation
  */
 apiRouter.post('/planning/evaluate-machine-eligibility', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const candidateMachines = evaluateMachineEligibility(req.body);
     res.json({ success: true, data: candidateMachines });
