@@ -97,3 +97,6 @@ jobs:
 
       - name: Physical coil persistence integration test
         run: bunx tsx scripts/test-physical-coil-persistence.ts
+
+      - name: Inventory HTTP lifecycle integration test
+        run: bunx tsx scripts/test-inventory-http.ts
