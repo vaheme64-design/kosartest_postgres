@@ -130,6 +130,17 @@ async function main() {
           where: { id: segment.contract.id },
           data: { receivedWeightKg: { increment: segment.weight } },
         });
+        await tx.materialContractTransaction.create({
+          data: {
+            contractId: segment.contract.id,
+            lotId: lot.id,
+            transactionType: 'RECEIPT',
+            weightKg: segment.weight,
+            waybillNumber: `TEST-WB-${nonce}`,
+            receiptDate: now,
+            notes: 'CI coil receipt contract ledger test',
+          },
+        });
         const line = await tx.inventoryDocumentLine.create({
           data: {
             documentId: receipt.id,
@@ -375,13 +386,14 @@ async function main() {
       await tx.physicalCoil.update({ where: { id: coil.id }, data: { remainingWeightKg: { increment: 12 } } });
       await tx.materialLot.update({ where: { id: lot.id }, data: { remainingWeightKg: { increment: 12 } } });
 
-      const [freshCoil, freshLot, balances, issueRecords, linkedTransactions, linkedLines] = await Promise.all([
+      const [freshCoil, freshLot, balances, issueRecords, linkedTransactions, linkedLines, contractLedger] = await Promise.all([
         tx.physicalCoil.findUnique({ where: { id: coil.id } }),
         tx.materialLot.findUnique({ where: { id: lot.id } }),
         tx.stockBalance.findMany({ where: { physicalCoilId: coil.id } }),
         tx.coilIssueReturnRecord.findMany({ where: { coilId: coil.id } }),
         tx.inventoryTransaction.findMany({ where: { physicalCoilId: coil.id } }),
         tx.inventoryDocumentLine.findMany({ where: { physicalCoilId: coil.id } }),
+        tx.materialContractTransaction.findMany({ where: { contractId: { in: [contractA.id, contractB.id] } } }),
       ]);
       if (!freshCoil || !freshLot) throw new Error('Physical coil or material lot disappeared during the reconciliation test.');
       const balanceWeight = balances.reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
@@ -391,6 +403,7 @@ async function main() {
       if (balanceWeight !== 82) throw new Error(`Expected stock ledger balance 82, got ${balanceWeight}.`);
       if (outstanding !== 18) throw new Error(`Expected line-side outstanding 18, got ${outstanding}.`);
       if (linkedTransactions.length !== 5 || linkedLines.length !== 5) throw new Error('Expected five coil-linked receipt, issue and return ledger rows.');
+      if (contractLedger.length !== 2 || contractLedger.reduce((sum: number, row: any) => sum + Number(row.weightKg), 0) !== 100) throw new Error('Expected 100 kg in the supplier contract receipt ledger.');
       console.log('PASS: physical coil, material lot, contract allocations, inventory documents, transactions, stock balances and issue/return genealogy reconcile to 82 kg.');
     });
   } finally {
@@ -400,6 +413,7 @@ async function main() {
       await prisma.coilIssueReturnRecord.deleteMany({ where: { coilId: physicalCoilId } });
       await prisma.stockBalance.deleteMany({ where: { physicalCoilId: physicalCoilId } });
       await prisma.contractCoilAllocation.deleteMany({ where: { coilId: physicalCoilId } });
+      if (createdContractIds.length) await prisma.materialContractTransaction.deleteMany({ where: { contractId: { in: createdContractIds } } });
       await prisma.physicalCoil.deleteMany({ where: { id: physicalCoilId } });
     }
     if (documentIds.length) await prisma.inventoryDocument.deleteMany({ where: { id: { in: documentIds } } });
