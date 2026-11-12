@@ -282,6 +282,7 @@ model Part {
   thicknessMm          Decimal? // ضخامت ورق (میلیمتر)
   weightNetKg          Decimal       @default(0) // وزن خالص قطعه (کیلوگرم)
   weightGrossKg        Decimal       @default(0) // وزن ناخالص/بلنک مصرفی (کیلوگرم)
+  scrapNormPercent     Decimal?      // حد مجاز ضایعات به درصد؛ در صورت تعریف مهندسی
   customerPartNumber   String?       // کد قطعه مشتری (خودروساز)
   supplierPartNumber   String?       // کد کالا نزد تامین‌کننده مانند ساپکو
   carModel             String?       // پژو ۲۰۶، ۲۰۷، تارا، دنا پلاس، شاهین، کوییک
