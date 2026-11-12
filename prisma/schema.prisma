@@ -755,6 +755,7 @@ model ProductionReport {
   scrapQuantity           Decimal              @default(0) // تعداد ضایعات
   reworkQuantity          Decimal              @default(0) // تعداد دوباره‌کاری
   rejectedQuantity        Decimal              @default(0) // تعداد مردودی / قرنطینه
+  scrapReasonText         String?              // علت ضایعات ثبت‌شده در موتور WIP
   wipIdempotencyKey       String?              @unique // کلید یکتای ثبت عملکرد از موتور WIP
   runTimeMinutes          Int                  @default(0) // دقایق کار مفید
   downtimeMinutes         Int                  @default(0) // دقایق توقف پرس
