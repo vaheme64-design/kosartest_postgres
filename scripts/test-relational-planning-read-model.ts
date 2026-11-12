@@ -70,12 +70,17 @@ async function main() {
     assert(create.response.status === 201 && create.payload.success, `Test demand order creation failed: ${JSON.stringify(create.payload)}`);
     orderId = create.payload.data.id;
 
+    const baselineResponse = await requestJson(baseUrl, '/api/planning/read-model');
+    assert(baselineResponse.response.status === 200 && baselineResponse.payload.success, 'Baseline relational read model must load before adding test demand.');
+    const baselineRequirement = baselineResponse.payload.data.requirements.find((item: any) => item.partId === part.id);
+    const baselineGrossDemand = baselineRequirement?.grossDemandQty || 0;
+
     const readModel = await requestJson(baseUrl, '/api/planning/read-model');
     assert(readModel.response.status === 200 && readModel.payload.success, `Relational read model failed: ${JSON.stringify(readModel.payload)}`);
     assert(readModel.payload.data.source === 'postgresql', 'Read model must explicitly identify PostgreSQL as its source.');
     const requirement = readModel.payload.data.requirements.find((item: any) => item.partId === part.id);
     assert(requirement, 'Relational read model must include the newly persisted customer demand.');
-    assert(requirement.grossDemandQty === 123, 'Gross demand must use ordered quantity less delivered quantity from relational order lines.');
+    assert(requirement.grossDemandQty === baselineGrossDemand + 123, 'Gross demand must increase by ordered quantity less delivered quantity from relational order lines.');
     assert(requirement.partCode === part.partNumber, 'Requirement part identity must be the relational part number, not a legacy sample ID.');
     assert(requirement.route.length === part.routes[0].operations.length, 'Route steps must come from the active relational default route.');
     assert(requirement.route[0].stepNumber === part.routes[0].operations[0].stepNumber, 'Relational route ordering must be preserved.');
@@ -88,7 +93,7 @@ async function main() {
 
     const net = await requestJson(baseUrl, '/api/planning/net-requirements');
     assert(net.response.status === 200 && net.payload.source === 'postgresql', 'Net requirements endpoint must use the relational read model in database mode.');
-    assert(net.payload.data.some((item: any) => item.partId === part.id && item.grossDemandQty === 123), 'Net requirements endpoint must return the persisted relational demand.');
+    assert(net.payload.data.some((item: any) => item.partId === part.id && item.grossDemandQty === baselineGrossDemand + 123), 'Net requirements endpoint must return the persisted relational demand.');
     console.log('PASS: Net requirements endpoint uses relational data and correct demand netting.');
 
     const suggestions = await requestJson(baseUrl, '/api/planning/suggestions');
