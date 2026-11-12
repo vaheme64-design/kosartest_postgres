@@ -6736,6 +6736,8 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
         discrepancyKg: Number((physicalStockInPlantKg - closingBookBalanceKg).toFixed(3)),
         status: contract.status,
         supplier: contract.supplierCustomer.name,
+        ledgerCompleteness: contractTx.length ? 'COMPLETE' : 'LEGACY_RECEIVED_WEIGHT_ONLY',
+        physicalStockAsOf: new Date().toISOString(),
       };
     });
     res.json({
@@ -6746,6 +6748,7 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
         generatedAt: new Date().toISOString(),
         totalRecordsCount: data.length,
         appliedFilters: filters,
+        note: 'مانده فیزیکی، موجودی لحظه‌ای فعلی است؛ مانده دفتری بر اساس بازه تاریخی انتخاب‌شده محاسبه می‌شود. برای قراردادهای فاقد تاریخچه رسید، دقت مانده تاریخی محدود است.',
       },
       data,
     });
@@ -6763,12 +6766,6 @@ apiRouter.get('/reports/inventory-valuation-quantities', async (req: Request, re
     const balances = await prisma.stockBalance.findMany({
       where: {
         ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
-        ...(filters.startDate || filters.endDate ? {
-          updatedAt: {
-            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
-            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
-          },
-        } : {}),
       },
       include: {
         part: { include: { unit: true } },
@@ -6825,7 +6822,8 @@ apiRouter.get('/reports/inventory-valuation-quantities', async (req: Request, re
         reportTitle: 'گزارش تفکیک مقداری موجودی بر اساس مالکیت و وضعیت کیفی',
         generatedAt: new Date().toISOString(),
         totalRecordsCount: data.length,
-        appliedFilters: filters,
+        appliedFilters: { partId: filters.partId },
+        note: 'این گزارش مانده جاری را نشان می‌دهد؛ فیلتر تاریخ برای موجودی لحظه‌ای اعمال نمی‌شود.',
       },
       data,
     });
