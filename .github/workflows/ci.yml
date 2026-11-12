@@ -53,6 +53,7 @@ jobs:
       - name: Generate initial migration preview
         run: |
           mkdir -p prisma/migrations/00000000000000_initial
+          printf 'provider = "postgresql"\n' > prisma/migrations/migration_lock.toml
           bunx prisma migrate diff \
             --from-empty \
             --to-schema-datamodel prisma/schema.prisma \
