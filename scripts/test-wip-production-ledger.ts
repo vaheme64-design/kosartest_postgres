@@ -18,8 +18,8 @@ async function run() {
   let hadSnapshot = false;
   let snapshotCaptured = false;
   let relationalOrder: any;
+  let operation10: any;
   let operation20: any;
-  let operation30: any;
   let sourceLocation: any;
   let targetLocation: any;
   let scrapLocation: any;
@@ -47,10 +47,10 @@ async function run() {
       include: { part: true, operations: { include: { operation: true, plannedMachine: true }, orderBy: { stepNumber: 'asc' } } },
     });
     if (!relationalOrder) throw new Error('Seeded MO-1403-1082 is required for the WIP ledger integration test.');
+    operation10 = relationalOrder.operations.find((row: any) => row.stepNumber === 10);
     operation20 = relationalOrder.operations.find((row: any) => row.stepNumber === 20);
-    operation30 = relationalOrder.operations.find((row: any) => row.stepNumber === 30);
-    if (!operation20 || !operation30 || !operation20.plannedMachineId) {
-      throw new Error('Seeded relational operations 20 and 30 with a planned machine are required.');
+    if (!operation10 || !operation20 || !operation10.plannedMachineId) {
+      throw new Error('Seeded relational operations 10 and 20 with a planned machine are required.');
     }
     part = relationalOrder.part;
     shift = await prisma.shift.findUnique({ where: { code: 'SHIFT-MORN' } });
@@ -58,8 +58,8 @@ async function run() {
     if (!shift?.active || !user?.active) throw new Error('Active seeded shift and supervisor user are required.');
 
     const [sourceRows, targetRows, scrapWarehouses] = await Promise.all([
+      prisma.warehouseLocation.findMany({ where: { code: 'LOC-WIP-BLANK', active: true }, include: { warehouse: true } }),
       prisma.warehouseLocation.findMany({ where: { code: 'LOC-WIP-DRAWN', active: true }, include: { warehouse: true } }),
-      prisma.warehouseLocation.findMany({ where: { code: 'LOC-WIP-TRIM', active: true }, include: { warehouse: true } }),
       prisma.warehouse.findMany({ where: { type: 'SCRAP', active: true }, include: { locations: { where: { active: true }, orderBy: { code: 'asc' }, take: 1 } } }),
     ]);
     if (sourceRows.length !== 1 || targetRows.length !== 1 || !scrapWarehouses[0]?.locations[0]) {
@@ -71,13 +71,13 @@ async function run() {
 
     originalMoValues = { completedQty: relationalOrder.completedQty, scrapQty: relationalOrder.scrapQty };
     originalOperationValues = {
-      inputQty: operation20.inputQty,
-      outputGoodQty: operation20.outputGoodQty,
-      outputScrapQty: operation20.outputScrapQty,
-      outputReworkQty: operation20.outputReworkQty,
-      outputRejectedQty: operation20.outputRejectedQty,
-      status: operation20.status,
-      endDate: operation20.endDate,
+      inputQty: operation10.inputQty,
+      outputGoodQty: operation10.outputGoodQty,
+      outputScrapQty: operation10.outputScrapQty,
+      outputReworkQty: operation10.outputReworkQty,
+      outputRejectedQty: operation10.outputRejectedQty,
+      status: operation10.status,
+      endDate: operation10.endDate,
     };
 
     const snapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
@@ -110,8 +110,8 @@ async function run() {
         createdBy: user.id,
         operationLinks: {
           create: [
+            { wipOperationId: 'WIP-LEDGER-OP10', productionOperationId: operation10.id },
             { wipOperationId: 'WIP-LEDGER-OP20', productionOperationId: operation20.id },
-            { wipOperationId: 'WIP-LEDGER-OP30', productionOperationId: operation30.id },
           ],
         },
       },
@@ -123,8 +123,8 @@ async function run() {
         moNumber: wipMoId,
         partCode: part.partNumber,
         operations: [
-          { id: 'WIP-LEDGER-OP20', stepNumber: 20, sequence: 1, processType: operation20.operation.processType, warehouseLocation: 'LOC-WIP-DRAWN', status: 'IN_PROGRESS' },
-          { id: 'WIP-LEDGER-OP30', stepNumber: 30, sequence: 2, processType: operation30.operation.processType, warehouseLocation: 'LOC-WIP-TRIM', status: 'READY' },
+          { id: 'WIP-LEDGER-OP10', stepNumber: 10, sequence: 1, processType: operation10.operation.processType, warehouseLocation: 'LOC-WIP-BLANK', status: 'IN_PROGRESS' },
+          { id: 'WIP-LEDGER-OP20', stepNumber: 20, sequence: 2, processType: operation20.operation.processType, warehouseLocation: 'LOC-WIP-DRAWN', status: 'READY' },
         ],
       }],
       wipTransfers: [],
@@ -133,7 +133,7 @@ async function run() {
 
     const input = {
       wipManufacturingOrderId: wipMoId,
-      wipOperationId: 'WIP-LEDGER-OP20',
+      wipOperationId: 'WIP-LEDGER-OP10',
       idempotencyKey,
       shiftId: shift.id,
       createdByUserId: user.id,
@@ -201,9 +201,9 @@ async function run() {
         data: { completedQty: originalMoValues.completedQty, scrapQty: originalMoValues.scrapQty },
       });
     }
-    if (operation20 && originalOperationValues) {
+    if (operation10 && originalOperationValues) {
       await prisma.productionOperation.update({
-        where: { id: operation20.id },
+        where: { id: operation10.id },
         data: originalOperationValues,
       });
     }
