@@ -3620,6 +3620,10 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'صدور کلاف بدون اتصال PostgreSQL مجاز نیست.' });
     const { id } = req.params;
     const { issuedWeightKg, moId, moOperationId, scrappedKg, multiParts, initialInputQuantityPcs, wipManufacturingOrderId } = req.body;
+    const issueRequestKey = String(req.body.issueRequestKey || req.header('Idempotency-Key') || '').trim();
+    if (issueRequestKey.length < 8 || issueRequestKey.length > 160) {
+      return res.status(400).json({ success: false, error: 'شناسه یکتای درخواست حواله (Idempotency-Key) معتبر نیست؛ فرم را تازه باز کنید.' });
+    }
     const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
@@ -3658,6 +3662,38 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     const totalIssuedKg = requested.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
     const prisma = getPrismaClient();
     const issuedAt = new Date();
+    const issueRequestFingerprint = JSON.stringify({
+      coilId: id,
+      requested: requested.map((row: any) => ({
+        manufacturingOrderRef: row.manufacturingOrderRef,
+        operationRef: row.operationRef,
+        partRef: row.partRef,
+        issuedWeightKg: row.issuedWeightKg,
+        varianceWeightKg: row.varianceWeightKg,
+        initialInputQuantityPcs: row.initialInputQuantityPcs,
+        wipManufacturingOrderId: row.wipManufacturingOrderId,
+      })),
+    });
+    const priorIssue = await prisma.inventoryDocument.findUnique({
+      where: { issueRequestKey },
+      include: { coilIssueReturnRecords: true },
+    });
+    if (priorIssue) {
+      if (priorIssue.issueRequestFingerprint !== issueRequestFingerprint) {
+        return res.status(409).json({ success: false, error: 'این شناسه درخواست قبلاً برای اطلاعات متفاوتی استفاده شده است؛ فرم را ببندید و حواله جدیدی آغاز کنید.' });
+      }
+      const priorCoil = await prisma.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!priorCoil) throw new Error('سند حواله قبلی ثبت شده اما کلاف متناظر یافت نشد.');
+      return res.json({
+        success: true, duplicate: true,
+        message: `این درخواست قبلاً با سند ${priorIssue.documentNumber} ثبت شده است؛ موجودی دوباره کسر نشد. مانده: ${Number(priorCoil.remainingWeightKg)} کیلوگرم.`,
+        coil: { ...coil, remainingWeightKg: Number(priorCoil.remainingWeightKg), physicalStatus: priorCoil.physicalStatus },
+        documentNumber: priorIssue.documentNumber,
+        issueRecords: priorIssue.coilIssueReturnRecords,
+        issueRecord: priorIssue.coilIssueReturnRecords[0] || null,
+        persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
+      });
+    }
 
     for (const request of requested) {
       if (!request.initialInputQuantityPcs) continue;
@@ -3682,6 +3718,18 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     }
 
     const persisted = await prisma.$transaction(async (tx: any) => {
+      const existingRequest = await tx.inventoryDocument.findUnique({
+        where: { issueRequestKey },
+        include: { coilIssueReturnRecords: true },
+      });
+      if (existingRequest) {
+        if (existingRequest.issueRequestFingerprint !== issueRequestFingerprint) {
+          throw new Error('این شناسه درخواست قبلاً برای اطلاعات متفاوتی استفاده شده است؛ فرم را ببندید و حواله جدیدی آغاز کنید.');
+        }
+        const existingCoil = await tx.physicalCoil.findUnique({ where: { id: existingRequest.coilIssueReturnRecords[0]?.coilId || '' } });
+        if (!existingCoil) throw new Error('سند حواله تکراری یافت شد اما کلاف متناظر موجود نیست.');
+        return { duplicate: true, coil: existingCoil, records: existingRequest.coilIssueReturnRecords, documentNumber: existingRequest.documentNumber, entries: [], wipInput: null };
+      }
       const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
       if (!dbCoil) throw new Error('کلاف در پایگاه داده عملیاتی وجود ندارد؛ ابتدا رسید کلاف را ثبت کنید.');
       if (['QUARANTINE', 'QUALITY_BLOCKED', 'REJECTED'].includes(dbCoil.qualityStatus) || dbCoil.physicalStatus === 'BLOCKED') {
@@ -3717,6 +3765,8 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           createdByUserId: user.id,
           postedByUserId: user.id,
           postedAt: issuedAt,
+          issueRequestKey,
+          issueRequestFingerprint,
           notes: `حواله ${totalIssuedKg} کیلوگرم از کلاف ${dbCoil.coilId} به تولید`,
         },
       });
@@ -3975,8 +4025,20 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
       });
       if (coilUpdate.count !== 1) throw new Error('مانده کلاف هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و دوباره تلاش کنید.');
       const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
-      return { coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries, wipInput: postedWipInput };
+      return { duplicate: false, coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries, wipInput: postedWipInput };
     });
+
+    if (persisted.duplicate) {
+      return res.json({
+        success: true, duplicate: true,
+        message: `این درخواست قبلاً با سند ${persisted.documentNumber} ثبت شده است؛ موجودی دوباره کسر نشد. مانده: ${Number(persisted.coil.remainingWeightKg)} کیلوگرم.`,
+        coil: { ...coil, remainingWeightKg: Number(persisted.coil.remainingWeightKg), physicalStatus: persisted.coil.physicalStatus },
+        documentNumber: persisted.documentNumber,
+        issueRecords: persisted.records,
+        issueRecord: persisted.records[0] || null,
+        persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
+      });
+    }
 
     coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
     coil.physicalStatus = persisted.coil.physicalStatus;
