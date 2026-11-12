@@ -52,7 +52,7 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
         if (cancelled) return;
         if (!result.success) throw new Error(result.error || 'خطا در دریافت اطلاعات ثبت تولید');
         setPostingContext(result.data);
-        setRelationalManufacturingOrderId('');
+        setRelationalManufacturingOrderId(result.data.identityLink?.manufacturingOrderId || '');
         setShiftId(result.data.shifts?.length === 1 ? result.data.shifts[0].id : '');
         setCreatedByUserId(result.data.users?.length === 1 ? result.data.users[0].id : '');
       })
