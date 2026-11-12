@@ -32,6 +32,7 @@ import { checkDatabaseConnection, getPrismaClient, isDatabaseUrlConfigured } fro
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
 import { linkWipManufacturingOrderToRelational } from './wipIdentityBridge';
+import { findWipProductionReportByKey, postWipProductionAtomically } from './wipProductionLedger';
 
 import {
   calculateDetailedStockBalances,
@@ -675,7 +676,7 @@ export async function loadInventoryAppState(): Promise<void> {
 
 let wipMutationQueue: Promise<unknown> = Promise.resolve();
 
-async function executePersistentWipMutation<T extends { success: boolean }>(mutation: () => T): Promise<T> {
+async function executePersistentWipMutation<T extends { success: boolean }>(mutation: () => T, persist?: (result: T) => Promise<void>): Promise<T> {
   const task = wipMutationQueue.catch(() => undefined).then(async () => {
     const clone = <V>(value: V): V => JSON.parse(JSON.stringify(value)) as V;
     const previousOrders = clone(manufacturingOrdersStore);
@@ -685,7 +686,8 @@ async function executePersistentWipMutation<T extends { success: boolean }>(muta
     if (!result.success) return result;
 
     try {
-      await persistProductionWipState();
+      if (persist) await persist(result);
+      else await persistProductionWipState();
       return result;
     } catch (error) {
       manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...previousOrders);
@@ -6385,16 +6387,78 @@ apiRouter.post('/wip/operations/input', async (req: Request, res: Response) => {
  */
 apiRouter.post('/wip/operations/production', async (req: Request, res: Response) => {
   try {
-    const result = await executePersistentWipMutation(() => registerOperationProduction(req.body));
+    const body = req.body || {};
+    const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+    const shiftId = typeof body.shiftId === 'string' ? body.shiftId.trim() : '';
+    const createdByUserId = typeof body.createdByUserId === 'string' ? body.createdByUserId.trim() : '';
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 160) {
+      return res.status(400).json({ success: false, error: 'کلید یکتای ثبت (idempotencyKey) با طول ۸ تا ۱۶۰ کاراکتر الزامی است.' });
+    }
+    if (!shiftId || !createdByUserId) {
+      return res.status(400).json({ success: false, error: 'شناسه شیفت (shiftId) و کاربر ثبت‌کننده (createdByUserId) الزامی است.' });
+    }
+
+    const previous = await findWipProductionReportByKey(idempotencyKey);
+    if (previous) {
+      return res.json({
+        success: true,
+        duplicate: true,
+        message: 'این گزارش قبلاً ثبت شده است؛ ثبت تکراری انجام نشد.',
+        report: previous,
+        inventoryPosted: true,
+      });
+    }
+
+    let ledgerResult: any;
+    const result = await executePersistentWipMutation(
+      () => registerOperationProduction(body),
+      async (mutationResult) => {
+        if (!mutationResult.success || !mutationResult.data) {
+          throw new Error('WIP production mutation returned no manufacturing order.');
+        }
+        const mo = mutationResult.data;
+        const operationId = typeof body.operationId === 'string' ? body.operationId : '';
+        const operation = mo.operations.find(item => item.id === operationId);
+        if (!operation) throw new Error('WIP operation not found after production registration.');
+        ledgerResult = await postWipProductionAtomically({
+          wipManufacturingOrderId: mo.id,
+          wipOperationId: operation.id,
+          idempotencyKey,
+          machineId: typeof body.relationalMachineId === 'string' ? body.relationalMachineId : (typeof body.machineId === 'string' ? body.machineId : ''),
+          shiftId,
+          createdByUserId,
+          reportDate: typeof body.reportDate === 'string' ? body.reportDate : undefined,
+          notes: typeof body.notes === 'string' ? body.notes : undefined,
+          goodQty: Number(body.goodQty) || 0,
+          scrapQty: Number(body.scrapQty) || 0,
+          reworkQty: Number(body.reworkQty) || 0,
+          rejectedQty: Number(body.rejectedQty) || 0,
+          scrapReason: typeof body.scrapReason === 'string' ? body.scrapReason : undefined,
+          operatorName: typeof body.operatorName === 'string' ? body.operatorName : 'اپراتور',
+          snapshotPayload: {
+            manufacturingOrders: manufacturingOrdersStore,
+            wipTransfers: wipTransfersStore,
+            productionLogs: productionLogsStore,
+          },
+        });
+      },
+    );
     if (!result.success) {
       return res.status(400).json(result);
     }
-    res.json({ success: true, message: 'تولید مرحله با موفقیت در دفاتر WIP ثبت گردید و آماده انتقال شد.', data: result.data });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت عملکرد تولید مرحله',
+    return res.status(201).json({
+      success: true,
+      duplicate: ledgerResult?.duplicate === true,
+      message: 'گزارش تولید، گردش کاردکس و موجودی به‌صورت اتمیک ثبت شدند؛ انتقال سالم به مرحله بعد خودکار است.',
+      data: result.data,
+      report: ledgerResult?.report,
+      inventoryTransactionCount: ledgerResult?.transactionCount ?? 0,
+      inventoryPosted: true,
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در ثبت اتمیک عملکرد تولید';
+    const status = /not found|missing|invalid|must |required|insufficient|mismatch|no validated|exactly one|does not match|changed during/i.test(message) ? 409 : 500;
+    return res.status(status).json({ success: false, error: message, inventoryPosted: false });
   }
 });
 
