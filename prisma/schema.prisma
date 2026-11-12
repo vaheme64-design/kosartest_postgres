@@ -306,6 +306,7 @@ model Part {
   customerOrderLines   CustomerOrderLine[]
   productionPlanLines  ProductionPlanLine[]
   planProposalLines    ProductionPlanProposalLine[]
+  planProposalLines    ProductionPlanProposalLine[]
   manufacturingOrders  ManufacturingOrder[]
   inventoryDocLines    InventoryDocumentLine[]
   transactions         InventoryTransaction[]
@@ -358,6 +359,7 @@ model PartRoute {
 
   operations           RouteOperation[]
   manufacturingOrders  ManufacturingOrder[]
+  planProposalLines    ProductionPlanProposalLine[]
 
   @@unique([partId, version])
   @@index([partId, status])
@@ -597,6 +599,7 @@ model CustomerOrder {
 
   orderLines              CustomerOrderLine[]
   planLines               ProductionPlanLine[]
+  planProposalLines       ProductionPlanProposalLine[]
   reservations            InventoryReservation[]
 
   @@index([customerId, documentStatus])
@@ -616,6 +619,9 @@ model CustomerOrderLine {
   unitPrice        Decimal?
   requestedDate    DateTime
   status           OrderLineStatus  @default(PENDING)
+
+  productionPlanLines  ProductionPlanLine[]
+  planProposalLines    ProductionPlanProposalLine[]
 
   @@unique([orderId, lineNumber])
   @@index([partId, status])
@@ -638,6 +644,8 @@ model ProductionPlan {
 
   planLines            ProductionPlanLine[]
   manufacturingOrders  ManufacturingOrder[]
+  proposalId           String? @unique
+  proposal             ProductionPlanProposal? @relation(fields: [proposalId], references: [id])
 
   @@index([status, startDate])
   @@map("production_plans")
