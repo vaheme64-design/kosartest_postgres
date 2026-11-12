@@ -114,6 +114,7 @@ async function main() {
     console.log('PASS: HTTP POST contract allocation.');
 
     const invalidIssue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', {
+      issueRequestKey: `${nonce}-INVALID-ISSUE-1`,
       issuedWeightKg: 0,
       moId: mo.moNumber,
       moOperationId: mo.operations[0].id,
