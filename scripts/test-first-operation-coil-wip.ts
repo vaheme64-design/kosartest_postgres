@@ -202,7 +202,7 @@ async function run() {
       initialInputQuantityPcs: 15,
       wipManufacturingOrderId: wipMoId,
     });
-    assert('Coil issue and operator-confirmed 15 PCS WIP input post successfully', issue.response.status === 200 && issue.payload.success === true);
+    assert(`Coil issue and operator-confirmed 15 PCS WIP input post successfully: HTTP ${issue.response.status} ${JSON.stringify(issue.payload)}`, issue.response.status === 200 && issue.payload.success === true);
 
     const [coilAfterIssue, lotAfterIssue, rawBalances, wipBalances, wipTransactions, snapshotAfterIssue] = await Promise.all([
       prisma.physicalCoil.findUnique({ where: { id: coilId } }),
