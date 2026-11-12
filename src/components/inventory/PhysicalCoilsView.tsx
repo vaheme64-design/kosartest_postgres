@@ -222,12 +222,16 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
   const [issueMoId, setIssueMoId] = useState('');
   const [issueOperationId, setIssueOperationId] = useState('');
   const [issueScrap, setIssueScrap] = useState('0');
+  const [initialInputQuantityPcs, setInitialInputQuantityPcs] = useState('');
   const [multiPartsList, setMultiPartsList] = useState<Array<{ partName: string; moId: string; moOperationId: string; issuedWeightKg: string }>>([
     { partName: '', moId: '', moOperationId: '', issuedWeightKg: '' },
   ]);
   const [availableManufacturingOrders, setAvailableManufacturingOrders] = useState<Array<{
     id: string; moNumber: string; partCode: string; partName: string; status: string;
-    operations: Array<{ id: string; stepNumber: number; operationCode: string; operationName: string; processType: string; status: string; plannedMachine?: string | null }>;
+    weightNetKg: number;
+    weightGrossKg: number;
+    wipManufacturingOrderId: string | null;
+    operations: Array<{ id: string; stepNumber: number; operationCode: string; operationName: string; processType: string; status: string; plannedMachine?: string | null; isFirstOperation?: boolean }>;
   }>>([]);
 
   // Return Form states
@@ -239,6 +243,20 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
   const [availableContracts, setAvailableContracts] = useState<
     Array<{ id: string; contractNumber: string; title?: string; customerName?: string }>
   >([]);
+
+  const selectedIssueMo = availableManufacturingOrders.find(mo => mo.id === issueMoId);
+  const selectedIssueOperation = selectedIssueMo?.operations.find(operation => operation.id === issueOperationId);
+  const suggestedInitialInputPcs = selectedIssueMo && selectedIssueMo.weightGrossKg > 0
+    ? Math.floor(Math.max(0, (Number(issueWeight) || 0) - (Number(issueScrap) || 0)) / selectedIssueMo.weightGrossKg)
+    : 0;
+
+  useEffect(() => {
+    if (selectedIssueOperation?.isFirstOperation) {
+      setInitialInputQuantityPcs(suggestedInitialInputPcs > 0 ? String(suggestedInitialInputPcs) : '');
+    } else {
+      setInitialInputQuantityPcs('');
+    }
+  }, [issueMoId, issueOperationId, issueWeight, issueScrap]);
 
   // Genealogy data state
   const [genealogyData, setGenealogyData] = useState<any>(null);
@@ -384,6 +402,8 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
             moId: issueMoId.trim(),
             moOperationId: issueOperationId.trim(),
             scrappedKg: Number(issueScrap) || 0,
+            initialInputQuantityPcs: selectedIssueOperation?.isFirstOperation ? Number(initialInputQuantityPcs) || 0 : undefined,
+            wipManufacturingOrderId: selectedIssueMo?.wipManufacturingOrderId || undefined,
             user: currentUser,
           }),
         });
@@ -1027,6 +1047,25 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                       ))}
                     </select>
                   </div>
+                  {selectedIssueOperation?.isFirstOperation && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3 space-y-2">
+                      <div className="text-xs font-semibold text-slate-800">ورودی اولیه مرحله اول (عدد قطعه)</div>
+                      <div className="text-[11px] text-slate-600">
+                        پیشنهاد سیستم: {formatNumber(suggestedInitialInputPcs)} عدد؛ بر اساس وزن ناخالص مهندسی هر قطعه ({formatNumber(selectedIssueMo?.weightGrossKg || 0)} kg)
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        required
+                        value={initialInputQuantityPcs}
+                        onChange={e => setInitialInputQuantityPcs(e.target.value)}
+                        placeholder="تعداد پیشنهادی را بررسی و تأیید کنید"
+                        className="w-full bg-white border border-blue-200 rounded-lg px-3 py-2 text-slate-900 font-mono font-bold focus:border-blue-500 focus:outline-none"
+                      />
+                      <p className="text-[10px] text-slate-500">تعداد پیشنهادی قابل ویرایش است؛ مقدار نهایی با تأیید اپراتور در موجودی انتظار مرحله اول ثبت می‌شود.</p>
+                    </div>
+                  )}
                 </>
               ) : (
                 /* Multi-Part Allocation (Scenario: 1 coil for 2 parts simultaneously) */
