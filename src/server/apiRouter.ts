@@ -3780,41 +3780,69 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
 
 apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response) => {
   try {
-    if (!isDatabaseUrlConfigured()) {
-      return res.status(503).json({ success: false, error: 'برگشت ته‌کلاف بدون اتصال PostgreSQL مجاز نیست.' });
-    }
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'برگشت ته‌کلاف بدون اتصال PostgreSQL مجاز نیست.' });
     const { id } = req.params;
     const returnedKg = Number(req.body.returnedRemnantWeightKg);
     const { warehouseId, locationCode, notes } = req.body;
-    if (!Number.isFinite(returnedKg) || returnedKg <= 0) {
-      return res.status(400).json({ success: false, error: 'وزن برگشتی باید عددی مثبت باشد.' });
-    }
+    if (!Number.isFinite(returnedKg) || returnedKg <= 0) return res.status(400).json({ success: false, error: 'وزن برگشتی باید عددی مثبت باشد.' });
     const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
     const prisma = getPrismaClient();
     const returnedAt = new Date();
-    const returnId = `CRR-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
-    const returnDocNo = String(req.body.documentNumber || `RET-${coil.coilId}-${Date.now()}`);
-
     const persisted = await prisma.$transaction(async (tx: any) => {
       const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
       if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد.');
       const openIssues = await tx.coilIssueReturnRecord.findMany({
         where: { coilId: dbCoil.id, issuedWeightKg: { gt: 0 }, outstandingWeightKg: { gt: 0 } },
+        include: { contract: true },
         orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
       });
       const outstandingTotal = openIssues.reduce((sum: number, row: any) => sum + Number(row.outstandingWeightKg), 0);
       if (returnedKg > outstandingTotal) {
         throw new Error(`وزن برگشتی (${returnedKg} kg) از مانده حواله‌های باز پای خط (${outstandingTotal} kg) بیشتر است.`);
       }
+      const targetWarehouse = warehouseId
+        ? await tx.warehouse.findFirst({ where: { OR: [{ id: warehouseId }, { code: warehouseId }] } })
+        : await tx.warehouse.findUnique({ where: { id: dbCoil.warehouseId } });
+      if (!targetWarehouse) throw new Error('انبار مقصد برگشت در اطلاعات پایه PostgreSQL یافت نشد.');
+      const targetLocationCode = locationCode || (targetWarehouse.id === dbCoil.warehouseId ? null : null);
+      const targetLocation = targetLocationCode
+        ? await tx.warehouseLocation.findFirst({ where: { warehouseId: targetWarehouse.id, code: targetLocationCode } })
+        : targetWarehouse.id === dbCoil.warehouseId && dbCoil.warehouseLocationId
+          ? await tx.warehouseLocation.findUnique({ where: { id: dbCoil.warehouseLocationId } })
+          : null;
+      if (targetLocationCode && !targetLocation) throw new Error('موقعیت مقصد برگشت در انبار انتخاب‌شده یافت نشد.');
+      if (targetWarehouse.id !== dbCoil.warehouseId && !targetLocation) throw new Error('برای برگشت به انبار دیگر، تعیین موقعیت مقصد الزامی است.');
+
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای ثبت سند رسمی برگشت، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+      const docNumber = `RET-COIL-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      const doc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: docNumber,
+          documentType: 'RETURN',
+          documentDate: returnedAt,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: targetWarehouse.id,
+          referenceType: 'MANUFACTURING_ORDER',
+          referenceNumber: dbCoil.coilId,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: returnedAt,
+          notes: notes || `برگشت ${returnedKg} کیلوگرم ته‌کلاف ${dbCoil.coilId} از خط تولید`,
+        },
+      });
 
       let remainingToApply = returnedKg;
+      let lineNumber = 0;
+      const returnRecords: any[] = [];
       for (const issue of openIssues) {
-        if (remainingToApply <= 0) break;
+        if (remainingToApply <= 0.001) break;
         const outstanding = Number(issue.outstandingWeightKg);
         const applied = Math.min(outstanding, remainingToApply);
-        const nextOutstanding = Math.max(0, outstanding - applied);
+        const nextOutstanding = Math.max(0, Math.round((outstanding - applied) * 1000) / 1000);
         await tx.coilIssueReturnRecord.update({
           where: { id: issue.id },
           data: {
@@ -3825,49 +3853,101 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
           },
         });
         remainingToApply = Math.round((remainingToApply - applied) * 1000) / 1000;
-      }
+        lineNumber += 1;
 
-      let targetWarehouseId = dbCoil.warehouseId;
-      if (warehouseId) {
-        const targetWarehouse = await tx.warehouse.findFirst({ where: { OR: [{ id: warehouseId }, { code: warehouseId }] } });
-        if (!targetWarehouse) throw new Error('انبار مقصد برگشت در اطلاعات پایه PostgreSQL یافت نشد.');
-        targetWarehouseId = targetWarehouse.id;
+        const contractId = issue.contractId || null;
+        const contractNumber = issue.contract?.contractNumber || null;
+        const existingBalance = await tx.stockBalance.findFirst({
+          where: {
+            partId: dbCoil.partId, warehouseId: targetWarehouse.id,
+            locationId: targetLocation?.id || null, materialLotId: dbCoil.materialLotId,
+            physicalCoilId: dbCoil.id, ownership: dbCoil.ownership,
+            contractId, qualityStatus: 'AVAILABLE',
+          },
+        });
+        if (existingBalance) {
+          await tx.stockBalance.update({
+            where: { id: existingBalance.id },
+            data: {
+              quantityOnHand: { increment: applied }, quantityAvailable: { increment: applied },
+              weightKgOnHand: { increment: applied }, weightKgAvailable: { increment: applied },
+              lastTransactionAt: returnedAt,
+            },
+          });
+        } else {
+          await tx.stockBalance.create({
+            data: {
+              partId: dbCoil.partId, warehouseId: targetWarehouse.id,
+              locationId: targetLocation?.id || null, materialLotId: dbCoil.materialLotId,
+              physicalCoilId: dbCoil.id, quantityOnHand: applied, quantityReserved: 0,
+              quantityAvailable: applied, weightKgOnHand: applied, weightKgReserved: 0,
+              weightKgAvailable: applied, ownership: dbCoil.ownership,
+              contractId, contractNumber, qualityStatus: 'AVAILABLE', lastTransactionAt: returnedAt,
+            },
+          });
+        }
+        const dbPart = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+        if (!dbPart) throw new Error('کالای پایه کلاف یافت نشد.');
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: doc.id, lineNumber, partId: dbCoil.partId,
+            physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
+            locationId: targetLocation?.id || null, quantity: applied,
+            unitId: dbPart.unitId, weightKg: applied, ownership: dbCoil.ownership,
+            contractId, contractNumber, qualityStatus: 'AVAILABLE',
+            notes: `برگشت ته‌کلاف ${dbCoil.coilId}؛ حواله مبدا ${issue.documentNumber}`,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TRX-COIL-RET-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
+            materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+            warehouseId: targetWarehouse.id, locationId: targetLocation?.id || null,
+            transactionType: 'INBOUND', quantity: applied, quantitySigned: applied,
+            unitId: dbPart.unitId, weightKg: applied, weightKgSigned: applied,
+            ownership: dbCoil.ownership, contractId, contractNumber,
+            qualityStatus: 'AVAILABLE', transactionDate: returnedAt,
+            createdByUserId: user.id, manufacturingOrderId: issue.manufacturingOrderId || null,
+          },
+        });
+        const returnRecord = await tx.coilIssueReturnRecord.create({
+          data: {
+            id: `CRR-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            coilId: dbCoil.id, inventoryDocumentId: doc.id, contractId,
+            partId: issue.partId || dbCoil.partId,
+            productionOperationId: issue.productionOperationId || null,
+            manufacturingOrderId: issue.manufacturingOrderId || null,
+            documentNumber: docNumber, issuedWeightKg: 0, consumedWeightKg: 0,
+            returnedWeightKg: applied, outstandingWeightKg: 0, varianceWeightKg: 0,
+            status: 'FULLY_RETURNED', issuedAt: returnedAt, returnedAt,
+            notes: notes || `برگشت ${applied} کیلوگرم از حواله ${issue.documentNumber}`,
+          },
+        });
+        returnRecords.push(returnRecord);
       }
-      let targetLocationId: string | null = null;
-      if (locationCode) {
-        const targetLocation = await tx.warehouseLocation.findFirst({ where: { warehouseId: targetWarehouseId, code: locationCode } });
-        if (!targetLocation) throw new Error('موقعیت مقصد برگشت در انبار انتخاب‌شده یافت نشد.');
-        targetLocationId = targetLocation.id;
-      }
+      if (remainingToApply > 0.001) throw new Error('مقدار برگشتی به‌طور کامل به حواله‌های باز تخصیص داده نشد.');
 
       await tx.physicalCoil.update({
         where: { id: dbCoil.id },
         data: {
           remainingWeightKg: { increment: returnedKg },
-          warehouseId: targetWarehouseId,
-          warehouseLocationId: targetWarehouseId === dbCoil.warehouseId ? (targetLocationId ?? dbCoil.warehouseLocationId) : targetLocationId,
+          warehouseId: targetWarehouse.id,
+          warehouseLocationId: targetLocation?.id || null,
           physicalStatus: 'AVAILABLE',
         },
       });
-      const returnRecord = await tx.coilIssueReturnRecord.create({
-        data: {
-          id: returnId,
-          coilId: dbCoil.id,
-          manufacturingOrderId: null,
-          documentNumber: returnDocNo,
-          issuedWeightKg: 0,
-          consumedWeightKg: 0,
-          returnedWeightKg: returnedKg,
-          outstandingWeightKg: 0,
-          varianceWeightKg: 0,
-          status: 'FULLY_RETURNED',
-          issuedAt: returnedAt,
-          returnedAt,
-          notes: notes || 'برگشت ته‌کلاف از خط تولید به انبار',
-        },
-      });
+      if (dbCoil.materialLotId) {
+        await tx.materialLot.update({
+          where: { id: dbCoil.materialLotId },
+          data: {
+            remainingWeightKg: { increment: returnedKg },
+            warehouseLocationId: targetLocation?.id || null,
+          },
+        });
+      }
       const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
-      return { coil: updatedCoil, returnRecord };
+      return { coil: updatedCoil, records: returnRecords, documentNumber: docNumber };
     });
 
     coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
@@ -3875,31 +3955,24 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
     coil.warehouseLocationCode = locationCode || coil.warehouseLocationCode;
     coil.physicalStatus = persisted.coil.physicalStatus;
     coil.updatedAt = new Date().toISOString();
-    const returnRecord: CoilIssueReturnRecord = {
-      ...persisted.returnRecord,
-      issuedWeightKg: 0,
-      consumedWeightKg: 0,
-      returnedWeightKg: Number(persisted.returnRecord.returnedWeightKg),
-      outstandingWeightKg: 0,
-      varianceWeightKg: 0,
-      scrappedKg: 0,
-      issuedAt: persisted.returnRecord.issuedAt.toISOString(),
-      returnedAt: persisted.returnRecord.returnedAt?.toISOString(),
-    };
-    coilIssueRecordsStore.unshift(returnRecord);
-
+    const returnRecords: CoilIssueReturnRecord[] = persisted.records.map((row: any) => ({
+      ...row,
+      issuedWeightKg: 0, consumedWeightKg: 0,
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: 0, varianceWeightKg: 0, scrappedKg: 0,
+      issuedAt: row.issuedAt.toISOString(),
+      returnedAt: row.returnedAt?.toISOString(),
+    }));
+    coilIssueRecordsStore.unshift(...returnRecords);
     res.json({
       success: true,
-      message: `ته‌کلاف ${returnedKg} کیلوگرمی با ثبت برگشت در PostgreSQL به انبار بازگشت. مانده جدید: ${coil.remainingWeightKg} کیلوگرم.`,
-      coil,
-      returnRecord,
-      persistence: 'POSTGRESQL_TRANSACTIONAL',
+      message: `ته‌کلاف ${returnedKg} کیلوگرمی با سند ${persisted.documentNumber} به انبار برگشت و کاردکس به‌روزرسانی شد.`,
+      coil, returnRecords, returnRecord: returnRecords[0],
+      documentNumber: persisted.documentNumber,
+      persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
     });
   } catch (error) {
-    res.status(409).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک برگشت ته‌کلاف',
-    });
+    res.status(409).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک برگشت ته‌کلاف' });
   }
 });
 
