@@ -7426,13 +7426,100 @@ apiRouter.get('/reports/inventory-valuation-quantities', async (req: Request, re
 });
 
 // 19.9 Scrap by Part & Operation
-apiRouter.get('/reports/scrap-by-part-operation', (req: Request, res: Response) => {
+apiRouter.get('/reports/scrap-by-part-operation', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش ضایعات فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getScrapByPartAndOperationReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const reports = await prisma.productionReport.findMany({
+      where: {
+        postingStatus: 'POSTED',
+        ...(filters.startDate || filters.endDate ? {
+          reportDate: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+        ...(filters.partId ? { manufacturingOrder: { part: { is: { OR: [{ id: filters.partId }, { partNumber: filters.partId }] } } } } : {}),
+        ...(filters.machineId ? { machineId: filters.machineId } : {}),
+        ...(filters.processType ? { productionOperation: { operation: { is: { processType: filters.processType } } } } : {}),
+      },
+      include: {
+        manufacturingOrder: { include: { part: true } },
+        productionOperation: { include: { operation: true } },
+        machine: { select: { code: true, name: true } },
+        scraps: true,
+      },
+      orderBy: { reportDate: 'desc' },
+    });
+    const grouped = new Map<string, any>();
+    for (const report of reports) {
+      const part = report.manufacturingOrder.part;
+      const operation = report.productionOperation;
+      const key = [part.id, operation.id, report.machineId].join('|');
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          partCode: part.partNumber,
+          partName: part.name,
+          stepNumber: operation.stepNumber,
+          stepName: operation.operation.name,
+          processType: operation.operation.processType,
+          machineCode: report.machine.code,
+          machineName: report.machine.name,
+          totalInputQty: 0,
+          scrapPieces: 0,
+          scrapWeightKg: 0,
+          scrapNormPercent: part.scrapNormPercent == null ? 0 : Number(part.scrapNormPercent),
+          normConfigured: part.scrapNormPercent != null,
+          reasons: new Map<string, number>(),
+        });
+      }
+      const row = grouped.get(key);
+      const detailedScrapPieces = report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.quantity), 0);
+      const detailedScrapWeight = report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.weightKg), 0);
+      row.totalInputQty += Number(report.goodQuantity) + Number(report.scrapQuantity);
+      row.scrapPieces += report.scraps.length ? detailedScrapPieces : Number(report.scrapQuantity);
+      row.scrapWeightKg += detailedScrapWeight;
+      for (const scrap of report.scraps) {
+        const reason = String(scrap.scrapReason);
+        row.reasons.set(reason, (row.reasons.get(reason) || 0) + Number(scrap.quantity));
+      }
+    }
+    const data = [...grouped.values()].map(row => {
+      const actualScrapPercent = row.totalInputQty > 0 ? row.scrapPieces / row.totalInputQty * 100 : 0;
+      const commonReason = [...row.reasons.entries()].sort((a: any, b: any) => b[1] - a[1])[0]?.[0];
+      return {
+        partCode: row.partCode,
+        partName: row.partName,
+        stepNumber: row.stepNumber,
+        stepName: row.stepName,
+        processType: row.processType,
+        machineCode: row.machineCode,
+        machineName: row.machineName,
+        totalInputQty: Number(row.totalInputQty.toFixed(3)),
+        scrapPieces: Number(row.scrapPieces.toFixed(3)),
+        scrapWeightKg: Number(row.scrapWeightKg.toFixed(3)),
+        scrapNormPercent: Number(row.scrapNormPercent.toFixed(2)),
+        actualScrapPercent: Number(actualScrapPercent.toFixed(2)),
+        isAboveNorm: row.normConfigured && actualScrapPercent > row.scrapNormPercent,
+        normConfigured: row.normConfigured,
+        commonScrapDefectType: commonReason || 'DETAIL_NOT_RECORDED',
+      };
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_REPORTS_AND_SCRAP_DETAILS',
+      meta: {
+        reportTitle: 'گزارش ضایعات به تفکیک قطعه، عملیات و ماشین',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'مقایسه با حد مجاز فقط برای قطعاتی انجام می‌شود که scrapNormPercent در اطلاعات پایه آن‌ها تعریف شده باشد؛ وزن ضایعات فقط از رکوردهای تفصیلی ضایعات محاسبه می‌شود.',
+      },
+      data,
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش ضایعات' });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش ضایعات تولید' });
   }
 });
 
