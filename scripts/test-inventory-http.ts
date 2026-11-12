@@ -130,6 +130,20 @@ async function main() {
     assert(issue.response.status === 200 && issue.payload.success === true, `HTTP manufacturing issue failed: ${JSON.stringify(issue.payload)}`);
     console.log('PASS: HTTP POST issue links material consumption to a manufacturing order and operation.');
 
+    const actualConsumption = await requestJson(
+      baseUrl,
+      `/api/reports/material-consumption-actual?partId=${encodeURIComponent(mo.partId)}`,
+    );
+    assert(actualConsumption.response.status === 200 && actualConsumption.payload.success === true, `Actual consumption report failed: ${JSON.stringify(actualConsumption.payload)}`);
+    const actualRow = actualConsumption.payload.data?.find((row: any) =>
+      row.moNumber === mo.moNumber && row.materialCode === appPart.code && row.coilNumbers?.includes(`${nonce}-COIL`)
+    );
+    assert(actualRow && Number(actualRow.actualIssuedMaterialKg) >= 20, 'Actual consumption report must expose the posted 20 kg issue with its MO and coil genealogy.');
+    assert(Array.isArray(actualRow.actualMachineNames) && Array.isArray(actualRow.actualOperatorNames), 'Actual consumption report must expose actual machine/operator fields, even when no production report is yet linked.');
+    const disabledBomVariance = await requestJson(baseUrl, '/api/reports/material-consumption-vs-standard');
+    assert(disabledBomVariance.response.status === 409 && disabledBomVariance.payload.source === 'BOM_VARIANCE_DISABLED_UNTIL_VERSIONED_BOM_RECONCILIATION', 'BOM variance endpoint must not return sample estimates before versioned BOM reconciliation.');
+    console.log('PASS: HTTP actual-consumption report uses posted issue ledger and disables unverified BOM variance.');
+
     const invalidReturn = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/return`, 'POST', { returnedRemnantWeightKg: 0 });
     assert(invalidReturn.response.status === 400, 'Return endpoint must reject zero returned weight with HTTP 400.');
 
