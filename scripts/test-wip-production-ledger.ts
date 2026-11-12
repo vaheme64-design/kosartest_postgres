@@ -15,6 +15,7 @@ async function run() {
   const testContractId = 'WIP-LEDGER-INTEGRATION-TEST';
 
   let originalSnapshot: any = null;
+  let originalSnapshotVersion = 1;
   let hadSnapshot = false;
   let snapshotCaptured = false;
   let relationalOrder: any;
@@ -84,6 +85,10 @@ async function run() {
     hadSnapshot = !!snapshot;
     snapshotCaptured = true;
     originalSnapshot = snapshot?.payload ?? null;
+    originalSnapshotVersion = snapshot?.version ?? 1;
+    if (!snapshot) {
+      await prisma.wipStateSnapshot.create({ data: { id: 'production-wip-state', version: 1, payload: { manufacturingOrders: [], wipTransfers: [], productionLogs: [] } } });
+    }
 
     await prisma.stockBalance.create({
       data: {
@@ -143,6 +148,7 @@ async function run() {
       rejectedQty: 0,
       scrapReason: 'TEST_SCRAP',
       operatorName: user.fullName,
+      expectedSnapshotVersion: originalSnapshotVersion,
       snapshotPayload,
     };
 
@@ -173,6 +179,7 @@ async function run() {
       await postWipProductionAtomically({
         ...input,
         idempotencyKey: rollbackKey,
+        expectedSnapshotVersion: originalSnapshotVersion + 1,
         goodQty: 1,
         scrapQty: 0,
       });
@@ -210,8 +217,8 @@ async function run() {
     if (snapshotCaptured && hadSnapshot) {
       await prisma.wipStateSnapshot.upsert({
         where: { id: 'production-wip-state' },
-        create: { id: 'production-wip-state', payload: originalSnapshot },
-        update: { payload: originalSnapshot },
+        create: { id: 'production-wip-state', payload: originalSnapshot, version: originalSnapshotVersion },
+        update: { payload: originalSnapshot, version: originalSnapshotVersion },
       });
     } else if (snapshotCaptured) {
       await prisma.wipStateSnapshot.deleteMany({ where: { id: 'production-wip-state' } });
