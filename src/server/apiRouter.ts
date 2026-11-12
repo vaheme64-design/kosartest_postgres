@@ -436,6 +436,92 @@ export async function loadInventoryAppState(): Promise<void> {
     partsStore = [];
   }
 
+  const [dbPhysicalCoils, dbCoilIssueRecords] = await Promise.all([
+    prisma.physicalCoil.findMany({
+      include: {
+        part: { select: { id: true, partNumber: true, name: true } },
+        material: { select: { grade: true } },
+        warehouse: { select: { id: true, code: true, name: true } },
+        warehouseLocation: { select: { code: true } },
+        contractAllocations: {
+          include: { contract: { select: { id: true, contractNumber: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: { receiptDate: 'asc' },
+    }),
+    prisma.coilIssueReturnRecord.findMany({
+      include: {
+        coil: { select: { coilId: true } },
+        contract: { select: { id: true, contractNumber: true } },
+        part: { select: { partNumber: true, name: true } },
+        manufacturingOrder: { select: { moNumber: true } },
+        productionOperation: { select: { stepNumber: true } },
+      },
+      orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }],
+    }),
+  ]);
+
+  if (dbPhysicalCoils.length || process.env.NODE_ENV === 'production') {
+    physicalCoilsStore.splice(0, physicalCoilsStore.length, ...dbPhysicalCoils.map((row: any) => {
+      const appPart = partsStore.find(part => part.code === row.part?.partNumber);
+      return {
+        id: row.id,
+        coilId: row.coilId,
+        coilPackNumber: row.coilPackNumber,
+        partId: appPart?.id || row.partId || '',
+        partCode: row.part?.partNumber || '',
+        partName: row.part?.name || '',
+        materialGrade: row.material?.grade || '',
+        heatNumber: row.heatNumber || '',
+        thicknessMm: Number(row.thicknessMm),
+        widthMm: Number(row.widthMm),
+        originalWeightKg: Number(row.originalWeightKg),
+        remainingWeightKg: Number(row.remainingWeightKg),
+        warehouseId: row.warehouseId,
+        warehouseName: row.warehouse?.name || '',
+        warehouseLocationCode: row.warehouseLocation?.code || '',
+        ownership: row.ownership,
+        qualityStatus: row.qualityStatus,
+        physicalStatus: row.physicalStatus,
+        supplierName: row.supplierName || '',
+        receiptDate: row.receiptDate.toISOString(),
+        allocations: row.contractAllocations.map((allocation: any) => ({
+          contractId: allocation.contractId,
+          contractNumber: allocation.contract?.contractNumber || allocation.contractId,
+          coilId: row.id,
+          allocatedWeightKg: Number(allocation.allocatedWeightKg),
+          ownership: allocation.ownership,
+          notes: allocation.notes || undefined,
+        })),
+      } as PhysicalCoil;
+    }));
+  }
+
+  if (dbCoilIssueRecords.length || process.env.NODE_ENV === 'production') {
+    coilIssueRecordsStore.splice(0, coilIssueRecordsStore.length, ...dbCoilIssueRecords.map((row: any) => ({
+      id: row.id,
+      coilId: row.coilId,
+      manufacturingOrderId: row.manufacturingOrder?.moNumber || row.manufacturingOrderId || '',
+      documentNumber: row.documentNumber,
+      issuedWeightKg: Number(row.issuedWeightKg),
+      consumedWeightKg: Number(row.consumedWeightKg),
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: Number(row.outstandingWeightKg),
+      varianceWeightKg: Number(row.varianceWeightKg),
+      scrappedKg: Number(row.varianceWeightKg),
+      status: row.status,
+      issuedAt: row.issuedAt.toISOString(),
+      returnedAt: row.returnedAt?.toISOString(),
+      notes: row.notes || undefined,
+      contractId: row.contractId || undefined,
+      contractNumber: row.contract?.contractNumber || undefined,
+      partCode: row.part?.partNumber || undefined,
+      partName: row.part?.name || undefined,
+      operationStep: row.productionOperation?.stepNumber,
+    } as CoilIssueReturnRecord)));
+  }
+
   const dbDocuments = await prisma.inventoryDocument.findMany({
     where: { postingStatus: 'POSTED' },
     include: {
