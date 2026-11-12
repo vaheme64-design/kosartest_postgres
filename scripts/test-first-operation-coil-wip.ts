@@ -197,7 +197,8 @@ async function run() {
     const operation10 = relationalOrder.operations[0];
     // This seeded order's first operation is already closed; temporarily reopen it in the disposable CI DB.
     await prisma.productionOperation.update({ where: { id: operation10.id }, data: { status: 'IN_PROGRESS' } });
-    const issue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', {
+    const issuePayload = {
+      issueRequestKey: `${nonce}-ISSUE-REQUEST-1`,
       issuedWeightKg: 70,
       moId: relationalOrder.moNumber,
       moOperationId: operation10.id,
@@ -205,8 +206,26 @@ async function run() {
       scrappedKg: 0,
       initialInputQuantityPcs: 15,
       wipManufacturingOrderId: wipMoId,
-    });
-    assert(`Coil issue and operator-confirmed 15 PCS WIP input post successfully: HTTP ${issue.response.status} ${JSON.stringify(issue.payload)}`, issue.response.status === 200 && issue.payload.success === true);
+    };
+    const issue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', issuePayload);
+    assert(`Coil issue and operator-confirmed 15 PCS WIP input post successfully: HTTP ${issue.response.status} ${JSON.stringify(issue.payload)}`, issue.response.status === 200 && issue.payload.success === true && issue.payload.duplicate !== true);
+
+    const duplicateIssue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', issuePayload);
+    const coilAfterDuplicate = await prisma.physicalCoil.findUnique({ where: { id: coilId } });
+    const wipQtyAfterDuplicate = Number((await prisma.stockBalance.aggregate({
+      where: { physicalCoilId: coilId, partId: relationalOrder.partId },
+      _sum: { quantityOnHand: true },
+    }))._sum.quantityOnHand);
+    assert('Retrying the same issue request returns the original document without a second stock deduction or WIP posting',
+      duplicateIssue.response.status === 200 && duplicateIssue.payload.duplicate === true &&
+      duplicateIssue.payload.documentNumber === issue.payload.documentNumber &&
+      Number(coilAfterDuplicate?.remainingWeightKg) === 30 && wipQtyAfterDuplicate === 15);
+
+    const changedPayload = { ...issuePayload, issuedWeightKg: 71 };
+    const conflictingRetry = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', changedPayload);
+    const coilAfterConflict = await prisma.physicalCoil.findUnique({ where: { id: coilId } });
+    assert('Reusing an idempotency key with a changed payload is rejected without changing stock',
+      conflictingRetry.response.status === 409 && Number(coilAfterConflict?.remainingWeightKg) === 30);
 
     const [coilAfterIssue, lotAfterIssue, rawBalances, wipBalances, wipTransactions, snapshotAfterIssue] = await Promise.all([
       prisma.physicalCoil.findUnique({ where: { id: coilId } }),
