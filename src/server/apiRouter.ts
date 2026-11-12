@@ -3840,6 +3840,9 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
             throw new Error('ارتباط هویتی عملیات WIP معتبر نیست.');
           }
           const snapshot = await tx.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+          if (snapshot && getProductionWipSnapshotVersion() !== snapshot.version) {
+            throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: وضعیت WIP این سرور قدیمی است؛ اطلاعات را تازه‌سازی و حواله را دوباره ثبت کنید.');
+          }
           const snapshotPayload: any = snapshot?.payload;
           const wipOrder = snapshotPayload?.manufacturingOrders?.find((row: any) => row.id === link.wipManufacturingOrderId);
           const wipOperation = wipOrder?.operations?.find((row: any) => row.id === operationLink.wipOperationId);
@@ -3855,7 +3858,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           const totalNetMaterialKg = request.issuedWeightKg - request.varianceWeightKg;
           if (totalNetMaterialKg <= 0) throw new Error('وزن خالص مواد پس از کسر افت باید مثبت باشد.');
           wipPostingContext = {
-            snapshotPayload, wipOrder, wipOperation, location: locationRows[0], netWeightPerPiece, totalNetMaterialKg,
+            snapshotPayload, snapshotVersion: snapshot!.version, wipOrder, wipOperation, location: locationRows[0], netWeightPerPiece, totalNetMaterialKg,
             wipManufacturingOrderId: link.wipManufacturingOrderId,
             wipOperationId: operationLink.wipOperationId,
           };
@@ -4008,11 +4011,18 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           wipPostingContext.wipOperation.lastActivityAt = issuedAt.toISOString();
           wipPostingContext.wipOrder.initialInputQuantity = Number(wipPostingContext.wipOrder.initialInputQuantity || 0) + request.initialInputQuantityPcs;
           wipPostingContext.wipOrder.updatedAt = issuedAt.toISOString();
-          await tx.wipStateSnapshot.update({ where: { id: 'production-wip-state' }, data: { payload: wipPostingContext.snapshotPayload } });
+          const snapshotUpdate = await tx.wipStateSnapshot.updateMany({
+            where: { id: 'production-wip-state', version: wipPostingContext.snapshotVersion },
+            data: { payload: wipPostingContext.snapshotPayload, version: { increment: 1 } },
+          });
+          if (snapshotUpdate.count !== 1) {
+            throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: یک ثبت دیگر وضعیت WIP را تغییر داده است؛ حواله و تمام گردش‌های انبار لغو شدند.');
+          }
           postedWipInput = {
             wipManufacturingOrderId: wipPostingContext.wipManufacturingOrderId,
             wipOperationId: wipPostingContext.wipOperationId,
             quantityPcs: request.initialInputQuantityPcs,
+            expectedSnapshotVersion: wipPostingContext.snapshotVersion,
           };
         }
       }
@@ -4051,6 +4061,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     coil.physicalStatus = persisted.coil.physicalStatus;
     coil.updatedAt = new Date().toISOString();
     if (persisted.wipInput) {
+      advanceProductionWipSnapshotVersion(persisted.wipInput.expectedSnapshotVersion);
       const wipOrder = manufacturingOrdersStore.find(row => row.id === persisted.wipInput.wipManufacturingOrderId);
       const linkedOperation = wipOrder?.operations.find(row => row.id === persisted.wipInput.wipOperationId);
       if (wipOrder && linkedOperation) {
