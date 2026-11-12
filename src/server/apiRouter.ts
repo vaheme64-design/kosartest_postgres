@@ -455,7 +455,7 @@ export async function loadInventoryAppState(): Promise<void> {
         manufacturingOrder: { select: { moNumber: true } },
         productionOperation: { select: { stepNumber: true } },
       },
-      orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }],
+      orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
     }),
   ]);
 
