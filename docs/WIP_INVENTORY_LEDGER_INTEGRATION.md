@@ -42,6 +42,16 @@ No destination receipt confirmation is required. A report is rejected if the sou
 
 This flow preserves the requested one-way operational handoff: once the production report is posted, good output automatically moves to the next stage; no receiving confirmation is added.
 
+### WIP snapshot optimistic concurrency
+
+The transitional JSON WIP snapshot now carries a monotonically increasing integer `version` (default 1). Every ordinary WIP mutation persists with compare-and-swap semantics: `UPDATE ... WHERE id = 'production-wip-state' AND version = expectedVersion`, incrementing the version only when exactly one row is updated. If the affected row count is zero, the stale mutation is rejected and the API returns HTTP 409. The losing process restores its local pre-mutation arrays and reloads the latest committed snapshot before it can accept another WIP mutation.
+
+Atomic production posting applies the same version predicate inside the existing Serializable PostgreSQL transaction that creates the production report, updates normalized operation/order counters, and posts inventory movements. A stale snapshot therefore rolls back the report and every related ledger/stock movement together. On successful commit, the process advances its in-memory snapshot version. Startup also handles two instances racing to initialize a missing snapshot: the loser reloads the winner's initialized state.
+
+CI includes a database concurrency test that simulates two independent writers reading the same version, verifies exactly one wins, verifies a stale retry is rejected, and verifies a retry after reloading the latest version succeeds.
+
+**Boundary:** this protects the shared WIP snapshot and the atomic production-posting path. It does not yet make every in-memory module (inventory UI caches, planning stores, etc.) distributed or multi-instance safe, nor does it add automatic replay of a rejected operator action. On HTTP 409, the client must refresh current WIP state and the operator should review/re-submit the action. Multi-instance production deployment still requires the remaining in-memory application stores to be externalized or guarded similarly.
+
 ### Coil issue idempotency
 
 Every physical-coil issue request now requires a stable `issueRequestKey` (accepted in the request body or `Idempotency-Key` header). The UI creates one key when the issue modal opens and reuses it for retries until the issue succeeds or the modal is reopened. The key is stored uniquely on the posted `InventoryDocument`, together with a normalized request fingerprint:
