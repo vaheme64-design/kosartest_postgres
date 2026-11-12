@@ -366,7 +366,8 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
     { id: 'DASHBOARD', label: 'پیشخوان انبار', icon: Boxes },
     { id: 'INQUIRY', label: 'موجودی و استعلام', icon: Search },
     { id: 'COILS', label: 'رول‌های ورق و کویل‌پک', icon: Layers, badge: coils.length },
-    { id: 'CONTRACTS', label: 'قراردادها و سهمیه مواد', icon: FileSignature, badge: contracts.length },
+    { id: 'MOVEMENT', label: 'اسناد و کاردکس رهگیری', icon: FileText, badge: documents.length },
+    { id: 'CUSTOM_REPORTS', label: 'گزارش‌ساز پویا و سفارشی', icon: FileSpreadsheet },
     {
       id: 'ALERTS',
       label: 'نقطه سفارش و کسری‌ها',
@@ -374,12 +375,11 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
       badge: reorderAlerts.length,
       badgeColor: criticalAlertsCount > 0 ? 'bg-rose-500 text-white' : 'bg-amber-500 text-slate-950',
     },
-    { id: 'MOVEMENT', label: 'اسناد و کاردکس', icon: FileText },
   ];
 
   const secondaryTabs: { id: InventorySubTab; label: string; icon: any }[] = [
+    { id: 'CONTRACTS', label: 'قراردادها و سهمیه مواد', icon: FileSignature },
     { id: 'IMPORT_EXPORT', label: 'ورود و خروج اکسل (CSV)', icon: Upload },
-    { id: 'CUSTOM_REPORTS', label: 'گزارش‌ساز سفارشی', icon: FileSpreadsheet },
     { id: 'SAPCO', label: 'صورتحساب امانی ساپکو', icon: ScrollText },
   ];
 

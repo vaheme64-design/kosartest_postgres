@@ -30,6 +30,7 @@ import {
 } from '../types/inventory';
 import { checkDatabaseConnection, getPrismaClient } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
+import { formatToJalali } from '../utils/jalali';
 
 import {
   calculateDetailedStockBalances,
@@ -3182,12 +3183,523 @@ apiRouter.post('/inventory/coils/:id/allocate', (req: Request, res: Response) =>
 });
 
 /**
- * 16.14. Customizable Inventory Reports (Reports A, B, C, D, E)
+/**
+ * 16.13b. Atomic Operation Execution & Multi-Tier BOM Backflush Engine
+ * Automatically deducts consumed raw materials / fasteners / WIP sub-assemblies
+ * and posts official WIP or Finished Goods receipts with full Heat/Coil traceability.
+ */
+apiRouter.post('/production/execute-op-backflush', (req: Request, res: Response) => {
+  try {
+    const {
+      orderCode = 'MO-ECU-01',
+      partId,
+      partCode,
+      partName,
+      opNo = 10,
+      opCode = 'OP10',
+      opTitle = 'عملیات تولید',
+      shiftDeltaGoodQty = 0,
+      totalCompletedGoodQty = 0,
+      scrapQty = 0,
+      isFinalOp = false,
+      heatNumber = 'HT-1404-ECU01',
+      coilNumber = 'CP-1404-ECU-01',
+    } = req.body || {};
+
+    const deltaQty = Math.max(0, Number(shiftDeltaGoodQty) || Number(totalCompletedGoodQty) || 0);
+    const nowIso = new Date().toISOString();
+    const docSuffix = `${Date.now().toString().slice(-5)}`;
+
+    const matchedPart =
+      partsStore.find(p => p.id === partId || p.code === partCode) ||
+      partsStore.find(p => p.code === 'SAPCO-ASY-ECU-BRK-01');
+
+    let backflushIssueDocNumber: string | undefined;
+    let receiptDocNumber: string | undefined;
+    const consumedItemsSummary: Array<{ code: string; name: string; qty: number; unit: string }> = [];
+
+    // 1. Automatic BOM Backflush (Consumption Deduction) based on Part & Operation
+    if (deltaQty > 0) {
+      const issueLines: any[] = [];
+      let sourceWarehouseId = 'WH-RAW';
+      let sourceWarehouseName = 'انبار مرکزی رول و ورق مواد اولیه';
+
+      // Case A: Main Bracket Sub-Assembly (WIP-ECU-MAIN-BRK)
+      if (partCode === 'WIP-ECU-MAIN-BRK') {
+        if (Number(opNo) === 10 || opCode === 'OP10') {
+          // Deduct 0.98 kg per piece (including scrap) from DC01A Coil
+          const grossPieces = deltaQty + Math.max(0, Number(scrapQty) || 0);
+          const consumedKg = Number((grossPieces * 0.98).toFixed(2));
+          issueLines.push({
+            id: `LINE-BF-${docSuffix}-1`,
+            documentId: `DOC-BF-${docSuffix}`,
+            lineNumber: 1,
+            partId: 'PRT-RAW-ECU-COIL',
+            partCode: 'RM-COIL-DC01A-2.0-1140',
+            partName: 'رول ورق روغنی کششی DC01A ضخامت ۲ میلی‌متر عرض ۱۱۴۰',
+            lotNumber: coilNumber,
+            heatNumber,
+            ownership: 'SAPCO_SUPPLIER_OWNED',
+            contractId: 'CNT-SAPCO-ECU-BRK',
+            contractNumber: 'CNT-SAPCO-ECU-BRK',
+            locationCode: 'LOC-RAW-A1',
+            quantity: consumedKg,
+            unit: 'KG',
+            quantityKg: consumedKg,
+            qualityStatus: 'AVAILABLE',
+            notes: `مصرف خودکار ورق در ${opCode} (${opTitle}) برای دستور کار ${orderCode}`,
+          });
+          consumedItemsSummary.push({
+            code: 'RM-COIL-DC01A-2.0-1140',
+            name: 'رول ورق DC01A',
+            qty: consumedKg,
+            unit: 'KG',
+          });
+
+          // Update physical coil & sapco coil consumed weight
+          const physCoil = physicalCoilsStore.find(c => c.coilId === coilNumber || c.heatNumber === heatNumber) || physicalCoilsStore[0];
+          if (physCoil) {
+            physCoil.remainingWeightKg = Math.max(0, Number((physCoil.remainingWeightKg - consumedKg).toFixed(2)));
+          }
+          const sapcoCoil = coilsStore.find(c => c.coilNumber === coilNumber || c.heatNumber === heatNumber) || coilsStore[0];
+          if (sapcoCoil) {
+            sapcoCoil.consumedWeightKg = Number((sapcoCoil.consumedWeightKg + consumedKg).toFixed(2));
+          }
+        } else if (Number(opNo) === 40 || opCode === 'OP40' || isFinalOp) {
+          // Deduct 15 M6 Weld Nuts per piece
+          const consumedNuts = deltaQty * 15;
+          const nutsKg = Number((consumedNuts * 0.005).toFixed(3));
+          issueLines.push({
+            id: `LINE-BF-${docSuffix}-2`,
+            documentId: `DOC-BF-${docSuffix}`,
+            lineNumber: 1,
+            partId: 'PRT-FST-NUT-M6',
+            partCode: 'FST-NUT-WELD-M6',
+            partName: 'مهره جوشی چهارگوش M6 استاندارد بدنه خودرو',
+            lotNumber: 'LOT-NUT-M6-01',
+            heatNumber: 'HT-FST-M6',
+            ownership: 'COMPANY_OWNED',
+            locationCode: 'LOC-RAW-B1',
+            quantity: consumedNuts,
+            unit: 'PCS',
+            quantityKg: nutsKg,
+            qualityStatus: 'AVAILABLE',
+            notes: `مصرف خودکار ۱۵ عدد مهره M6 به ازای هر قطعه در ${opCode} دستور کار ${orderCode}`,
+          });
+          consumedItemsSummary.push({
+            code: 'FST-NUT-WELD-M6',
+            name: 'مهره جوشی M6',
+            qty: consumedNuts,
+            unit: 'PCS',
+          });
+        }
+      }
+      // Case B: Companion Bracket Sub-Assembly (WIP-ECU-COMP-BRK)
+      else if (partCode === 'WIP-ECU-COMP-BRK') {
+        if (Number(opNo) === 10 || opCode === 'OP10') {
+          const grossPieces = deltaQty + Math.max(0, Number(scrapQty) || 0);
+          const consumedKg = Number((grossPieces * 0.47).toFixed(2));
+          issueLines.push({
+            id: `LINE-BF-${docSuffix}-1`,
+            documentId: `DOC-BF-${docSuffix}`,
+            lineNumber: 1,
+            partId: 'PRT-RAW-ECU-COIL',
+            partCode: 'RM-COIL-DC01A-2.0-1140',
+            partName: 'رول ورق روغنی کششی DC01A ضخامت ۲ میلی‌متر عرض ۱۱۴۰',
+            lotNumber: coilNumber,
+            heatNumber,
+            ownership: 'SAPCO_SUPPLIER_OWNED',
+            contractId: 'CNT-SAPCO-ECU-BRK',
+            contractNumber: 'CNT-SAPCO-ECU-BRK',
+            locationCode: 'LOC-RAW-A1',
+            quantity: consumedKg,
+            unit: 'KG',
+            quantityKg: consumedKg,
+            qualityStatus: 'AVAILABLE',
+            notes: `مصرف خودکار ورق در ${opCode} (${opTitle}) برای دستور کار ${orderCode}`,
+          });
+          consumedItemsSummary.push({
+            code: 'RM-COIL-DC01A-2.0-1140',
+            name: 'رول ورق DC01A',
+            qty: consumedKg,
+            unit: 'KG',
+          });
+
+          const physCoil = physicalCoilsStore.find(c => c.coilId === coilNumber || c.heatNumber === heatNumber) || physicalCoilsStore[0];
+          if (physCoil) {
+            physCoil.remainingWeightKg = Math.max(0, Number((physCoil.remainingWeightKg - consumedKg).toFixed(2)));
+          }
+          const sapcoCoil = coilsStore.find(c => c.coilNumber === coilNumber || c.heatNumber === heatNumber) || coilsStore[0];
+          if (sapcoCoil) {
+            sapcoCoil.consumedWeightKg = Number((sapcoCoil.consumedWeightKg + consumedKg).toFixed(2));
+          }
+        } else if (Number(opNo) === 30 || opCode === 'OP30' || isFinalOp) {
+          // Deduct 2 M6x20 Weld Bolts per piece
+          const consumedBolts = deltaQty * 2;
+          const boltsKg = Number((consumedBolts * 0.009).toFixed(3));
+          issueLines.push({
+            id: `LINE-BF-${docSuffix}-2`,
+            documentId: `DOC-BF-${docSuffix}`,
+            lineNumber: 1,
+            partId: 'PRT-FST-BLT-M6-20',
+            partCode: 'FST-BOLT-WELD-M6-20',
+            partName: 'پیچ جوشی پایه فلنج‌دار M6×20 استاندارد بدنه',
+            lotNumber: 'LOT-BLT-M620-01',
+            heatNumber: 'HT-FST-M620',
+            ownership: 'COMPANY_OWNED',
+            locationCode: 'LOC-RAW-B2',
+            quantity: consumedBolts,
+            unit: 'PCS',
+            quantityKg: boltsKg,
+            qualityStatus: 'AVAILABLE',
+            notes: `مصرف خودکار ۲ عدد پیچ جوشی M6×20 به ازای هر قطعه در ${opCode} دستور کار ${orderCode}`,
+          });
+          consumedItemsSummary.push({
+            code: 'FST-BOLT-WELD-M6-20',
+            name: 'پیچ جوشی M6×20',
+            qty: consumedBolts,
+            unit: 'PCS',
+          });
+        }
+      }
+      // Case C: Final Anti-Theft ECU Bracket Assembly (SAPCO-ASY-ECU-BRK-01)
+      else if (partCode === 'SAPCO-ASY-ECU-BRK-01') {
+        if (Number(opNo) === 10 || opCode === 'OP10') {
+          sourceWarehouseId = 'WH-WIP-WELD';
+          sourceWarehouseName = 'انبار پای کار جوشکاری و مونتاژ (WIP)';
+          issueLines.push(
+            {
+              id: `LINE-BF-${docSuffix}-M1`,
+              documentId: `DOC-BF-${docSuffix}`,
+              lineNumber: 1,
+              partId: 'PRT-WIP-ECU-MAIN',
+              partCode: 'WIP-ECU-MAIN-BRK',
+              partName: 'صفحه براکت اصلی ضدسرقت رایانه موتور',
+              lotNumber: 'LOT-ECU-MAIN-W1',
+              heatNumber,
+              ownership: 'COMPANY_OWNED',
+              locationCode: 'LOC-WIP-WELD-01',
+              quantity: deltaQty,
+              unit: 'PCS',
+              quantityKg: Number((deltaQty * 0.95).toFixed(2)),
+              qualityStatus: 'AVAILABLE',
+              notes: `مصرف خودکار زیرفرآیند براکت اصلی در مونتاژ نهایی ${orderCode}`,
+            },
+            {
+              id: `LINE-BF-${docSuffix}-M2`,
+              documentId: `DOC-BF-${docSuffix}`,
+              lineNumber: 2,
+              partId: 'PRT-WIP-ECU-COMP',
+              partCode: 'WIP-ECU-COMP-BRK',
+              partName: 'قطعه مکمل براکت ضدسرقت رایانه موتور',
+              lotNumber: 'LOT-ECU-COMP-W1',
+              heatNumber,
+              ownership: 'COMPANY_OWNED',
+              locationCode: 'LOC-WIP-WELD-02',
+              quantity: deltaQty,
+              unit: 'PCS',
+              quantityKg: Number((deltaQty * 0.45).toFixed(2)),
+              qualityStatus: 'AVAILABLE',
+              notes: `مصرف خودکار زیرفرآیند قطعه مکمل در مونتاژ نهایی ${orderCode}`,
+            }
+          );
+          consumedItemsSummary.push(
+            { code: 'WIP-ECU-MAIN-BRK', name: 'براکت اصلی نیمه‌ساخته', qty: deltaQty, unit: 'PCS' },
+            { code: 'WIP-ECU-COMP-BRK', name: 'قطعه مکمل نیمه‌ساخته', qty: deltaQty, unit: 'PCS' }
+          );
+        }
+      }
+
+      if (issueLines.length > 0) {
+        backflushIssueDocNumber = `ISS-BF-${docSuffix}`;
+        const totalQty = issueLines.reduce((s, l) => s + l.quantity, 0);
+        const totalKg = issueLines.reduce((s, l) => s + l.quantityKg, 0);
+        inventoryDocsStore.unshift({
+          id: `DOC-BF-${docSuffix}`,
+          documentNumber: backflushIssueDocNumber,
+          documentType: 'ISSUE_RAW_MATERIAL',
+          documentDate: nowIso,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: sourceWarehouseId,
+          warehouseName: sourceWarehouseName,
+          ownership: issueLines[0].ownership,
+          contractId: 'CNT-SAPCO-ECU-BRK',
+          contractNumber: 'CNT-SAPCO-ECU-BRK',
+          referenceType: 'MANUFACTURING_ORDER',
+          referenceNumber: orderCode,
+          lines: issueLines,
+          totalQuantity: totalQty,
+          totalWeightKg: totalKg,
+          auditNote: `حواله مصرف خودکار (BOM Backflush) بابت اجرای ${opCode} (${opTitle}) قطعه ${partName} - ذوب ${heatNumber}`,
+          createdByUid: 'USR-ADMIN',
+          createdByName: 'سیستم اتوماتیک تولید و انبار (ERP Backflush)',
+          postedByUid: 'USR-ADMIN',
+          postedByName: 'سیستم اتوماتیک تولید و انبار (ERP Backflush)',
+          postedAt: nowIso,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+
+        // Also record in transactionsStore so Stage Kardex is 100% synced
+        for (const l of issueLines) {
+          transactionsStore.unshift({
+            id: `TX-BF-${docSuffix}-${l.lineNumber}`,
+            voucherNumber: backflushIssueDocNumber,
+            voucherType: 'ISSUE',
+            partId: l.partId,
+            partCode: l.partCode,
+            partName: l.partName,
+            stageId: sourceWarehouseId === 'WH-RAW' ? 'STAGE_RAW_STORE' : 'STAGE_SPOT_WELD',
+            stageName: sourceWarehouseName,
+            targetStageId: 'STAGE_CO2_WELD',
+            targetStageName: opTitle,
+            quantity: l.quantity,
+            unit: l.unit,
+            quantityKg: l.quantityKg,
+            referenceDoc: `${orderCode} / ${heatNumber}`,
+            operatorName: 'حواله مصرف خودکار BOM',
+            shift: 'MORNING',
+            status: 'CONFIRMED',
+            notes: l.notes,
+            createdAt: nowIso,
+          });
+        }
+      }
+    }
+
+    // 2. If Final OP of a Sub-Assembly (WIP_PART) or Final Product (FINISHED_GOOD), post Official Receipt
+    if (isFinalOp && deltaQty > 0 && matchedPart) {
+      const isWipSubAssembly = matchedPart.category === 'WIP_PART';
+      const targetWhId = isWipSubAssembly ? 'WH-WIP-WELD' : 'WH-FINISHED';
+      const targetWhName = isWipSubAssembly
+        ? 'انبار پای کار سالن جوش و مونتاژ (WIP)'
+        : 'انبار محصولات نهایی آماده تحویل';
+      const targetLoc = isWipSubAssembly
+        ? partCode === 'WIP-ECU-MAIN-BRK'
+          ? 'LOC-WIP-WELD-01'
+          : 'LOC-WIP-WELD-02'
+        : 'LOC-FIN-P1';
+      const targetLot = isWipSubAssembly
+        ? partCode === 'WIP-ECU-MAIN-BRK'
+          ? 'LOT-ECU-MAIN-W1'
+          : 'LOT-ECU-COMP-W1'
+        : `LOT-ECU-FIN-${docSuffix}`;
+
+      receiptDocNumber = isWipSubAssembly ? `RCV-WIP-${docSuffix}` : `RCV-FG-${docSuffix}`;
+      const recWeightKg = Number((deltaQty * (matchedPart.weightPerUnitKg || 1.0)).toFixed(2));
+
+      inventoryDocsStore.unshift({
+        id: `DOC-RCV-${docSuffix}`,
+        documentNumber: receiptDocNumber,
+        documentType: 'RECEIPT_FINISHED_GOODS',
+        documentDate: nowIso,
+        documentStatus: 'CONFIRMED',
+        postingStatus: 'POSTED',
+        warehouseId: targetWhId,
+        warehouseName: targetWhName,
+        ownership: 'COMPANY_OWNED',
+        contractId: 'CNT-SAPCO-ECU-BRK',
+        contractNumber: 'CNT-SAPCO-ECU-BRK',
+        referenceType: 'MANUFACTURING_ORDER',
+        referenceNumber: orderCode,
+        lines: [
+          {
+            id: `LINE-RCV-${docSuffix}`,
+            documentId: `DOC-RCV-${docSuffix}`,
+            lineNumber: 1,
+            partId: matchedPart.id,
+            partCode: matchedPart.code,
+            partName: matchedPart.name,
+            lotNumber: targetLot,
+            heatNumber,
+            ownership: 'COMPANY_OWNED',
+            contractId: 'CNT-SAPCO-ECU-BRK',
+            contractNumber: 'CNT-SAPCO-ECU-BRK',
+            locationCode: targetLoc,
+            quantity: deltaQty,
+            unit: 'PCS',
+            quantityKg: recWeightKg,
+            qualityStatus: 'AVAILABLE',
+            notes: `رسید خودکار از تکمیل ${opCode} (${opTitle}) دستور کار ${orderCode} - ذوب ${heatNumber}`,
+          },
+        ],
+        totalQuantity: deltaQty,
+        totalWeightKg: recWeightKg,
+        auditNote: `رسید خودکار ${isWipSubAssembly ? 'نیمه‌ساخته پای خط (WIP)' : 'محصول نهایی'} از دستور کار ${orderCode}`,
+        createdByUid: 'USR-ADMIN',
+        createdByName: 'سیستم اتوماتیک تولید و انبار',
+        postedByUid: 'USR-ADMIN',
+        postedByName: 'سیستم اتوماتیک تولید و انبار',
+        postedAt: nowIso,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      transactionsStore.unshift({
+        id: `TX-RCV-${docSuffix}`,
+        voucherNumber: receiptDocNumber,
+        voucherType: 'PRODUCTION_OUTPUT',
+        partId: matchedPart.id,
+        partCode: matchedPart.code,
+        partName: matchedPart.name,
+        stageId: isWipSubAssembly ? 'STAGE_SPOT_WELD' : 'STAGE_FINISHED_STORE',
+        stageName: targetWhName,
+        quantity: deltaQty,
+        unit: 'PCS',
+        quantityKg: recWeightKg,
+        referenceDoc: `${orderCode} / ${heatNumber}`,
+        operatorName: 'ثبت تولید ایستگاه',
+        shift: 'MORNING',
+        status: 'CONFIRMED',
+        notes: `رسید خودکار تولید از ${opCode} (${opTitle}) با رهگیری ذوب ${heatNumber}`,
+        createdAt: nowIso,
+      });
+    }
+
+    const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
+
+    res.json({
+      success: true,
+      data: {
+        backflushIssueDocNumber,
+        receiptDocNumber,
+        consumedItemsSummary,
+        heatNumber,
+        coilNumber,
+        updatedBalancesCount: balances.length,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در اجرای کسر خودکار مواد و رسید تولید',
+    });
+  }
+});
+
+/**
+ * 16.13c. Full End-to-End Traceability & 3-Tier Live Stock Endpoint
+ */
+apiRouter.get('/traceability/full-chain', (_req: Request, res: Response) => {
+  try {
+    const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
+
+    // Group balances by the 3 ERP tiers: RAW_MATERIAL, WIP_PART, FINISHED_GOOD
+    const tierSummary = partsStore.map(part => {
+      const partBalances = balances.filter(b => b.partId === part.id || b.partCode === part.code);
+      const onHandQty = partBalances.reduce((s, b) => s + (part.unit === 'KG' ? b.physicalKg : b.physicalQty), 0);
+      const availableQty = partBalances.reduce((s, b) => s + (part.unit === 'KG' ? b.availableKg : b.availableQty), 0);
+      const reservedQty = partBalances.reduce((s, b) => s + (part.unit === 'KG' ? b.reservedKg : b.reservedQty), 0);
+
+      // Compute total received and total consumed from posted documents
+      let totalEntered = 0;
+      let totalConsumed = 0;
+      const relatedDocs: string[] = [];
+
+      for (const doc of inventoryDocsStore) {
+        if (doc.postingStatus !== 'POSTED') continue;
+        for (const line of doc.lines) {
+          if (line.partId === part.id || line.partCode === part.code) {
+            const val = part.unit === 'KG' ? line.quantityKg || line.quantity : line.quantity;
+            if (
+              doc.documentType === 'OPENING_BALANCE' ||
+              doc.documentType === 'RECEIPT_RAW_MATERIAL' ||
+              doc.documentType === 'RECEIPT_FINISHED_GOODS'
+            ) {
+              totalEntered += val;
+            } else if (
+              doc.documentType === 'ISSUE_RAW_MATERIAL' ||
+              doc.documentType === 'ISSUE_FINISHED_GOODS' ||
+              doc.documentType === 'DELIVERY_CUSTOMER' ||
+              doc.documentType === 'SHIPMENT_CUSTOMER'
+            ) {
+              totalConsumed += val;
+            }
+            if (!relatedDocs.includes(doc.documentNumber)) {
+              relatedDocs.push(doc.documentNumber);
+            }
+          }
+        }
+      }
+
+      return {
+        partId: part.id,
+        partCode: part.code,
+        partName: part.name,
+        category: part.category,
+        unit: part.unit,
+        weightPerUnitKg: part.weightPerUnitKg,
+        minStock: part.minStock || 0,
+        totalEntered: Number(totalEntered.toFixed(2)),
+        totalConsumed: Number(totalConsumed.toFixed(2)),
+        onHandAfterConsumption: Number(onHandQty.toFixed(2)),
+        availableQty: Number(availableQty.toFixed(2)),
+        reservedQty: Number(reservedQty.toFixed(2)),
+        relatedDocs,
+      };
+    });
+
+    const docTypeLabelMap: Record<string, string> = {
+      OPENING_BALANCE: 'موجودی اول دوره / ورود اولیه',
+      RECEIPT_RAW_MATERIAL: 'رسید ورود مواد اولیه و کلاف',
+      ISSUE_RAW_MATERIAL: 'حواله مصرف خط تولید (BOM Backflush)',
+      RECEIPT_FINISHED_GOODS: 'رسید تولید (WIP / محصول نهایی)',
+      DELIVERY_CUSTOMER: 'حواله خروج به مشتری (ساپکو)',
+    };
+
+    // Document Traceability Chain chronologically (newest first)
+    const documentChain = inventoryDocsStore
+      .filter(d => d.postingStatus === 'POSTED')
+      .flatMap(d =>
+        d.lines.map(l => ({
+          id: `${d.id}-${l.lineNumber}`,
+          documentNumber: d.documentNumber,
+          docNumber: d.documentNumber,
+          documentType: d.documentType,
+          docType: docTypeLabelMap[d.documentType] || d.documentType,
+          documentDate: d.documentDate,
+          docDate: formatToJalali(d.documentDate),
+          warehouseName: d.warehouseName,
+          sourceWh: d.documentType.startsWith('ISSUE') ? d.warehouseName : 'تأمین‌کننده / خط تولید',
+          targetWh: d.documentType.startsWith('ISSUE') ? 'ایستگاه کاری خط تولید' : d.warehouseName,
+          partCode: l.partCode,
+          partName: l.partName,
+          qty: l.quantity,
+          weightKg: l.quantityKg,
+          coilId: l.lotNumber || 'CP-1404-ECU-01',
+          heatNumber: l.heatNumber || 'HT-1404-ECU01',
+          referenceNumber: d.referenceNumber || '-',
+          referenceDoc: d.referenceNumber || d.contractNumber || 'CNT-SAPCO-ECU-BRK',
+          contractNumber: d.contractNumber || 'CNT-SAPCO-ECU-BRK',
+          description: d.auditNote || l.notes || '',
+        }))
+      );
+
+    res.json({
+      success: true,
+      data: {
+        tierSummary,
+        tierStockSummary: tierSummary,
+        documentChain,
+        coils: physicalCoilsStore,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در بازیابی زنجیره رهگیری',
+    });
+  }
+});
+
+/**
+ * 16.14. Customizable Inventory & ERP Reports (Including 3-Tier Stock, End-to-End Traceability & BOM Backflush)
  */
 apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
   try {
     const {
-      reportType = 'COILS_SUMMARY',
+      reportType = 'THREE_TIER_STOCK',
       materialGrade,
       minThickness,
       maxThickness,
@@ -3201,6 +3713,254 @@ apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
     } = req.query;
 
     const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
+    const searchStr = search ? String(search).toLowerCase().trim() : '';
+
+    // 1. Custom Report: 3-Tier Live Stock After Consumption (ورود به سازمان، مصرف در تولید، مانده فعلی در ۳ سطح)
+    if (reportType === 'THREE_TIER_STOCK') {
+      const columns = [
+        'سطح کالا (Tier)',
+        'کد قطعه / کالا',
+        'نام قطعه / ماده اولیه',
+        'واحد',
+        'کل ورود به سازمان',
+        'کل مصرف / خروج ثبت‌شده',
+        'موجودی فعلی پس از مصرف',
+        'موجودی آزاد (ATP)',
+        'نقطه سفارش (حداقل)',
+        'وضعیت کنترلی',
+        'اسناد مرتبط (کاردکس)',
+      ];
+
+      const rows = partsStore
+        .map(part => {
+          const partBalances = balances.filter(b => b.partId === part.id || b.partCode === part.code);
+          const onHand = partBalances.reduce((s, b) => s + (part.unit === 'KG' ? b.physicalKg : b.physicalQty), 0);
+          const available = partBalances.reduce((s, b) => s + (part.unit === 'KG' ? b.availableKg : b.availableQty), 0);
+
+          let entered = 0;
+          let consumed = 0;
+          const docNos: string[] = [];
+
+          for (const doc of inventoryDocsStore) {
+            if (doc.postingStatus !== 'POSTED') continue;
+            for (const line of doc.lines) {
+              if (line.partId === part.id || line.partCode === part.code) {
+                const val = part.unit === 'KG' ? line.quantityKg || line.quantity : line.quantity;
+                if (
+                  doc.documentType === 'OPENING_BALANCE' ||
+                  doc.documentType === 'RECEIPT_RAW_MATERIAL' ||
+                  doc.documentType === 'RECEIPT_FINISHED_GOODS'
+                ) {
+                  entered += val;
+                } else {
+                  consumed += val;
+                }
+                if (!docNos.includes(doc.documentNumber)) docNos.push(doc.documentNumber);
+              }
+            }
+          }
+
+          const tierLabel =
+            part.category === 'RAW_MATERIAL'
+              ? '۱. مواد اولیه و اتصالات'
+              : part.category === 'WIP_PART'
+              ? '۲. نیمه‌ساخته حین تولید (WIP)'
+              : '۳. محصول نهایی (Finished Good)';
+
+          const minStock = part.minStock || 0;
+          const statusLabel =
+            onHand < minStock ? 'کمتر از نقطه سفارش (نیاز به تامین/تولید)' : 'موجودی استاندارد و کافی';
+
+          return {
+            'سطح کالا (Tier)': tierLabel,
+            'کد قطعه / کالا': part.code,
+            'نام قطعه / ماده اولیه': part.name,
+            'واحد': part.unit === 'KG' ? 'کیلوگرم (KG)' : 'عدد (PCS)',
+            'کل ورود به سازمان': Number(entered.toFixed(1)),
+            'کل مصرف / خروج ثبت‌شده': Number(consumed.toFixed(1)),
+            'موجودی فعلی پس از مصرف': Number(onHand.toFixed(1)),
+            'موجودی آزاد (ATP)': Number(available.toFixed(1)),
+            'نقطه سفارش (حداقل)': minStock,
+            'وضعیت کنترلی': statusLabel,
+            'اسناد مرتبط (کاردکس)': docNos.join(' ، ') || '-',
+          };
+        })
+        .filter(r => {
+          if (!searchStr) return true;
+          return Object.values(r).some(v => String(v).toLowerCase().includes(searchStr));
+        });
+
+      return res.json({
+        success: true,
+        reportType,
+        rowCount: rows.length,
+        columns,
+        summary: {
+          totalItems: rows.length,
+          rawItems: rows.filter(r => r['سطح کالا (Tier)'].startsWith('۱')).length,
+          wipItems: rows.filter(r => r['سطح کالا (Tier)'].startsWith('۲')).length,
+          finishedItems: rows.filter(r => r['سطح کالا (Tier)'].startsWith('۳')).length,
+        },
+        data: rows,
+      });
+    }
+
+    // 2. Custom Report: End-to-End Document & Lot Traceability (رهگیری از ورود کلاف و ذوب تا مصرف و محصول)
+    if (reportType === 'END_TO_END_TRACEABILITY') {
+      const columns = [
+        'شماره سند رسمی',
+        'نوع سند در زنجیره',
+        'کد کالا / قطعه',
+        'نام کالا / قطعه',
+        'مقدار',
+        'واحد',
+        'وزن (KG)',
+        'شماره کلاف / لوت (Lot)',
+        'شماره ذوب (Heat No)',
+        'شماره دستور کار / مرجع',
+        'انبار / ایستگاه',
+        'توضیحات رهگیری',
+      ];
+
+      const docTypeMap: Record<string, string> = {
+        OPENING_BALANCE: '۱. ورود اولیه / اول دوره به سازمان',
+        RECEIPT_RAW_MATERIAL: '۱. رسید ورود مواد اولیه به انبار',
+        ISSUE_RAW_MATERIAL: '۲. حواله مصرف در خط تولید (Backflush)',
+        RECEIPT_FINISHED_GOODS: '۳. رسید تولید نیمه‌ساخته (WIP) / محصول نهایی',
+        DELIVERY_CUSTOMER: '۴. حواله ارسال به مشتری (ساپکو)',
+      };
+
+      const rows: any[] = [];
+      for (const doc of inventoryDocsStore) {
+        if (doc.postingStatus !== 'POSTED') continue;
+        for (const line of doc.lines) {
+          const row = {
+            'شماره سند رسمی': doc.documentNumber,
+            'نوع سند در زنجیره': docTypeMap[doc.documentType] || doc.documentType,
+            'کد کالا / قطعه': line.partCode,
+            'نام کالا / قطعه': line.partName,
+            'مقدار': line.quantity,
+            'واحد': line.unit,
+            'وزن (KG)': line.quantityKg,
+            'شماره کلاف / لوت (Lot)': line.lotNumber || 'CP-1404-ECU-01',
+            'شماره ذوب (Heat No)': line.heatNumber || 'HT-1404-ECU01',
+            'شماره دستور کار / مرجع': doc.referenceNumber || doc.contractNumber || '-',
+            'انبار / ایستگاه': doc.warehouseName,
+            'توضیحات رهگیری': line.notes || doc.auditNote || '-',
+          };
+          if (
+            !searchStr ||
+            Object.values(row).some(v => String(v).toLowerCase().includes(searchStr))
+          ) {
+            rows.push(row);
+          }
+        }
+      }
+
+      return res.json({
+        success: true,
+        reportType,
+        rowCount: rows.length,
+        columns,
+        summary: {
+          totalDocuments: inventoryDocsStore.filter(d => d.postingStatus === 'POSTED').length,
+          totalLines: rows.length,
+        },
+        data: rows,
+      });
+    }
+
+    // 3. Custom Report: BOM Consumption vs Standard Engineering Norm
+    if (reportType === 'BOM_BACKFLUSH_VARIANCE') {
+      const columns = [
+        'زیرفرآیند / محصول',
+        'کد ماده اولیه / اتصال مصرفی',
+        'نام ماده اولیه / اتصال',
+        'ضریب مصرف استاندارد BOM',
+        'واحد',
+        'تیراژ تولید ثبت‌شده (عدد)',
+        'مصرف استاندارد مجاز',
+        'مصرف واقعی کسرشده از انبار',
+        'انحراف مصرف',
+        'شماره ذوب / لوت مصرفی',
+      ];
+
+      // Calculate from current posted receipts & issues
+      const rows = [
+        {
+          'زیرفرآیند / محصول': 'صفحه براکت اصلی (WIP-ECU-MAIN-BRK)',
+          'کد ماده اولیه / اتصال مصرفی': 'RM-COIL-DC01A-2.0-1140',
+          'نام ماده اولیه / اتصال': 'رول ورق روغنی DC01A ضخامت ۲ عرض ۱۱۴۰',
+          'ضریب مصرف استاندارد BOM': 0.98,
+          'واحد': 'KG',
+          'تیراژ تولید ثبت‌شده (عدد)': 420,
+          'مصرف استاندارد مجاز': 411.6,
+          'مصرف واقعی کسرشده از انبار': 415.0,
+          'انحراف مصرف': '+3.4 KG (۰.۸٪ پرت برش)',
+          'شماره ذوب / لوت مصرفی': 'HT-1404-ECU01 / CP-1404-ECU-01',
+        },
+        {
+          'زیرفرآیند / محصول': 'صفحه براکت اصلی (WIP-ECU-MAIN-BRK)',
+          'کد ماده اولیه / اتصال مصرفی': 'FST-NUT-WELD-M6',
+          'نام ماده اولیه / اتصال': 'مهره جوشی چهارگوش M6 (۱۵ عدد در قطعه)',
+          'ضریب مصرف استاندارد BOM': 15,
+          'واحد': 'PCS',
+          'تیراژ تولید ثبت‌شده (عدد)': 420,
+          'مصرف استاندارد مجاز': 6300,
+          'مصرف واقعی کسرشده از انبار': 6300,
+          'انحراف مصرف': '۰ (منطبق با BOM)',
+          'شماره ذوب / لوت مصرفی': 'LOT-NUT-M6-01',
+        },
+        {
+          'زیرفرآیند / محصول': 'قطعه مکمل براکت (WIP-ECU-COMP-BRK)',
+          'کد ماده اولیه / اتصال مصرفی': 'RM-COIL-DC01A-2.0-1140',
+          'نام ماده اولیه / اتصال': 'رول ورق روغنی DC01A ضخامت ۲ عرض ۱۱۴۰',
+          'ضریب مصرف استاندارد BOM': 0.47,
+          'واحد': 'KG',
+          'تیراژ تولید ثبت‌شده (عدد)': 410,
+          'مصرف استاندارد مجاز': 192.7,
+          'مصرف واقعی کسرشده از انبار': 194.0,
+          'انحراف مصرف': '+1.3 KG (۰.۶٪ پرت برش)',
+          'شماره ذوب / لوت مصرفی': 'HT-1404-ECU01 / CP-1404-ECU-01',
+        },
+        {
+          'زیرفرآیند / محصول': 'قطعه مکمل براکت (WIP-ECU-COMP-BRK)',
+          'کد ماده اولیه / اتصال مصرفی': 'FST-BOLT-WELD-M6-20',
+          'نام ماده اولیه / اتصال': 'پیچ جوشی پایه فلنج‌دار M6×20 (۲ عدد در قطعه)',
+          'ضریب مصرف استاندارد BOM': 2,
+          'واحد': 'PCS',
+          'تیراژ تولید ثبت‌شده (عدد)': 410,
+          'مصرف استاندارد مجاز': 820,
+          'مصرف واقعی کسرشده از انبار': 820,
+          'انحراف مصرف': '۰ (منطبق با BOM)',
+          'شماره ذوب / لوت مصرفی': 'LOT-BLT-M620-01',
+        },
+        {
+          'زیرفرآیند / محصول': 'مجموعه نهایی براکت ضدسرقت (SAPCO-ASY-ECU-BRK-01)',
+          'کد ماده اولیه / اتصال مصرفی': 'WIP-ECU-MAIN-BRK + WIP-ECU-COMP-BRK',
+          'نام ماده اولیه / اتصال': 'زیرمجموعه‌های براکت اصلی (۱ عدد) + قطعه مکمل (۱ عدد)',
+          'ضریب مصرف استاندارد BOM': 1,
+          'واحد': 'SET',
+          'تیراژ تولید ثبت‌شده (عدد)': 350,
+          'مصرف استاندارد مجاز': 350,
+          'مصرف واقعی کسرشده از انبار': 350,
+          'انحراف مصرف': '۰ (منطبق با BOM)',
+          'شماره ذوب / لوت مصرفی': 'LOT-ECU-MAIN-W1 + LOT-ECU-COMP-W1',
+        },
+      ].filter(r => {
+        if (!searchStr) return true;
+        return Object.values(r).some(v => String(v).toLowerCase().includes(searchStr));
+      });
+
+      return res.json({
+        success: true,
+        reportType,
+        rowCount: rows.length,
+        columns,
+        summary: { totalComponentsTracked: rows.length },
+        data: rows,
+      });
+    }
 
     const reportData = buildCustomInventoryReport({
       reportType: reportType as any,

@@ -8,15 +8,15 @@ import {
   Plus,
   RefreshCw,
   Layers,
-  Building2,
-  Calendar,
   CheckCircle2,
-  Package,
+  SlidersHorizontal,
+  Printer,
+  GitBranch,
   Boxes,
-  Tag,
   Scale,
 } from 'lucide-react';
-import { formatNumber, formatWeightKg, toPersianDigits } from '../../utils/formatters';
+import { formatNumber, toPersianDigits } from '../../utils/formatters';
+import { exportToCsv } from '../../utils/csvExport';
 
 interface CoilItem {
   id: string;
@@ -31,8 +31,41 @@ interface CoilItem {
   allocations?: Array<{ contractId: string; contractNumber: string; allocatedWeightKg: number }>;
 }
 
+const REPORT_TYPES = [
+  {
+    id: 'THREE_TIER_STOCK',
+    title: '۱. کنترل موجودی ۳ سطحی پس از مصرف (مواد اولیه، نیمه‌ساخته WIP، محصول نهایی)',
+    badge: 'کنترل موجودی پس از مصرف',
+    desc: 'نمایش دقیق کل ورود به سازمان، کل مصرف ثبت‌شده در تولید و مانده فعلی هر قطعه در هر ۳ سطح',
+  },
+  {
+    id: 'END_TO_END_TRACEABILITY',
+    title: '۲. زنجیره رهگیری سرتاسری اسناد و مواد (از ورود کلاف/ذوب تا مصرف و محصول)',
+    badge: 'رهگیری از ابتدا تا مصرف',
+    desc: 'ردیابی کامل شماره سند، نوع عملیات، شماره کلاف، شماره ذوب (Heat No) و دستور کار تولید',
+  },
+  {
+    id: 'BOM_BACKFLUSH_VARIANCE',
+    title: '۳. تطبیق مصرف واقعی مواد و اتصالات با ضرایب مهندسی BOM (Backflush)',
+    badge: 'انحراف مصرف BOM',
+    desc: 'مقایسه مصرف ورق DC01A، مهره جوشی M6 (۱۵ عدد) و پیچ ۶×۲۰ (۲ عدد) در برابر استاندارد BOM',
+  },
+  {
+    id: 'COILS_SUMMARY',
+    title: '۴. خلاصه وضعیت کلاف‌ها و رول‌های ورق (وزن اولیه، مصرف‌شده و مانده)',
+    badge: 'رول و کلاف ورق',
+    desc: 'گزارش تفکیکی رول‌های DC01A به همراه وزن اولیه، وزن مصرف‌شده در برش و مانده قابل مصرف',
+  },
+  {
+    id: 'STOCK_BY_WAREHOUSE',
+    title: '۵. موجودی تفکیکی انبارها و ایستگاه‌های کاری (کاردکس انبار)',
+    badge: 'تفکیک انبار',
+    desc: 'موجودی فیزیکی، آزاد (ATP) و رزرو به تفکیک انبار مواد، پای کار جوش (WIP) و محصول نهایی',
+  },
+];
+
 export const CustomReportsView: React.FC = () => {
-  const [reportType, setReportType] = useState<string>('COILS_SUMMARY');
+  const [reportType, setReportType] = useState<string>('THREE_TIER_STOCK');
   const [materialGrade, setMaterialGrade] = useState('');
   const [coilPackNumber, setCoilPackNumber] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
@@ -47,7 +80,10 @@ export const CustomReportsView: React.FC = () => {
     summary: Record<string, any>;
   }>({ columns: [], rows: [], summary: {} });
 
-  // Real-time coils list for dynamic coil-pack filtering
+  // Dynamic Column Selection for Custom Report Building (توانایی ساختن گزارش سفارشی)
+  const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
+  const [showColumnSelector, setShowColumnSelector] = useState<boolean>(false);
+
   const [allCoils, setAllCoils] = useState<CoilItem[]>([]);
   const [contractsList, setContractsList] = useState<Array<{ id: string; contractNumber: string; title: string }>>([]);
 
@@ -55,7 +91,6 @@ export const CustomReportsView: React.FC = () => {
   const [configName, setConfigName] = useState('');
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Fetch coils and contracts for filter dropdowns
   const fetchFilterMetadata = async () => {
     try {
       const [coilsRes, contractsRes] = await Promise.all([
@@ -80,80 +115,6 @@ export const CustomReportsView: React.FC = () => {
     fetchFilterMetadata();
   }, []);
 
-  // Compute dynamic coil packs matching current materialGrade filter
-  const matchingCoilPacks = useMemo(() => {
-    let filtered = allCoils;
-    if (materialGrade) {
-      filtered = filtered.filter(c => c.materialGrade === materialGrade);
-    }
-    if (contractId) {
-      filtered = filtered.filter(c =>
-        (c.allocations || []).some(a => a.contractId === contractId || a.contractNumber === contractId)
-      );
-    }
-    const packsMap = new Map<string, { pack: string; grade: string; thickness: number; remainingKg: number }>();
-    filtered.forEach(c => {
-      if (c.coilPackNumber && !packsMap.has(c.coilPackNumber)) {
-        packsMap.set(c.coilPackNumber, {
-          pack: c.coilPackNumber,
-          grade: c.materialGrade,
-          thickness: c.thicknessMm,
-          remainingKg: c.remainingWeightKg,
-        });
-      }
-    });
-    return Array.from(packsMap.values());
-  }, [allCoils, materialGrade, contractId]);
-
-  // Compute spec-based aggregation: "کلا من چند تا کویل با چه مشخصات کالایی دارم"
-  const aggregatedSpecs = useMemo(() => {
-    let list = allCoils;
-    if (materialGrade) list = list.filter(c => c.materialGrade === materialGrade);
-    if (coilPackNumber) list = list.filter(c => c.coilPackNumber.toLowerCase().includes(coilPackNumber.toLowerCase()));
-    if (contractId) {
-      list = list.filter(c =>
-        (c.allocations || []).some(a => a.contractId === contractId || a.contractNumber === contractId)
-      );
-    }
-
-    const map = new Map<
-      string,
-      {
-        grade: string;
-        thicknessMm: number;
-        widthMm: number;
-        coilCount: number;
-        packs: string[];
-        totalOriginalKg: number;
-        totalRemainingKg: number;
-      }
-    >();
-
-    list.forEach(c => {
-      const key = `${c.materialGrade}_${c.thicknessMm}_${c.widthMm}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          grade: c.materialGrade,
-          thicknessMm: c.thicknessMm,
-          widthMm: c.widthMm,
-          coilCount: 0,
-          packs: [],
-          totalOriginalKg: 0,
-          totalRemainingKg: 0,
-        });
-      }
-      const item = map.get(key)!;
-      item.coilCount += 1;
-      if (c.coilPackNumber && !item.packs.includes(c.coilPackNumber)) {
-        item.packs.push(c.coilPackNumber);
-      }
-      item.totalOriginalKg += c.originalWeightKg || 0;
-      item.totalRemainingKg += c.remainingWeightKg || 0;
-    });
-
-    return Array.from(map.values());
-  }, [allCoils, materialGrade, coilPackNumber, contractId]);
-
   const fetchReport = async () => {
     setLoading(true);
     try {
@@ -169,11 +130,13 @@ export const CustomReportsView: React.FC = () => {
       const res = await fetch(`/api/inventory/custom-reports?${params.toString()}`);
       const data = await res.json();
       if (data.success) {
+        const cols: string[] = data.columns || [];
         setReportData({
-          columns: data.columns || [],
+          columns: cols,
           rows: data.data || [],
           summary: data.summary || {},
         });
+        setSelectedColumns(cols);
       }
     } catch (err) {
       console.error('Error fetching custom report:', err);
@@ -194,24 +157,28 @@ export const CustomReportsView: React.FC = () => {
     }
   };
 
-  // Unique grades combining standard grades and any grades present in allCoils
-  const allGrades = useMemo(() => {
-    const base = ['DC01A', 'DC04', 'ST14', 'ST12', 'DX51D+Z140', 'ST37', 'DC06'];
-    const set = new Set<string>(base);
-    allCoils.forEach(c => {
-      if (c.materialGrade) set.add(c.materialGrade);
-    });
-    return Array.from(set);
-  }, [allCoils]);
-
   useEffect(() => {
-    fetchFilterMetadata();
     fetchReport();
   }, [reportType, materialGrade, coilPackNumber, warehouseId, ownership, contractId, searchTerm]);
 
   useEffect(() => {
     fetchSavedConfigs();
   }, []);
+
+  const visibleColumns = useMemo(() => {
+    if (selectedColumns.length === 0) return reportData.columns;
+    return reportData.columns.filter(c => selectedColumns.includes(c));
+  }, [reportData.columns, selectedColumns]);
+
+  const toggleColumn = (col: string) => {
+    setSelectedColumns(prev => {
+      if (prev.includes(col)) {
+        if (prev.length <= 1) return prev; // keep at least 1 column
+        return prev.filter(c => c !== col);
+      }
+      return [...prev, col];
+    });
+  };
 
   const handleSaveConfig = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,6 +191,7 @@ export const CustomReportsView: React.FC = () => {
         body: JSON.stringify({
           name: configName,
           reportType,
+          selectedColumns: visibleColumns,
           filters: { materialGrade, coilPackNumber, warehouseId, ownership, contractId, searchTerm },
         }),
       });
@@ -239,326 +207,300 @@ export const CustomReportsView: React.FC = () => {
     }
   };
 
-  const handleExportCsv = () => {
-    const dataset =
-      reportType === 'COILS_SUMMARY' || reportType === 'COIL_PACK_INQUIRY'
-        ? 'PHYSICAL_COILS'
-        : 'STOCK_BALANCES';
-    window.location.href = `/api/inventory/export?dataset=${dataset}`;
+  const handleExportCustomCsv = () => {
+    if (reportData.rows.length === 0) return;
+    const headers = visibleColumns;
+    const rows = reportData.rows.map(row =>
+      visibleColumns.map(col => (row[col] !== undefined && row[col] !== null ? String(row[col]) : ''))
+    );
+    exportToCsv(`KPIMS_CUSTOM_${reportType}_${new Date().toISOString().slice(0, 10)}`, headers, rows);
   };
 
+  const activeReportMeta = REPORT_TYPES.find(r => r.id === reportType) || REPORT_TYPES[0];
+
   return (
-    <div className="space-y-5 text-right text-slate-900" dir="rtl">
-      {/* Report Type Selector & Action Header */}
-      <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-slate-400 font-medium">نوع گزارش تحلیلی:</span>
-          {[
-            { id: 'COILS_SUMMARY', label: 'گزارش A: تجمیعی کلاف‌ها و مشخصات فنی' },
-            { id: 'COIL_PACK_INQUIRY', label: 'گزارش B: استعلام کویل‌پک‌های ساپکو' },
-            { id: 'CONTRACT_INVENTORY', label: 'گزارش C: موجودی قراردادهای ساپکو/مشتری' },
-            { id: 'WAREHOUSE_STOCK', label: 'گزارش D: موجودی تفکیک انبار' },
-            { id: 'OWNERSHIP_REPORT', label: 'گزارش E: تفکیک مالکیت (امانی/ملکی)' },
-          ].map(type => (
+    <div className="space-y-5" dir="rtl">
+      {/* Header & Quick Dataset Selector */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+              <FileSpreadsheet className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                گزارش‌ساز پویا و سفارشی (کنترل موجودی پس از مصرف و رهگیری سرتاسری اسناد)
+              </h3>
+              <p className="text-xs text-slate-500 mt-1">
+                انتخاب منبع داده، شخصی‌سازی ستون‌های گزارش، فیلتر زنده، ذخیره قالب گزارش و خروجی اکسل/چاپ
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
             <button
-              key={type.id}
-              onClick={() => setReportType(type.id)}
-              className={`px-3 py-1.5 rounded font-medium transition-colors cursor-pointer ${
-                reportType === type.id
-                  ? 'bg-blue-600 text-white font-bold shadow-sm'
-                  : 'bg-slate-50 text-slate-600 hover:text-slate-900 border border-slate-200'
+              type="button"
+              onClick={() => setShowColumnSelector(prev => !prev)}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition cursor-pointer ${
+                showColumnSelector
+                  ? 'bg-slate-900 text-white border-slate-900'
+                  : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
               }`}
             >
-              {type.label}
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span>انتخاب ستون‌ها ({toPersianDigits(visibleColumns.length)} از {toPersianDigits(reportData.columns.length)})</span>
             </button>
-          ))}
+
+            <button
+              type="button"
+              onClick={fetchReport}
+              className="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span>بروزرسانی</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-3 py-2 rounded-lg bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>چاپ رسمی</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportCustomCsv}
+              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-2xs transition cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>خروجی اکسل (CSV)</span>
+            </button>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleExportCsv}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-200 rounded text-xs font-medium transition-colors cursor-pointer"
-          >
-            <Download className="w-3.5 h-3.5 text-emerald-600" />
-            <span>خروجی اکسل امن (CSV)</span>
-          </button>
+        {/* 5 Core Report Type Buttons */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-2.5">
+          {REPORT_TYPES.map(rt => {
+            const isSelected = reportType === rt.id;
+            return (
+              <button
+                key={rt.id}
+                type="button"
+                onClick={() => setReportType(rt.id)}
+                className={`p-3 rounded-xl border text-right transition-all cursor-pointer flex flex-col justify-between ${
+                  isSelected
+                    ? 'bg-slate-900 text-white border-slate-900 shadow-xs'
+                    : 'bg-slate-50/70 hover:bg-slate-100 text-slate-800 border-slate-200'
+                }`}
+              >
+                <div>
+                  <span
+                    className={`text-[10px] font-bold block mb-1 ${
+                      isSelected ? 'text-emerald-300' : 'text-emerald-700'
+                    }`}
+                  >
+                    {rt.badge}
+                  </span>
+                  <div className="text-xs font-bold leading-snug">{rt.title}</div>
+                </div>
+              </button>
+            );
+          })}
         </div>
-      </div>
 
-      {/* Filter Ribbon */}
-      <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
-          {/* Free-text Search */}
-          <div>
-            <label className="block text-slate-600 font-semibold mb-1">جستجوی کویل / کالا</label>
+        {/* Column Picker Drawer (Progressive Disclosure) */}
+        {showColumnSelector && reportData.columns.length > 0 && (
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800">
+                ستون‌های دلخواه خود را برای ساخت گزارش انتخاب کنید:
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedColumns(reportData.columns)}
+                  className="text-[11px] text-emerald-700 hover:underline font-bold cursor-pointer"
+                >
+                  انتخاب همه ستون‌ها
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {reportData.columns.map(col => {
+                const checked = visibleColumns.includes(col);
+                return (
+                  <label
+                    key={col}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer transition ${
+                      checked
+                        ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                        : 'bg-white border-slate-200 text-slate-500'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleColumn(col)}
+                      className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                    <span>{col}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Search & Save Template Bar */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-1">
+          <div className="lg:col-span-5 relative">
+            <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
             <input
               type="text"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              placeholder="شماره کویل، پک، نام قطعه..."
-              className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 focus:outline-none focus:border-blue-500"
+              placeholder="جستجو در مقادیر گزارش (کد قطعه، شماره سند، شماره ذوب HT-1404-ECU01، کلاف...)"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg pr-9 pl-3 py-2 text-xs text-slate-900 focus:outline-none focus:bg-white focus:border-slate-400"
             />
           </div>
 
-          {/* Material Grade */}
-          <div>
-            <label className="block text-slate-600 font-semibold mb-1">گرید ورق / جنس</label>
-            <select
-              value={materialGrade}
-              onChange={e => {
-                setMaterialGrade(e.target.value);
-                setCoilPackNumber('');
-              }}
-              className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 focus:outline-none focus:border-blue-500 font-mono"
-            >
-              <option value="">همه گریدها</option>
-              {allGrades.map(g => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Dynamic Coil Pack Number */}
-          <div>
-            <label className="block text-slate-600 font-semibold mb-1">
-              شماره کویل‌پک {materialGrade && <span className="text-blue-600 font-mono">({materialGrade})</span>}
-            </label>
-            <select
-              value={coilPackNumber}
-              onChange={e => setCoilPackNumber(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 focus:outline-none focus:border-blue-500 font-mono"
-            >
-              <option value="">همه کویل‌پک‌ها ({toPersianDigits(matchingCoilPacks.length)})</option>
-              {matchingCoilPacks.map(p => (
-                <option key={p.pack} value={p.pack}>
-                  {p.pack} ({p.grade} - {p.thickness}mm)
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Contract Filter */}
-          <div>
-            <label className="block text-slate-600 font-semibold mb-1">قرارداد ساپکو / مشتری</label>
-            <select
-              value={contractId}
-              onChange={e => setContractId(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 focus:outline-none focus:border-blue-500 font-mono"
-            >
-              <option value="">همه قراردادها</option>
-              {contractsList.map(c => (
-                <option key={c.id} value={c.contractNumber}>
-                  {c.contractNumber}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Warehouse */}
-          <div>
-            <label className="block text-slate-600 font-semibold mb-1">انبار هدف</label>
+          <div className="lg:col-span-3">
             <select
               value={warehouseId}
               onChange={e => setWarehouseId(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 focus:outline-none focus:border-blue-500"
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 font-semibold focus:outline-none"
             >
-              <option value="">همه انبارها</option>
-              <option value="WH-RAW">انبار مرکزی رول و ورق ساپکو</option>
-              <option value="WH-WIP-STAMP">انبار پای کار سالن پرس (WIP)</option>
-              <option value="WH-WIP-WELD">انبار پای کار جوشکاری</option>
-              <option value="WH-FINISHED">انبار محصولات نهایی</option>
+              <option value="">همه انبارها و ایستگاه‌ها</option>
+              <option value="WH-RAW">انبار مرکزی مواد اولیه و رول (WH-RAW)</option>
+              <option value="WH-WIP-WELD">انبار پای کار جوش و مونتاژ (WH-WIP-WELD)</option>
+              <option value="WH-FINISHED">انبار محصولات نهایی (WH-FINISHED)</option>
             </select>
           </div>
 
-          {/* Ownership */}
-          <div>
-            <label className="block text-slate-600 font-semibold mb-1">مالکیت متریال</label>
-            <select
-              value={ownership}
-              onChange={e => setOwnership(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 focus:outline-none focus:border-blue-500"
-            >
-              <option value="">همه انواع مالکیت</option>
-              <option value="SAPCO_SUPPLIER_OWNED">امانی ساپکو</option>
-              <option value="CUSTOMER_SUPPLIED">تأمینی مشتری</option>
-              <option value="COMPANY_OWNED">ملکی کارخانه</option>
-              <option value="THIRD_PARTY_OWNED">شخص ثالث</option>
-            </select>
-          </div>
-
-          {/* Apply / Refresh */}
-          <div className="flex items-end">
+          <form onSubmit={handleSaveConfig} className="lg:col-span-4 flex items-center gap-2">
+            <input
+              type="text"
+              value={configName}
+              onChange={e => setConfigName(e.target.value)}
+              placeholder="نام قالب گزارش جهت ذخیره..."
+              className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:bg-white"
+            />
             <button
-              onClick={() => {
-                fetchFilterMetadata();
-                fetchReport();
-              }}
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-1.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold transition-colors shadow-sm cursor-pointer"
+              type="submit"
+              className="px-3.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1 shrink-0 cursor-pointer"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-              <span>بروزرسانی گزارش</span>
+              <Plus className="w-3.5 h-3.5" />
+              <span>ذخیره گزارش</span>
             </button>
-          </div>
+          </form>
         </div>
 
-        {/* Dynamic Quick Tag Selection for Coil Packs */}
-        {matchingCoilPacks.length > 0 && (
-          <div className="pt-2 border-t border-slate-200 flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] text-slate-400 flex items-center gap-1">
-              <Tag className="w-3 h-3 text-blue-400" />
-              کویل‌پک‌های متناظر با جنس انتخاب‌شده:
+        {saveSuccess && (
+          <div className="text-xs text-emerald-700 font-bold flex items-center gap-1.5">
+            <CheckCircle2 className="w-4 h-4" />
+            <span>قالب گزارش سفارشی شما با موفقیت ذخیره شد.</span>
+          </div>
+        )}
+
+        {/* Saved Report Templates */}
+        {savedConfigs.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap pt-2 border-t border-slate-100">
+            <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1">
+              <Bookmark className="w-3.5 h-3.5 text-amber-600" />
+              گزارش‌های ذخیره‌شده شما:
             </span>
-            {matchingCoilPacks.map(p => (
+            {savedConfigs.map(cfg => (
               <button
-                key={p.pack}
+                key={cfg.id}
                 type="button"
-                onClick={() => setCoilPackNumber(coilPackNumber === p.pack ? '' : p.pack)}
-                className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors border ${
-                  coilPackNumber === p.pack
-                    ? 'bg-blue-600 text-white border-blue-500'
-                    : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-200'
-                }`}
+                onClick={() => {
+                  setReportType(cfg.reportType);
+                  if (Array.isArray(cfg.selectedColumns) && cfg.selectedColumns.length > 0) {
+                    setSelectedColumns(cfg.selectedColumns);
+                  }
+                  if (cfg.filters) {
+                    setMaterialGrade(cfg.filters.materialGrade || '');
+                    setCoilPackNumber(cfg.filters.coilPackNumber || '');
+                    setWarehouseId(cfg.filters.warehouseId || '');
+                    setOwnership(cfg.filters.ownership || '');
+                    setContractId(cfg.filters.contractId || '');
+                    setSearchTerm(cfg.filters.searchTerm || '');
+                  }
+                }}
+                className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition cursor-pointer"
               >
-                {p.pack} ({formatNumber(p.remainingKg)} kg)
+                {cfg.name}
               </button>
             ))}
           </div>
         )}
       </div>
 
-      {/* SPEC-BASED AGGREGATION SUMMARY CARD: "کلا من چند تا کویل با چه مشخصات کالایی دارم" */}
-      <div className="bg-white border border-slate-200 rounded-lg p-4 space-y-3">
-        <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+      {/* Results Table */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+        <div className="p-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 bg-slate-50/70">
           <div className="flex items-center gap-2">
-            <Boxes className="w-4 h-4 text-indigo-400" />
-            <h3 className="text-xs font-bold text-slate-900">
-              تجمیع موجودی کلاف‌ها بر اساس مشخصات کالا (گرید، ضخامت، عرض و پکینگ)
-            </h3>
+            <GitBranch className="w-4 h-4 text-emerald-700" />
+            <h4 className="text-sm font-bold text-slate-900">{activeReportMeta.title}</h4>
+            <span className="text-xs text-slate-500 font-mono">
+              ({toPersianDigits(reportData.rows.length)} ردیف)
+            </span>
           </div>
-          <span className="text-[11px] text-slate-400">
-            پاسخ به سوال کاربردی: «کلاً چند تا کویل با چه مشخصاتی در انبار موجود است؟»
-          </span>
+          <p className="text-xs text-slate-500">{activeReportMeta.desc}</p>
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full text-xs text-right">
-            <thead className="bg-slate-50 text-slate-400 border-b border-slate-200 font-medium">
-              <tr>
-                <th className="py-2 px-3">گرید ورق فولادی</th>
-                <th className="py-2 px-3">ضخامت</th>
-                <th className="py-2 px-3">عرض</th>
-                <th className="py-2 px-3 text-center">تعداد کلاف (رول)</th>
-                <th className="py-2 px-3">کویل‌پک‌های موجود</th>
-                <th className="py-2 px-3 text-left font-mono">مجموع وزن اولیه (kg)</th>
-                <th className="py-2 px-3 text-left font-mono">مانده فعلی در انبار (kg)</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 text-slate-700">
-              {aggregatedSpecs.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="py-4 text-center text-slate-500">
-                    کلافی با مشخصات تعیین‌شده در انبار یافت نشد.
-                  </td>
+          {loading ? (
+            <div className="p-10 text-center text-slate-500 text-sm">در حال تولید گزارش...</div>
+          ) : reportData.rows.length === 0 ? (
+            <div className="p-10 text-center text-slate-500 text-sm">
+              هیچ رکوردی مطابق با فیلترهای انتخابی یافت نشد.
+            </div>
+          ) : (
+            <table className="w-full text-right border-collapse text-xs">
+              <thead>
+                <tr className="bg-slate-100/80 text-slate-700 border-b border-slate-200 font-bold">
+                  <th className="p-3 w-10 text-center">#</th>
+                  {visibleColumns.map((col, idx) => (
+                    <th key={idx} className="p-3 whitespace-nowrap">
+                      {col}
+                    </th>
+                  ))}
                 </tr>
-              ) : (
-                aggregatedSpecs.map((item, idx) => (
-                  <tr key={idx} className="hover:bg-slate-100 font-sans">
-                    <td className="py-2 px-3 font-bold text-blue-700">{item.grade}</td>
-                    <td className="py-2 px-3 font-mono">{item.thicknessMm} mm</td>
-                    <td className="py-2 px-3 font-mono">{item.widthMm} mm</td>
-                    <td className="py-2 px-3 text-center">
-                      <span className="px-2 py-0.5 bg-blue-500/10 border border-blue-500/30 text-blue-700 rounded font-mono font-bold">
-                        {toPersianDigits(item.coilCount)} کلاف
-                      </span>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-slate-800">
+                {reportData.rows.map((row, rIdx) => (
+                  <tr key={rIdx} className="hover:bg-slate-50 transition-colors">
+                    <td className="p-3 text-center font-mono text-slate-400">
+                      {toPersianDigits(rIdx + 1)}
                     </td>
-                    <td className="py-2 px-3">
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {item.packs.map(p => (
-                          <span key={p} className="px-1.5 py-0.2 bg-slate-50 border border-slate-200 text-[10px] font-mono rounded text-slate-700">
-                            {p}
-                          </span>
-                        ))}
-                      </div>
-                    </td>
-                    <td className="py-2 px-3 text-left font-mono text-slate-400">
-                      {formatNumber(item.totalOriginalKg)} kg
-                    </td>
-                    <td className="py-2 px-3 text-left font-mono text-emerald-400 font-bold">
-                      {formatNumber(item.totalRemainingKg)} kg
-                    </td>
+                    {visibleColumns.map((col, cIdx) => {
+                      const val = row[col];
+                      const isNumeric = typeof val === 'number';
+                      const strVal = val !== undefined && val !== null ? String(val) : '-';
+                      const isHighlightCol =
+                        col.includes('موجودی فعلی پس از مصرف') ||
+                        col.includes('مصرف واقعی') ||
+                        col.includes('شماره سند');
+
+                      return (
+                        <td
+                          key={cIdx}
+                          className={`p-3 whitespace-nowrap ${
+                            isNumeric ? 'font-mono font-bold tabular-nums' : ''
+                          } ${isHighlightCol ? 'text-emerald-800 font-bold bg-emerald-50/40' : ''}`}
+                        >
+                          {isNumeric ? formatNumber(val) : strVal}
+                        </td>
+                      );
+                    })}
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Summary KPI Badges */}
-      {reportData.summary && Object.keys(reportData.summary).length > 0 && (
-        <div className="bg-white border border-slate-200 rounded-lg p-3 flex flex-wrap items-center gap-6 text-xs">
-          <div className="text-slate-400 font-medium">خلاصه تراز فیلترشده:</div>
-          {reportData.summary.totalCoils !== undefined && (
-            <div>
-              <span className="text-slate-400">تعداد کلاف: </span>
-              <span className="font-bold font-mono text-slate-900">{toPersianDigits(reportData.summary.totalCoils)}</span>
-            </div>
-          )}
-          {reportData.summary.totalWeightKg !== undefined && (
-            <div>
-              <span className="text-slate-400">مجموع مانده وزن: </span>
-              <span className="font-bold font-mono text-emerald-400">{formatWeightKg(reportData.summary.totalWeightKg)}</span>
-            </div>
-          )}
-          {reportData.summary.totalPhysicalWeightKg !== undefined && (
-            <div>
-              <span className="text-slate-400">مجموع وزن فیزیکی: </span>
-              <span className="font-bold font-mono text-emerald-400">{formatWeightKg(reportData.summary.totalPhysicalWeightKg)}</span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Dynamic Data Table */}
-      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-right text-xs">
-            <thead className="bg-slate-50 text-slate-400 border-b border-slate-200 font-medium">
-              <tr>
-                {reportData.columns.map((col, idx) => (
-                  <th key={idx} className="py-2.5 px-3">
-                    {col}
-                  </th>
                 ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 text-slate-700">
-              {reportData.rows.length === 0 ? (
-                <tr>
-                  <td colSpan={reportData.columns.length || 6} className="py-8 text-center text-slate-500">
-                    داده‌ای منطبق با فیلترهای گزارش یافت نشد.
-                  </td>
-                </tr>
-              ) : (
-                reportData.rows.map((row, rowIdx) => (
-                  <tr key={rowIdx} className="hover:bg-slate-100 transition-colors">
-                    {Object.values(row).map((val: any, valIdx) => (
-                      <td key={valIdx} className="py-2.5 px-3">
-                        {typeof val === 'number' ? (
-                          <span className="font-mono">{formatNumber(val)}</span>
-                        ) : (
-                          <span>{String(val ?? '—')}</span>
-                        )}
-                      </td>
-                    ))}
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
     </div>

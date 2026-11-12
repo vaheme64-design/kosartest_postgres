@@ -55,6 +55,7 @@ import { MrpModuleView } from '../planning/MrpModuleView';
 import { ComprehensiveProductionReportView } from './ComprehensiveProductionReportView';
 import { ProductionWorkflowDocumentationView } from '../planning/ProductionWorkflowDocumentationView';
 import { PlantMaintenanceModuleView } from '../maintenance/PlantMaintenanceModuleView';
+import { CustomReportsView } from '../inventory/CustomReportsView';
 import { TableSkeleton, KpiCardsSkeleton, ChartSkeleton } from '../ui/Skeleton';
 
 export type ReportTypeKey =
@@ -80,7 +81,8 @@ export type ReportTypeKey =
   | 'mrp_forecast'
   | 'comprehensive_production'
   | 'production_workflow'
-  | 'tpm_maintenance';
+  | 'tpm_maintenance'
+  | 'custom_builder';
 
 interface ManagementReportsModuleViewProps {
   parts: Part[];
@@ -125,6 +127,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
   const [drillDownItem, setDrillDownItem] = useState<DrillDownData | null>(null);
 
   const reportDefinitions: { id: ReportTypeKey; title: string; category: string; description: string }[] = [
+    { id: 'custom_builder', title: '★ گزارش‌ساز پویا و سفارشی (موجودی ۳ سطحی پس از مصرف، انحراف BOM و زنجیره رهگیری اسناد)', category: 'انبار', description: 'ساخت گزارش سفارشی با انتخاب ستون‌ها، ذخیره قالب، خروجی اکسل و رهگیری از شماره ذوب تا محصول نهایی' },
     { id: 'plan_vs_actual', title: '۱. تطبیق برنامه در برابر تولید واقعی (Plan vs Actual)', category: 'تولید', description: 'مقایسه تناژ و تیراژ مصوب ماهانه با آمار تولید واقعی پرس‌ها و محاسبه درصد تحقق' },
     { id: 'fulfillment', title: '۲. وضعیت تحقق سفارشات مشتریان (ساپکو/سایپا)', category: 'فروش', description: 'تعهدات تحویل قطعات بدنه به خطوط خودروساز و پایش کسری‌های خطوط مشتری' },
     { id: 'backlog', title: '۳. تعهدات معوق و عقب‌افتاده تولید (Backlog)', category: 'فروش', description: 'سفارشات باز و دارای تأخیر نسبت به موعد تحویل و پوشش با موجودی محصول و WIP' },
@@ -151,6 +154,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
   ];
 
   const isStandaloneModule =
+    activeReport === 'custom_builder' ||
     activeReport === 'oee_module' ||
     activeReport === 'machine_utilization' ||
     activeReport === 'consumables_forecast' ||
@@ -683,6 +687,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
             {/* Featured Quick Tags (Compact Grafana Tag Pills) */}
             <div className="flex items-center gap-1.5 overflow-x-auto">
               {[
+                { id: 'custom_builder', label: '★ گزارش‌ساز پویا و سفارشی' },
                 { id: 'comprehensive_production', label: 'گزارش جامع OEE و توقفات' },
                 { id: 'production_workflow', label: 'جریان فرآیند SAP PP' },
                 { id: 'oee_module', label: 'داشبورد OEE' },
@@ -731,6 +736,7 @@ export const ManagementReportsModuleView: React.FC<ManagementReportsModuleViewPr
       </div>
 
       {/* Standalone Analytical & Forecasting Modules */}
+      {activeReport === 'custom_builder' && <CustomReportsView />}
       {activeReport === 'comprehensive_production' && <ComprehensiveProductionReportView />}
       {activeReport === 'production_workflow' && <ProductionWorkflowDocumentationView />}
       {activeReport === 'tpm_maintenance' && <PlantMaintenanceModuleView machines={machines} />}
