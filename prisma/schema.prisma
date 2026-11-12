@@ -717,6 +717,8 @@ model ProductionOperation {
   assignments          MachineAssignment[]
   scraps               ProductionScrap[]
   coilIssueReturnRecords CoilIssueReturnRecord[]
+  inventoryTransactions  InventoryTransaction[]
+  inventoryDocumentLines InventoryDocumentLine[]
 
   @@unique([manufacturingOrderId, stepNumber])
   @@index([status])
@@ -880,6 +882,8 @@ model InventoryDocumentLine {
   materialLot        MaterialLot?       @relation(fields: [materialLotId], references: [id])
   physicalCoilId     String?
   physicalCoil       PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
+  productionOperationId String?
+  productionOperation ProductionOperation? @relation(fields: [productionOperationId], references: [id])
   locationId         String?
   location           WarehouseLocation? @relation("Location", fields: [locationId], references: [id])
   targetLocationId   String?
@@ -913,6 +917,8 @@ model InventoryTransaction {
   materialLot             MaterialLot?       @relation(fields: [materialLotId], references: [id])
   physicalCoilId          String?
   physicalCoil            PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
+  productionOperationId   String?
+  productionOperation     ProductionOperation? @relation(fields: [productionOperationId], references: [id])
   warehouseId             String
   warehouse               Warehouse          @relation(fields: [warehouseId], references: [id])
   locationId              String?
