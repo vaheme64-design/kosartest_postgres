@@ -7075,7 +7075,7 @@ async function getDatabaseWipReportRows(filters: ReportFilterParams) {
         },
         include: {
           operation: { select: { code: true, name: true, processType: true } },
-          plannedMachine: { select: { id: true, code: true, name: true, hall: true } },
+          plannedMachine: { select: { id: true, code: true, name: true, hallLocation: true } },
           reports: { orderBy: { reportDate: 'desc' }, take: 1, select: { reportDate: true } },
         },
         orderBy: { stepNumber: 'asc' },
@@ -7121,7 +7121,7 @@ async function getDatabaseWipReportRows(filters: ReportFilterParams) {
       ].filter(Boolean).map((date: any) => new Date(date).getTime());
       const lastActivityAt = new Date(activities.length ? Math.max(...activities) : order.updatedAt).toISOString();
       const warehouseLocation = operation.plannedMachine
-        ? [operation.plannedMachine.hall, operation.plannedMachine.code, operation.plannedMachine.name].filter(Boolean).join(' / ')
+        ? [operation.plannedMachine.hallLocation, operation.plannedMachine.code, operation.plannedMachine.name].filter(Boolean).join(' / ')
         : inboundTransfers[inboundTransfers.length - 1]?.toWarehouse?.name || 'موقعیت ثبت نشده';
       if (totalActiveWipQty > 0 || transferredQty > 0) {
         rows.push({
