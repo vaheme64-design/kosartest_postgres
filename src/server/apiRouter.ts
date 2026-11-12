@@ -7151,7 +7151,7 @@ apiRouter.post('/planning/customer-orders', async (req: Request, res: Response) 
     const payload = req.body || {};
     const orderNumber = String(payload.orderNumber || '').trim();
     if (!orderNumber) return res.status(400).json({ success: false, error: 'شماره سفارش مشتری الزامی است.' });
-    const priority = Number(payload.priority ?? 2);
+    const priority = Number(payload.priority ?? 2) as 1 | 2 | 3;
     if (![1, 2, 3].includes(priority)) return res.status(400).json({ success: false, error: 'اولویت سفارش باید ۱، ۲ یا ۳ باشد.' });
 
     if (isDatabaseUrlConfigured()) {
