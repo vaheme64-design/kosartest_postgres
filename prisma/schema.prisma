@@ -711,6 +711,8 @@ model ProductionOperation {
   inputQty             Decimal             @default(0)
   outputGoodQty        Decimal             @default(0)
   outputScrapQty       Decimal             @default(0)
+  outputReworkQty      Decimal             @default(0)
+  outputRejectedQty    Decimal             @default(0)
   status               ProductionOpStatus  @default(PENDING)
   startDate            DateTime?
   endDate              DateTime?
@@ -752,6 +754,8 @@ model ProductionReport {
   goodQuantity            Decimal // تعداد سالم
   scrapQuantity           Decimal              @default(0) // تعداد ضایعات
   reworkQuantity          Decimal              @default(0) // تعداد دوباره‌کاری
+  rejectedQuantity        Decimal              @default(0) // تعداد مردودی / قرنطینه
+  wipIdempotencyKey       String?              @unique // کلید یکتای ثبت عملکرد از موتور WIP
   runTimeMinutes          Int                  @default(0) // دقایق کار مفید
   downtimeMinutes         Int                  @default(0) // دقایق توقف پرس
   downtimeReason          String?              // علت توقف (خرابی قالب، تعویض رول، نقص برق)
