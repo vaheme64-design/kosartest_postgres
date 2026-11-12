@@ -6595,8 +6595,10 @@ apiRouter.post('/wip/operations/input', async (req: Request, res: Response) => {
     }
     res.json({ success: true, message: 'ورودی مرحله با موفقیت ثبت شد و به پای دستگاه منتقل گردید.', data: result.data });
   } catch (error) {
-    res.status(500).json({
+    const conflict = error instanceof Error && error.message.includes('WIP_SNAPSHOT_VERSION_CONFLICT');
+    res.status(conflict ? 409 : 500).json({
       success: false,
+      conflict,
       error: error instanceof Error ? error.message : 'خطا در ثبت ورودی مرحله',
     });
   }
