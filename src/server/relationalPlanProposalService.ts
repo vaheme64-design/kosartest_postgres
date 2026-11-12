@@ -272,8 +272,8 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
 
     const manufacturingOrders: any[] = [];
     for (const line of proposal.lines as any[]) {
-      const assignments = (line.operationAssignments as OperationAssignment[]) || [];
-      for (const assignment of assignments) {
+      const validationAssignments = (line.operationAssignments as OperationAssignment[]) || [];
+      for (const assignment of validationAssignments) {
         if (!assignment.machineId) continue;
         const routeOperation = line.route.operations.find((item: any) => item.id === assignment.routeOperationId);
         const machine = await tx.machine.findUnique({
