@@ -89,6 +89,9 @@ jobs:
       - name: WIP reconciliation tests
         run: bunx tsx scripts/test-wip-reconciliation.ts
 
+      - name: Atomic WIP production ledger integration test
+        run: bunx tsx scripts/test-wip-production-ledger.ts
+
       - name: Production planning tests
         run: bunx tsx scripts/test-production-planning.ts
 
