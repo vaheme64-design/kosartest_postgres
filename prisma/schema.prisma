@@ -680,6 +680,7 @@ model ManufacturingOrder {
   updatedAt            DateTime        @updatedAt
 
   operations           ProductionOperation[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
   reports              ProductionReport[]
   transfers            ProductionTransfer[]
   reservations         InventoryReservation[]
@@ -985,6 +986,8 @@ model StockBalance {
   location             WarehouseLocation? @relation(fields: [locationId], references: [id])
   materialLotId        String?
   materialLot          MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  physicalCoilId       String?
+  physicalCoil         PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
   quantityOnHand       Decimal            @default(0) // موجودی فیزیکی
   quantityReserved     Decimal            @default(0) // مقدار رزرو شده
   quantityAvailable    Decimal            @default(0) // مقدار آزاد = موجودی منهای رزرو
@@ -998,7 +1001,7 @@ model StockBalance {
   lastTransactionAt    DateTime?
   updatedAt            DateTime           @updatedAt
 
-  @@unique([partId, warehouseId, locationId, materialLotId, ownership, contractId, qualityStatus])
+  @@unique([partId, warehouseId, locationId, materialLotId, physicalCoilId, ownership, contractId, qualityStatus])
   @@index([partId, warehouseId])
   @@map("stock_balances")
 }
@@ -1238,6 +1241,7 @@ model PhysicalCoil {
   updatedAt              DateTime           @updatedAt
 
   contractAllocations    ContractCoilAllocation[]
+  stockBalances           StockBalance[]
   issueReturnRecords     CoilIssueReturnRecord[]
   inventoryTransactions  InventoryTransaction[]
   inventoryDocumentLines InventoryDocumentLine[]
@@ -1281,7 +1285,8 @@ model CoilIssueReturnRecord {
   part                 Part?          @relation(fields: [partId], references: [id])
   productionOperationId String?
   productionOperation ProductionOperation? @relation(fields: [productionOperationId], references: [id])
-  manufacturingOrderId String?       // شماره دستور ساخت مصرف‌کننده
+  manufacturingOrderId String?       // شناسه دستور ساخت مصرف‌کننده
+  manufacturingOrder   ManufacturingOrder? @relation(fields: [manufacturingOrderId], references: [id])
   documentNumber       String        // شماره حواله خروج یا رسید برگشتی
   issuedWeightKg       Decimal // وزن ارسالی به پای خط
   consumedWeightKg     Decimal       @default(0) // وزن خالص مصرف‌شده
