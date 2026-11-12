@@ -5894,17 +5894,66 @@ apiRouter.get('/reports/production-delays/analytics', (req: Request, res: Respon
 });
 
 // 19.12 Inventory Movements
-apiRouter.get('/reports/inventory-movements', (req: Request, res: Response) => {
+apiRouter.get('/reports/inventory-movements', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش گردش انبار فقط از پایگاه داده عملیاتی قابل ارائه است؛ اتصال DATABASE_URL برقرار نیست.' });
+    }
     const filters = extractReportFilters(req);
-    const report = getInventoryMovementsReport(filters);
-    res.json({ success: true, ...report });
+    const where: any = { postingStatus: 'POSTED' };
+    if (filters.startDate || filters.endDate) {
+      where.transactionDate = {};
+      if (filters.startDate) where.transactionDate.gte = new Date(filters.startDate);
+      if (filters.endDate) where.transactionDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    }
+    if (filters.partId) where.partId = filters.partId;
+    const prisma = getPrismaClient();
+    const rows = await prisma.inventoryTransaction.findMany({
+      where,
+      include: {
+        part: { select: { partNumber: true, name: true } },
+        unit: { select: { code: true, symbol: true } },
+        warehouse: { select: { code: true, name: true } },
+        location: { select: { code: true } },
+        document: { include: { targetWarehouse: { select: { code: true, name: true } } } },
+        createdByUser: { select: { fullName: true, username: true } },
+      },
+      orderBy: [{ transactionDate: 'desc' }, { createdAt: 'desc' }],
+      take: 5000,
+    });
+    const data = rows.map((tx: any) => ({
+      transactionId: tx.id,
+      documentNumber: tx.document?.documentNumber || tx.transactionNumber,
+      transactionDate: tx.transactionDate.toISOString(),
+      documentType: tx.document?.documentType || tx.transactionType,
+      partCode: tx.part?.partNumber || tx.partId,
+      partName: tx.part?.name || '',
+      quantity: Number(tx.quantitySigned ?? tx.quantity ?? 0),
+      unit: tx.unit?.code || tx.unit?.symbol || '—',
+      sourceLocation: [tx.warehouse?.name || tx.warehouseId, tx.location?.code].filter(Boolean).join(' / '),
+      targetLocation: tx.document?.targetWarehouse?.name || tx.document?.targetWarehouse?.code || tx.document?.referenceNumber || '—',
+      ownership: tx.ownership === 'SAPCO_SUPPLIER_OWNED' ? 'امانی ساپکو' : 'ملکی کارخانه',
+      operatorOrUser: tx.createdByUser?.fullName || tx.createdByUser?.username || tx.createdByUserId,
+      isReversed: Boolean(tx.isReversal || tx.document?.isReversed),
+    }));
+    res.json({
+      success: true,
+      meta: {
+        reportTitle: 'گزارش تحلیلی گردش اسناد و کاردکس جابجایی موجودی‌ها',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+        totalRecordsCount: data.length,
+      },
+      data,
+      source: 'POSTGRESQL_INVENTORY_TRANSACTION_LEDGER',
+      truncated: rows.length === 5000,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش گردش اسناد انبار' });
   }
 });
 
-// 19.13 Inventory Reconciliation
 apiRouter.get('/reports/inventory-reconciliation', (req: Request, res: Response) => {
   try {
     const filters = extractReportFilters(req);
@@ -5916,28 +5965,144 @@ apiRouter.get('/reports/inventory-reconciliation', (req: Request, res: Response)
 });
 
 // 19.14 Coil & Sheet Stock Inventory
-apiRouter.get('/reports/coil-inventory', (req: Request, res: Response) => {
+apiRouter.get('/reports/coil-inventory', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش موجودی کویل فقط از پایگاه داده عملیاتی قابل ارائه است؛ اتصال DATABASE_URL برقرار نیست.' });
+    }
     const filters = extractReportFilters(req);
-    const report = getCoilInventoryReport(filters);
-    res.json({ success: true, ...report });
+    const where: any = {};
+    if (filters.startDate || filters.endDate) {
+      where.receiptDate = {};
+      if (filters.startDate) where.receiptDate.gte = new Date(filters.startDate);
+      if (filters.endDate) where.receiptDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    }
+    if (filters.partId) where.partId = filters.partId;
+    const prisma = getPrismaClient();
+    const coils = await prisma.physicalCoil.findMany({
+      where,
+      include: {
+        material: { select: { code: true, grade: true } },
+        warehouse: { select: { name: true } },
+        warehouseLocation: { select: { code: true } },
+        contractAllocations: { include: { contract: { select: { contractNumber: true } } } },
+      },
+      orderBy: [{ receiptDate: 'desc' }, { createdAt: 'desc' }],
+      take: 5000,
+    });
+    const data = coils.map((coil: any) => {
+      const received = Number(coil.originalWeightKg || 0);
+      const remaining = Number(coil.remainingWeightKg || 0);
+      const consumed = Math.max(0, received - remaining);
+      const status = coil.qualityStatus === 'QUARANTINE' || coil.qualityStatus === 'QUALITY_BLOCKED' || coil.physicalStatus === 'BLOCKED'
+        ? 'BLOCKED'
+        : remaining <= 0 ? 'CONSUMED' : remaining < received ? 'PARTIAL' : 'FULL';
+      return {
+        coilId: coil.id,
+        coilNumber: coil.coilId,
+        materialCode: coil.material?.code || coil.partId || '—',
+        materialGrade: coil.material?.grade || '—',
+        thicknessMm: Number(coil.thicknessMm || 0),
+        widthMm: Number(coil.widthMm || 0),
+        receivedWeightKg: received,
+        consumedWeightKg: consumed,
+        remainingWeightKg: remaining,
+        warehouseLocation: [coil.warehouse?.name, coil.warehouseLocation?.code].filter(Boolean).join(' / '),
+        ownership: coil.ownership === 'SAPCO_SUPPLIER_OWNED' ? 'SAPCO_CONSIGNMENT' : 'FACTORY_OWNED',
+        contractNumber: coil.contractAllocations?.map((a: any) => a.contract?.contractNumber).filter(Boolean).join(', ') || '—',
+        heatNumber: coil.heatNumber || '—',
+        packingNumber: coil.coilPackNumber,
+        status,
+        receiptDate: coil.receiptDate.toISOString(),
+      };
+    }).filter((row: any) => !filters.status || filters.status === 'ALL' || row.status === filters.status);
+    res.json({
+      success: true,
+      meta: {
+        reportTitle: 'موجودی رول‌ها و کویل‌های ماده اولیه',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+        totalRecordsCount: data.length,
+      },
+      data,
+      source: 'POSTGRESQL_PHYSICAL_COILS',
+      truncated: coils.length === 5000,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش رول‌ها و کویل‌ها' });
   }
 });
 
-// 19.15 Lot & Coil Consumption Ledger
-apiRouter.get('/reports/lot-consumption', (req: Request, res: Response) => {
+apiRouter.get('/reports/lot-consumption', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش مصرف لوت فقط از پایگاه داده عملیاتی قابل ارائه است؛ اتصال DATABASE_URL برقرار نیست.' });
+    }
     const filters = extractReportFilters(req);
-    const report = getLotConsumptionReport(filters);
-    res.json({ success: true, ...report });
+    const where: any = { issuedWeightKg: { gt: 0 } };
+    if (filters.startDate || filters.endDate) {
+      where.issuedAt = {};
+      if (filters.startDate) where.issuedAt.gte = new Date(filters.startDate);
+      if (filters.endDate) where.issuedAt.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    }
+    const prisma = getPrismaClient();
+    const records = await prisma.coilIssueReturnRecord.findMany({
+      where,
+      include: {
+        coil: {
+          include: { material: { select: { grade: true } } },
+        },
+      },
+      orderBy: [{ issuedAt: 'desc' }],
+      take: 5000,
+    });
+    const moIds = [...new Set(records.map((r: any) => r.manufacturingOrderId).filter((id: any) => Boolean(id)))];
+    const mos = moIds.length
+      ? await prisma.manufacturingOrder.findMany({ where: { id: { in: moIds } }, include: { part: { select: { partNumber: true, name: true } } } })
+      : [];
+    const moMap = new Map(mos.map((mo: any) => [mo.id, mo]));
+    const data = records.map((record: any) => {
+      const mo: any = moMap.get(record.manufacturingOrderId);
+      const consumed = Number(record.consumedWeightKg || 0);
+      const scrap = Number(record.varianceWeightKg || 0);
+      return {
+        issueDocumentNumber: record.documentNumber,
+        issueDate: record.issuedAt.toISOString(),
+        coilNumber: record.coil?.coilId || record.coilId,
+        heatNumber: record.coil?.heatNumber || '—',
+        materialGrade: record.coil?.material?.grade || '—',
+        thicknessMm: Number(record.coil?.thicknessMm || 0),
+        consumedKg: consumed,
+        destinationMachine: 'ثبت نشده',
+        targetMoNumber: mo?.moNumber || record.manufacturingOrderId || '—',
+        targetPartCode: mo?.part?.partNumber || '—',
+        targetPartName: mo?.part?.name || '—',
+        piecesProduced: 0,
+        scrapKg: scrap,
+        scrapPercent: consumed + scrap > 0 ? Math.round((scrap / (consumed + scrap)) * 10000) / 100 : 0,
+        operatorName: 'ثبت نشده',
+      };
+    }).filter((row: any) => !filters.partId || row.targetPartCode === filters.partId || row.targetMoNumber === filters.partId);
+    res.json({
+      success: true,
+      meta: {
+        reportTitle: 'ردیابی مصرف رول/لوت پای پرس‌ها',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+        totalRecordsCount: data.length,
+      },
+      data,
+      source: 'POSTGRESQL_COIL_ISSUE_RETURN_RECORDS',
+      note: 'ماشین، اپراتور و تعداد تولیدشده تا زمان ثبت ارتباط صریح این اطلاعات با رکورد حواله، نمایش داده نمی‌شوند.',
+      truncated: records.length === 5000,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش مصرف لوت و کویل' });
   }
 });
 
-// 19.16 Supplier Matrix (Grade x Thickness)
 apiRouter.get('/reports/supplier-matrix', (req: Request, res: Response) => {
   try {
     const filters = extractReportFilters(req);
