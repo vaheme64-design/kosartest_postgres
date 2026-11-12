@@ -6694,8 +6694,8 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
       const contractTx = contract.transactions;
       const isReceipt = (tx: any) => tx.transactionType === 'RECEIPT';
       const isReturn = (tx: any) => tx.transactionType === 'RETURN';
-      const inRange = (tx: any) => {
-        const time = tx.receiptDate.getTime();
+      const inRange = (date: Date) => {
+        const time = date.getTime();
         return (!filters.startDate || time >= new Date(filters.startDate).getTime()) &&
           (!filters.endDate || time <= new Date(filters.endDate + 'T23:59:59.999Z').getTime());
       };
@@ -6707,8 +6707,8 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
       const openingBalanceKg = contractTx.length
         ? openingReceipts - openingSupplierReturns - openingIssued
         : (filters.startDate ? Number(contract.receivedWeightKg) - openingIssued : 0);
-      const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
-      const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const issued = issuedRows.filter((tx: any) => inRange(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const totalReceivedKg = contractTx.length
         ? receivedInRange
