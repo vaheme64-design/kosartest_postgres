@@ -6681,7 +6681,8 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
               postingStatus: 'POSTED',
               transactionType: 'OUTBOUND',
             },
-            select: { contractId: true, weightKg: true, transactionDate: true },
+            include: { document: { select: { documentType: true } } },
+            select: { contractId: true, weightKg: true, weightKgSigned: true, transactionDate: true, transactionType: true, document: { select: { documentType: true } } },
           }),
           prisma.stockBalance.findMany({
             where: { contractId: { in: contractIds } },
@@ -6703,17 +6704,25 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
       const issuedRows = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id);
       const openingReceipts = contractTx.filter((tx: any) => isReceipt(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const openingSupplierReturns = contractTx.filter((tx: any) => isReturn(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
-      const openingIssued = issuedRows.filter((tx: any) => beforeStart(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const isContractBookMovement = (tx: any) =>
+        tx.transactionType === 'OUTBOUND' ||
+        tx.transactionType === 'ADJUSTMENT_POS' ||
+        tx.transactionType === 'ADJUSTMENT_NEG' ||
+        (tx.transactionType === 'INBOUND' && tx.document?.documentType === 'RETURN');
+      const movementDelta = (rows: any[]) => rows.filter(isContractBookMovement)
+        .reduce((sum: number, tx: any) => sum + Number(tx.weightKgSigned), 0);
+      const openingInventoryMovement = movementDelta(issuedRows.filter((tx: any) => beforeStart(tx.transactionDate)));
       const openingBalanceKg = contractTx.length
-        ? openingReceipts - openingSupplierReturns - openingIssued
-        : (filters.startDate ? Number(contract.receivedWeightKg) - openingIssued : 0);
+        ? openingReceipts - openingSupplierReturns + openingInventoryMovement
+        : (filters.startDate ? Number(contract.receivedWeightKg) + openingInventoryMovement : 0);
       const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
-      const issued = issuedRows.filter((tx: any) => inRange(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const issued = issuedRows.filter((tx: any) => tx.transactionType === 'OUTBOUND' && inRange(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const periodInventoryMovement = movementDelta(issuedRows.filter((tx: any) => inRange(tx.transactionDate)));
       const totalReceivedKg = contractTx.length
         ? receivedInRange
         : filters.startDate || filters.endDate ? 0 : Number(contract.receivedWeightKg);
-      const closingBookBalanceKg = openingBalanceKg + totalReceivedKg - supplierReturns - issued;
+      const closingBookBalanceKg = openingBalanceKg + totalReceivedKg - supplierReturns + periodInventoryMovement;
       const physicalStockInPlantKg = balances.filter((row: any) => row.contractId === contract.id).reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
       return {
         contractId: contract.id,
