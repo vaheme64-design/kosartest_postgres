@@ -92,6 +92,9 @@ import {
   clearProductionWipData,
   reseedProductionWipData,
   persistProductionWipState,
+  loadProductionWipState,
+  getProductionWipSnapshotVersion,
+  advanceProductionWipSnapshotVersion,
 } from './productionWipEngine';
 import {
   calculateNetRequirements,
@@ -693,6 +696,10 @@ async function executePersistentWipMutation<T extends { success: boolean }>(muta
       manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...previousOrders);
       wipTransfersStore.splice(0, wipTransfersStore.length, ...previousTransfers);
       productionLogsStore.splice(0, productionLogsStore.length, ...previousLogs);
+      if (error instanceof Error && error.message.includes('WIP_SNAPSHOT_VERSION_CONFLICT')) {
+        // Refresh this process from the winning server's committed version before accepting another mutation.
+        await loadProductionWipState();
+      }
       throw error;
     }
   });
