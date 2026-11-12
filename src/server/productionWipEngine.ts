@@ -586,38 +586,85 @@ export function registerOperationProduction(params: {
     return { success: false, error: 'در صورت وجود ضایعات، انتخاب علت ضایعات الزامی است.' };
   }
 
-  // Atomically update operation quantities:
+  // Post production and automatically transfer good output to the next operation.
+  const postedAt = new Date().toISOString();
   op.inProgressQty -= totalReported;
   op.goodOutputQty += good;
-  op.readyForTransferQty += good; // IMPORTANT: Good output is NOT transferred automatically! It is ready for explicit transfer
   op.scrapQty += scrap;
   op.reworkQty += rework;
   op.rejectedQty += rejected;
-  op.lastActivityAt = new Date().toISOString();
+  op.lastActivityAt = postedAt;
 
-  // If all in-progress and waiting is processed, status becomes ready or completed
+  const nextOp = mo.operations.find(candidate => candidate.sequence === op.sequence + 1);
+  op.transferredQty += good;
   if (op.inProgressQty === 0 && op.waitingInputQty === 0) {
     op.status = op.readyForTransferQty > 0 ? 'READY' : 'COMPLETED';
   }
 
-  // Update MO Cumulative Totals:
+  // Good output is posted directly into the next operation's waiting queue.
+  // The transfer record is retained for traceability; no receiving approval is needed.
+  if (good > 0) {
+    if (nextOp) {
+      nextOp.waitingInputQty += good;
+      if (nextOp.status === 'PENDING') nextOp.status = 'READY';
+      nextOp.lastActivityAt = postedAt;
+    } else {
+      mo.completedQuantity += good;
+    }
+
+    const transferNumber = `AUTO-${mo.moNumber}-${op.stepNumber}-${Date.now()}`;
+    wipTransfersStore.unshift({
+      id: transferNumber,
+      transferNumber,
+      moId: mo.id,
+      moNumber: mo.moNumber,
+      partId: mo.partId,
+      partCode: mo.partCode,
+      partName: mo.partName,
+      fromOperationId: op.id,
+      fromStepNumber: op.stepNumber,
+      fromStepName: op.stepName,
+      fromLocation: op.warehouseLocation,
+      toOperationId: nextOp?.id || 'STORE-FINISHED',
+      toStepNumber: nextOp?.stepNumber || 999,
+      toStepName: nextOp?.stepName || 'انبار محصول نهایی',
+      toLocation: nextOp?.warehouseLocation || 'LOC-FIN-P1',
+      quantity: good,
+      status: 'AUTO_TRANSFERRED',
+      dispatchedBy: params.operatorName,
+      dispatchedAt: postedAt,
+      receivedAt: postedAt,
+      notes: nextOp
+        ? 'انتقال خودکار خروجی سالم به صف انتظار عملیات بعد؛ بدون تأیید دریافت'
+        : 'انتقال خودکار خروجی سالم به انبار محصول نهایی؛ بدون تأیید دریافت',
+    });
+    productionLogsStore.unshift({
+      id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      moId: mo.id,
+      moNumber: mo.moNumber,
+      operationId: op.id,
+      stepNumber: op.stepNumber,
+      stepName: op.stepName,
+      activityType: 'AUTO_TRANSFER',
+      quantity: good,
+      operatorName: params.operatorName,
+      machineId: params.machineId,
+      timestamp: postedAt,
+      notes: nextOp
+        ? `انتقال خودکار ${good} عدد به صف انتظار ${nextOp.stepName}`
+        : `انتقال خودکار ${good} عدد به انبار محصول نهایی`,
+    });
+  }
+
   mo.totalScrapQuantity += scrap;
   mo.totalReworkQuantity += rework;
   mo.totalRejectedQuantity += rejected;
-
-  // Check if this is the final operation in the route:
-  const isFinalOperation = op.sequence === mo.operations.length;
-  if (isFinalOperation) {
-    mo.completedQuantity += good;
-    if (mo.completedQuantity >= mo.targetQuantity) {
-      mo.status = 'COMPLETED';
-      mo.closedAt = new Date().toISOString();
-    }
+  if (mo.completedQuantity >= mo.targetQuantity && mo.operations.every(candidate => candidate.inProgressQty === 0 && candidate.waitingInputQty === 0)) {
+    mo.status = 'COMPLETED';
+    mo.closedAt = postedAt;
   }
+  mo.updatedAt = postedAt;
 
-  mo.updatedAt = new Date().toISOString();
-
-  // Log activity
   productionLogsStore.unshift({
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
@@ -634,10 +681,9 @@ export function registerOperationProduction(params: {
     scrapReason: params.scrapReason,
     operatorName: params.operatorName,
     machineId: params.machineId,
-    timestamp: new Date().toISOString(),
+    timestamp: postedAt,
     notes: params.notes,
   });
-
   return { success: true, data: mo };
 }
 
