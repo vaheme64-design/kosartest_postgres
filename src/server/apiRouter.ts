@@ -3564,7 +3564,6 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           lineNumber += 1;
           const balance = source.balance;
           const nextOnHand = source.initialOnHand - (source.initialAvailable - source.remaining);
-          const nextAvailable = source.remaining;
           const balanceUpdate = await tx.stockBalance.updateMany({
             where: { id: balance.id, weightKgAvailable: { gte: weight }, weightKgOnHand: { gte: weight } },
             data: {
@@ -4739,7 +4738,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
           contractNumber: tx.contractNumber || '—',
           date: tx.transactionDate.toISOString(),
         }));
-        const coilRows = coils.map((record: any) => ({
+        const coilRows = coils.filter((record: any) => !record.inventoryDocumentId).map((record: any) => ({
           sourceType: 'PHYSICAL_COIL_ISSUE_RETURN',
           documentNumber: record.documentNumber,
           documentType: Number(record.issuedWeightKg) > 0 ? 'COIL_ISSUE' : 'COIL_RETURN',
@@ -4749,6 +4748,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
           unit: 'KG',
           weightKg: Number(record.issuedWeightKg) > 0 ? -Number(record.issuedWeightKg) : Number(record.returnedWeightKg),
           coilNumber: record.coil?.coilId || record.coilId,
+          coilPackNumber: record.coil?.coilPackNumber || '—',
           heatNumber: record.coil?.heatNumber || '—',
           manufacturingOrder: record.manufacturingOrderId || '—',
           warehouse: record.coil?.warehouse ? `${record.coil.warehouse.code} - ${record.coil.warehouse.name}` : '—',
