@@ -19,6 +19,25 @@ type OperationAssignment = {
   eligibleMachineIds: string[];
 };
 
+function assertProposalDemandIsCurrent(proposalLines: any[], readModel: any) {
+  const current = new Map<string, number>();
+  for (const requirement of readModel.requirements) {
+    for (const line of requirement.demandLines) {
+      if (line.plannedQty > 0) current.set(line.customerOrderLineId, numeric(line.plannedQty));
+    }
+  }
+  const proposed = new Map<string, number>();
+  for (const line of proposalLines) proposed.set(line.customerOrderLineId, numeric(line.plannedQty));
+  if (current.size !== proposed.size) {
+    throw new Error('تقاضا، موجودی یا برنامه‌های باز پس از تولید این پیشنهاد تغییر کرده‌اند؛ پیش از تایید/صدور، پیشنهاد را دوباره تولید کنید.');
+  }
+  for (const [lineId, quantity] of current) {
+    if (!proposed.has(lineId) || Math.abs((proposed.get(lineId) || 0) - quantity) > 0.05) {
+      throw new Error('مقدار تقاضای برنامه‌ریزی‌نشده تغییر کرده است؛ پیشنهاد را دوباره تولید کنید.');
+    }
+  }
+}
+
 function buildAssignments(route: any[]): OperationAssignment[] {
   return route.map(step => {
     const candidates = Array.isArray(step.eligibleMachines) ? step.eligibleMachines : [];
@@ -214,12 +233,14 @@ export async function reviseRelationalPlanProposal(id: string, changes: any[], n
 }
 
 export async function approveRelationalPlanProposal(id: string, approvedBy: string) {
+  const currentReadModel = await getRelationalPlanningReadModel();
   return prisma.$transaction(async tx => {
     const proposal = await tx.productionPlanProposal.findUnique({ where: { id }, include: { lines: true } });
     if (!proposal) throw new Error('پیشنهاد برنامه یافت نشد.');
     if (proposal.status === 'APPROVED' || proposal.status === 'RELEASED') return proposal;
     if (proposal.status !== 'DRAFT') throw new Error('فقط پیشنهاد پیش‌نویس قابل تایید است.');
     if (!proposal.lines.length) throw new Error('پیشنهاد بدون ردیف تولید قابل تایید نیست.');
+    assertProposalDemandIsCurrent(proposal.lines, currentReadModel);
 
     const now = new Date();
     return tx.productionPlanProposal.update({
@@ -231,6 +252,7 @@ export async function approveRelationalPlanProposal(id: string, approvedBy: stri
 }
 
 export async function releaseRelationalPlanProposal(id: string, releasedBy: string) {
+  const currentReadModel = await getRelationalPlanningReadModel();
   return prisma.$transaction(async tx => {
     const proposal = await tx.productionPlanProposal.findUnique({
       where: { id },
@@ -252,6 +274,7 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
     }
     if (proposal.status !== 'APPROVED') throw new Error('برای صدور برنامه، ابتدا باید پیشنهاد تایید شود.');
     if (!proposal.lines.length) throw new Error('پیشنهاد بدون ردیف تولید قابل صدور نیست.');
+    assertProposalDemandIsCurrent(proposal.lines, currentReadModel);
 
     const now = new Date();
     const starts = proposal.lines.map((line: any) => line.plannedStartDate.getTime());
