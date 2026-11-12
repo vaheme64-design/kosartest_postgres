@@ -162,16 +162,21 @@ export async function reviseRelationalPlanProposal(id: string, changes: any[], n
           create: source.lines.map((line: any) => {
             const change = changeMap.get(line.id);
             const assignments = (line.operationAssignments as any[]) || [];
-            const nextAssignments = change ? change.operationAssignments : assignments;
-            for (const assignment of nextAssignments) {
-              const original = assignments.find((item: any) => item.routeOperationId === assignment.routeOperationId);
-              if (!original) throw new Error('عملیاتی در اصلاح انتخاب شده که در مسیر تولید این قطعه وجود ندارد.');
-              if (assignment.machineId != null && !original.eligibleMachineIds.includes(assignment.machineId)) {
-                throw new Error(`ماشین انتخاب‌شده برای عملیات ${original.stepCode} در فهرست ماشین‌های واجد شرایط نیست.`);
-              }
-              if (assignment.machineId !== null && typeof assignment.machineId !== 'string') {
+            const nextAssignments = assignments.map(original => {
+              const requested = change?.operationAssignments?.find((item: any) => item.routeOperationId === original.routeOperationId);
+              if (!requested) return original;
+              if (requested.machineId !== null && typeof requested.machineId !== 'string') {
                 throw new Error('شناسه ماشین انتخاب‌شده معتبر نیست.');
               }
+              if (requested.machineId !== null && !original.eligibleMachineIds.includes(requested.machineId)) {
+                throw new Error(`ماشین انتخاب‌شده برای عملیات ${original.stepCode} در فهرست ماشین‌های واجد شرایط نیست.`);
+              }
+              return { ...original, machineId: requested.machineId };
+            });
+            if (change && change.operationAssignments.some((item: any) =>
+              !assignments.some((original: any) => original.routeOperationId === item.routeOperationId)
+            )) {
+              throw new Error('عملیاتی در اصلاح انتخاب شده که در مسیر تولید این قطعه وجود ندارد.');
             }
             return {
               customerOrderLineId: line.customerOrderLineId,
@@ -221,6 +226,7 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
           include: {
             customerOrderLine: { include: { order: true } },
             route: { include: { operations: { include: { operation: true }, orderBy: { stepNumber: 'asc' } } } },
+            part: { select: { thicknessMm: true } },
           },
           orderBy: [{ priority: 'asc' }, { plannedEndDate: 'asc' }],
         },
@@ -253,6 +259,35 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
 
     const manufacturingOrders: any[] = [];
     for (const line of proposal.lines as any[]) {
+      const assignments = (line.operationAssignments as OperationAssignment[]) || [];
+      for (const assignment of assignments) {
+        if (!assignment.machineId) continue;
+        const routeOperation = line.route.operations.find((item: any) => item.id === assignment.routeOperationId);
+        const machine = await tx.machine.findUnique({
+          where: { id: assignment.machineId },
+          include: {
+            capabilities: { where: { operationId: assignment.operationId } },
+            dieCompatibilities: assignment.dieId ? { where: { dieId: assignment.dieId } } : true,
+          },
+        });
+        const capability = machine?.capabilities?.[0];
+        const requiredTonnage = numeric(routeOperation?.die?.tonnageRequired ?? 0);
+        const thickness = line.part.thicknessMm == null ? null : numeric(line.part.thicknessMm);
+        if (!machine || !machine.active || machine.status !== 'ACTIVE' || !capability) {
+          throw new Error(`ماشین انتخاب‌شده برای عملیات ${assignment.stepCode} دیگر فعال یا واجد قابلیت لازم نیست؛ پیشنهاد را اصلاح کنید.`);
+        }
+        if (requiredTonnage > 0 && (numeric(machine.tonnageCapacity) < requiredTonnage ||
+          (capability.maxTonnage != null && numeric(capability.maxTonnage) < requiredTonnage))) {
+          throw new Error(`ظرفیت تناژ ماشین برای عملیات ${assignment.stepCode} کافی نیست.`);
+        }
+        if ((capability.minThicknessMm != null && (thickness == null || thickness < numeric(capability.minThicknessMm))) ||
+          (capability.maxThicknessMm != null && (thickness == null || thickness > numeric(capability.maxThicknessMm)))) {
+          throw new Error(`محدوده ضخامت ورق با ماشین انتخاب‌شده برای عملیات ${assignment.stepCode} سازگار نیست.`);
+        }
+        if (assignment.dieId && !machine.dieCompatibilities.some((item: any) => item.dieId === assignment.dieId)) {
+          throw new Error(`سازگاری قالب با ماشین برای عملیات ${assignment.stepCode} تایید نشد.`);
+        }
+      }
       const customerLine = line.customerOrderLine;
       const planLine = await tx.productionPlanLine.create({
         data: {
