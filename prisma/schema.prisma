@@ -680,8 +680,10 @@ model ManufacturingOrder {
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
+  wipExecutionLink     WipManufacturingOrderLink?
   operations           ProductionOperation[]
   coilIssueReturnRecords CoilIssueReturnRecord[]
+  wipExecutionLink     WipOperationLink?
   reports              ProductionReport[]
   transfers            ProductionTransfer[]
   reservations         InventoryReservation[]
@@ -1709,3 +1711,32 @@ model InventoryAppStateSnapshot {
 
   @@map("inventory_app_state_snapshots")
 }
+
+// Explicit identity bridge between the snapshot-based WIP execution engine and
+// normalized production records. Snapshot IDs are never treated as database IDs.
+model WipManufacturingOrderLink {
+  id                    String                     @id @default(uuid())
+  wipManufacturingOrderId String                   @unique
+  manufacturingOrderId  String                     @unique
+  manufacturingOrder    ManufacturingOrder         @relation(fields: [manufacturingOrderId], references: [id], onDelete: Restrict)
+  operationLinks        WipOperationLink[]
+  createdAt             DateTime                   @default(now())
+  createdBy              String?
+  notes                  String?
+
+  @@map("wip_manufacturing_order_links")
+}
+
+model WipOperationLink {
+  id                         String                       @id @default(uuid())
+  wipOperationId             String                       @unique
+  manufacturingOrderLinkId   String
+  manufacturingOrderLink     WipManufacturingOrderLink    @relation(fields: [manufacturingOrderLinkId], references: [id], onDelete: Cascade)
+  productionOperationId      String                       @unique
+  productionOperation        ProductionOperation          @relation(fields: [productionOperationId], references: [id], onDelete: Restrict)
+  createdAt                  DateTime                     @default(now())
+
+  @@unique([manufacturingOrderLinkId, productionOperationId])
+  @@map("wip_operation_links")
+}
+
