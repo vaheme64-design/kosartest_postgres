@@ -3654,10 +3654,9 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           ? await tx.part.findFirst({ where: { OR: [{ id: request.partRef }, { partNumber: request.partRef }] } })
           : await tx.part.findUnique({ where: { id: mo.partId } });
         if (!targetPart) throw new Error(`قطعه مقصد دستور ساخت ${mo.moNumber} در اطلاعات پایه یافت نشد.`);
-        const operation = request.operationRef
-          ? await tx.productionOperation.findUnique({ where: { id: request.operationRef } })
-          : null;
-        if (request.operationRef && (!operation || operation.manufacturingOrderId !== mo.id)) {
+        if (!request.operationRef) throw new Error(`برای ردیابی مرحله مصرف، انتخاب عملیات تولید دستور ${mo.moNumber} الزامی است.`);
+        const operation = await tx.productionOperation.findUnique({ where: { id: request.operationRef } });
+        if (!operation || operation.manufacturingOrderId !== mo.id) {
           throw new Error(`عملیات «${request.operationRef}» به دستور ساخت ${mo.moNumber} تعلق ندارد یا یافت نشد.`);
         }
 
@@ -3688,6 +3687,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
               lineNumber,
               partId: dbPart.id,
               physicalCoilId: dbCoil.id,
+              productionOperationId: operation.id,
               materialLotId: dbCoil.materialLotId,
               locationId: balance.locationId,
               quantity: weight,
@@ -3708,6 +3708,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
               partId: dbPart.id,
               materialLotId: dbCoil.materialLotId,
               physicalCoilId: dbCoil.id,
+              productionOperationId: operation.id,
               warehouseId: dbCoil.warehouseId,
               locationId: balance.locationId,
               transactionType: 'OUTBOUND',
@@ -4033,6 +4034,7 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
             documentId: doc.id, lineNumber, partId: dbCoil.partId,
             physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
             locationId: targetLocation?.id || null, quantity: applied,
+            productionOperationId: issue.productionOperationId || null,
             unitId: dbPart.unitId, weightKg: applied, ownership: dbCoil.ownership,
             contractId, contractNumber, qualityStatus: 'AVAILABLE',
             notes: `برگشت ته‌کلاف ${dbCoil.coilId}؛ حواله مبدا ${issue.documentNumber}`,
@@ -4044,6 +4046,7 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
             documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
             materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
             warehouseId: targetWarehouse.id, locationId: targetLocation?.id || null,
+            productionOperationId: issue.productionOperationId || null,
             transactionType: 'INBOUND', quantity: applied, quantitySigned: applied,
             unitId: dbPart.unitId, weightKg: applied, weightKgSigned: applied,
             ownership: dbCoil.ownership, contractId, contractNumber,
