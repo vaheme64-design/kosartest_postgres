@@ -65,5 +65,14 @@ jobs:
       - name: Verify production-safe master seed
         run: bun run seed:master
 
-      - name: Automated tests
-        run: bun run test
+      - name: Inventory regression tests
+        run: bunx tsx scripts/test-inventory.ts
+
+      - name: WIP reconciliation tests
+        run: bunx tsx scripts/test-wip-reconciliation.ts
+
+      - name: Production planning tests
+        run: bunx tsx scripts/test-production-planning.ts
+
+      - name: Management reports tests
+        run: bunx tsx scripts/test-management-reports.ts
