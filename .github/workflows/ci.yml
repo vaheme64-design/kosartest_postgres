@@ -97,6 +97,9 @@ jobs:
       - name: Production planning tests
         run: bunx tsx scripts/test-production-planning.ts
 
+      - name: PostgreSQL customer-order HTTP integration test
+        run: bunx tsx scripts/test-planning-customer-orders-http.ts
+
       - name: Management reports tests
         run: bunx tsx scripts/test-management-reports.ts
 
