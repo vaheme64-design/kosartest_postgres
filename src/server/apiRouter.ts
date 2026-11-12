@@ -3469,40 +3469,35 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
 
 apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response) => {
   try {
-    if (!isDatabaseUrlConfigured()) {
-      return res.status(503).json({ success: false, error: 'صدور کلاف بدون اتصال PostgreSQL مجاز نیست.' });
-    }
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'صدور کلاف بدون اتصال PostgreSQL مجاز نیست.' });
     const { id } = req.params;
-    const { issuedWeightKg, moId, moOperationId, scrappedKg, user, multiParts } = req.body;
+    const { issuedWeightKg, moId, moOperationId, scrappedKg, multiParts } = req.body;
     const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
-    const prisma = getPrismaClient();
-    const issuedAt = new Date();
     const requested = Array.isArray(multiParts) && multiParts.length > 0
-      ? multiParts.map((p: any, index: number) => ({
-          id: `CIR-${Date.now()}-${index}-${Math.floor(Math.random() * 100000)}`,
-          manufacturingOrderId: p.moId || null,
-          documentNumber: String(p.documentNumber || `ISS-${coil.coilId}-${p.moId || index + 1}`),
+      ? multiParts.map((p: any) => ({
+          manufacturingOrderRef: p.moId || moId || null,
+          operationRef: p.moOperationId || moOperationId || null,
+          partRef: p.partId || p.partCode || null,
           issuedWeightKg: Number(p.issuedWeightKg) || 0,
           varianceWeightKg: Number(p.scrappedKg) || 0,
-          notes: `صدور کلاف برای ${p.partCode || p.partName || 'سفارش تولید'}؛ عملیات ${p.moOperationId || 'ثبت نشده'}`,
+          notes: String(p.notes || ''),
         }))
       : [{
-          id: `CIR-${Date.now()}-${Math.floor(Math.random() * 100000)}`,
-          manufacturingOrderId: moId || null,
-          documentNumber: String(req.body.documentNumber || `ISS-${coil.coilId}-${Date.now()}`),
+          manufacturingOrderRef: moId || null,
+          operationRef: moOperationId || null,
+          partRef: req.body.partId || req.body.partCode || null,
           issuedWeightKg: Number(issuedWeightKg) || 0,
           varianceWeightKg: Number(scrappedKg) || 0,
-          notes: `حواله ${Number(issuedWeightKg) || 0} کیلوگرم به کارت ساخت ${moId || 'ثبت‌نشده'}؛ عملیات ${moOperationId || 'ثبت‌نشده'}`,
+          notes: '',
         }];
-
-    const totalIssuedKg = requested.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
-    if (requested.some((row: any) => !Number.isFinite(row.issuedWeightKg) || row.issuedWeightKg <= 0 || !Number.isFinite(row.varianceWeightKg) || row.varianceWeightKg < 0)) {
-      return res.status(400).json({ success: false, error: 'وزن حواله باید مثبت و وزن ضایعات نمی‌تواند منفی باشد.' });
+    if (requested.some((row: any) => !Number.isFinite(row.issuedWeightKg) || row.issuedWeightKg <= 0 || !Number.isFinite(row.varianceWeightKg) || row.varianceWeightKg < 0 || row.varianceWeightKg > row.issuedWeightKg)) {
+      return res.status(400).json({ success: false, error: 'وزن حواله باید مثبت و وزن ضایعات باید بین صفر و وزن حواله باشد.' });
     }
-    if (totalIssuedKg <= 0) return res.status(400).json({ success: false, error: 'وزن حواله معتبر نیست.' });
-
+    const totalIssuedKg = requested.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
+    const prisma = getPrismaClient();
+    const issuedAt = new Date();
     const persisted = await prisma.$transaction(async (tx: any) => {
       const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
       if (!dbCoil) throw new Error('کلاف در پایگاه داده عملیاتی وجود ندارد؛ ابتدا رسید کلاف را ثبت کنید.');
@@ -3510,34 +3505,158 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         throw new Error('کلاف قرنطینه یا مسدود است و امکان صدور ندارد.');
       }
       const availableKg = Number(dbCoil.remainingWeightKg);
-      if (totalIssuedKg > availableKg) throw new Error(`وزن حواله (${totalIssuedKg}) از مانده ثبت‌شده PostgreSQL (${availableKg}) بیشتر است.`);
+      if (totalIssuedKg > availableKg) throw new Error(`وزن حواله (${totalIssuedKg}) از مانده کلاف (${availableKg}) بیشتر است.`);
 
-      const update = await tx.physicalCoil.updateMany({
+      const balances = await tx.stockBalance.findMany({
+        where: { physicalCoilId: dbCoil.id, qualityStatus: 'AVAILABLE', weightKgAvailable: { gt: 0 } },
+        orderBy: [{ contractNumber: 'asc' }, { updatedAt: 'asc' }],
+      });
+      const totalAvailable = balances.reduce((sum: number, row: any) => sum + Number(row.weightKgAvailable), 0);
+      if (totalAvailable < totalIssuedKg) {
+        throw new Error(`مانده قابل صدور در کاردکس این کلاف (${totalAvailable} kg) با وزن درخواستی (${totalIssuedKg} kg) کافی نیست؛ ابتدا موجودی کلاف را تطبیق دهید.`);
+      }
+      const dbPart = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+      if (!dbPart) throw new Error('کالای پایه کلاف در PostgreSQL یافت نشد.');
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای صدور سند رسمی حواله، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+
+      const docNumber = `ISS-COIL-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      const doc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: docNumber,
+          documentType: 'ISSUE',
+          documentDate: issuedAt,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: dbCoil.warehouseId,
+          referenceType: 'MANUFACTURING_ORDER',
+          referenceNumber: requested.map((row: any) => row.manufacturingOrderRef).filter(Boolean).join(', ') || dbCoil.coilId,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: issuedAt,
+          notes: `حواله ${totalIssuedKg} کیلوگرم از کلاف ${dbCoil.coilId} به تولید`,
+        },
+      });
+
+      const balanceRemainders = balances.map((balance: any) => ({ balance, remaining: Number(balance.weightKgAvailable) }));
+      const entries: any[] = [];
+      let lineNumber = 0;
+      const createdRecords: any[] = [];
+      for (const request of requested) {
+        let requestRemaining = request.issuedWeightKg;
+        const mo = request.manufacturingOrderRef
+          ? await tx.manufacturingOrder.findFirst({ where: { OR: [{ id: request.manufacturingOrderRef }, { moNumber: request.manufacturingOrderRef }] } })
+          : null;
+        const targetPart = request.partRef
+          ? await tx.part.findFirst({ where: { OR: [{ id: request.partRef }, { partNumber: request.partRef }] } })
+          : null;
+        const operation = request.operationRef
+          ? await tx.productionOperation.findUnique({ where: { id: request.operationRef } })
+          : null;
+
+        for (const source of balanceRemainders) {
+          if (requestRemaining <= 0) break;
+          if (source.remaining <= 0) continue;
+          const weight = Math.min(source.remaining, requestRemaining);
+          if (weight <= 0) continue;
+          source.remaining = Math.round((source.remaining - weight) * 1000) / 1000;
+          requestRemaining = Math.round((requestRemaining - weight) * 1000) / 1000;
+          lineNumber += 1;
+          const balance = source.balance;
+          const nextOnHand = Number(balance.weightKgOnHand) - weight;
+          const nextAvailable = Number(balance.weightKgAvailable) - weight;
+          await tx.stockBalance.update({
+            where: { id: balance.id },
+            data: {
+              quantityOnHand: { decrement: weight },
+              quantityAvailable: { decrement: weight },
+              weightKgOnHand: { decrement: weight },
+              weightKgAvailable: { decrement: weight },
+              lastTransactionAt: issuedAt,
+            },
+          });
+          const line = await tx.inventoryDocumentLine.create({
+            data: {
+              documentId: doc.id,
+              lineNumber,
+              partId: dbPart.id,
+              physicalCoilId: dbCoil.id,
+              materialLotId: dbCoil.materialLotId,
+              locationId: balance.locationId,
+              quantity: weight,
+              unitId: dbPart.unitId,
+              weightKg: weight,
+              ownership: balance.ownership,
+              contractId: balance.contractId,
+              contractNumber: balance.contractNumber,
+              qualityStatus: balance.qualityStatus,
+              notes: `مصرف کلاف ${dbCoil.coilId} برای ${mo?.moNumber || request.manufacturingOrderRef || 'سفارش ثبت‌نشده'}`,
+            },
+          });
+          await tx.inventoryTransaction.create({
+            data: {
+              transactionNumber: `TRX-COIL-ISS-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+              documentId: doc.id,
+              documentLineId: line.id,
+              partId: dbPart.id,
+              materialLotId: dbCoil.materialLotId,
+              physicalCoilId: dbCoil.id,
+              warehouseId: dbCoil.warehouseId,
+              locationId: balance.locationId,
+              transactionType: 'OUTBOUND',
+              quantity: weight,
+              quantitySigned: -weight,
+              unitId: dbPart.unitId,
+              weightKg: weight,
+              weightKgSigned: -weight,
+              ownership: balance.ownership,
+              contractId: balance.contractId,
+              contractNumber: balance.contractNumber,
+              qualityStatus: balance.qualityStatus,
+              balanceAfter: nextOnHand,
+              balanceKgAfter: nextOnHand,
+              transactionDate: issuedAt,
+              createdByUserId: user.id,
+              manufacturingOrderId: mo?.id || null,
+            },
+          });
+          const varianceForSegment = request.issuedWeightKg > 0 ? request.varianceWeightKg * (weight / request.issuedWeightKg) : 0;
+          const record = await tx.coilIssueReturnRecord.create({
+            data: {
+              id: `CIR-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+              coilId: dbCoil.id,
+              inventoryDocumentId: doc.id,
+              contractId: balance.contractId,
+              partId: targetPart?.id || dbPart.id,
+              productionOperationId: operation?.id || null,
+              manufacturingOrderId: mo?.id || null,
+              documentNumber: docNumber,
+              issuedWeightKg: weight,
+              consumedWeightKg: 0,
+              returnedWeightKg: 0,
+              outstandingWeightKg: weight,
+              varianceWeightKg: varianceForSegment,
+              status: 'ISSUED',
+              issuedAt,
+              notes: request.notes || `حواله ${weight} کیلوگرم به ${mo?.moNumber || request.manufacturingOrderRef || 'خط تولید'}؛ قرارداد ${balance.contractNumber || 'بدون تخصیص'}`,
+            },
+          });
+          createdRecords.push(record);
+          entries.push({ weight, contractNumber: balance.contractNumber });
+        }
+        if (requestRemaining > 0.001) throw new Error(`موجودی قابل تخصیص برای سفارش ${request.manufacturingOrderRef || 'نامشخص'} کافی نیست.`);
+      }
+
+      const coilUpdate = await tx.physicalCoil.updateMany({
         where: { id: dbCoil.id, remainingWeightKg: { gte: totalIssuedKg }, qualityStatus: 'AVAILABLE', physicalStatus: { not: 'BLOCKED' } },
         data: {
           remainingWeightKg: { decrement: totalIssuedKg },
           physicalStatus: totalIssuedKg === availableKg ? 'CONSUMED' : 'PARTIALLY_ISSUED',
         },
       });
-      if (update.count !== 1) throw new Error('مانده کلاف هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و دوباره تلاش کنید.');
-
-      const records = requested.map((row: any) => ({
-        id: row.id,
-        coilId: dbCoil.id,
-        manufacturingOrderId: row.manufacturingOrderId,
-        documentNumber: row.documentNumber,
-        issuedWeightKg: row.issuedWeightKg,
-        consumedWeightKg: 0,
-        returnedWeightKg: 0,
-        outstandingWeightKg: row.issuedWeightKg,
-        varianceWeightKg: row.varianceWeightKg,
-        status: 'ISSUED',
-        issuedAt,
-        notes: row.notes,
-      }));
-      await tx.coilIssueReturnRecord.createMany({ data: records });
+      if (coilUpdate.count !== 1) throw new Error('مانده کلاف هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و دوباره تلاش کنید.');
       const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
-      return { coil: updatedCoil, records };
+      return { coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries };
     });
 
     coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
@@ -3554,20 +3673,17 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
       issuedAt: row.issuedAt.toISOString(),
     }));
     coilIssueRecordsStore.unshift(...issueRecords);
-
     res.json({
       success: true,
-      message: `حواله ${totalIssuedKg} کیلوگرم از کلاف «${coil.coilId}» در PostgreSQL ثبت شد. مانده: ${coil.remainingWeightKg} کیلوگرم.`,
+      message: `حواله ${totalIssuedKg} کیلوگرم از کلاف «${coil.coilId}» در سند ${persisted.documentNumber} ثبت شد. مانده: ${coil.remainingWeightKg} کیلوگرم.`,
       coil,
       issueRecords,
       issueRecord: issueRecords[0],
-      persistence: 'POSTGRESQL_TRANSACTIONAL',
+      documentNumber: persisted.documentNumber,
+      persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
     });
   } catch (error) {
-    res.status(409).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک حواله کلاف',
-    });
+    res.status(409).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک حواله کلاف' });
   }
 });
 
