@@ -3198,6 +3198,50 @@ apiRouter.get('/inventory/audit-logs', (_req: Request, res: Response) => {
 /**
  * 16.13. Physical Coils & Partial-Coil Management
  */
+apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'فهرست دستور ساخت و عملیات فقط از PostgreSQL قابل دریافت است.' });
+    const prisma = getPrismaClient();
+    const orders = await prisma.manufacturingOrder.findMany({
+      where: {
+        status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS'] },
+        operations: { some: { status: { in: ['READY', 'IN_PROGRESS'] } } },
+      },
+      include: {
+        part: { select: { partNumber: true, name: true } },
+        operations: {
+          where: { status: { in: ['READY', 'IN_PROGRESS'] } },
+          include: {
+            operation: { select: { code: true, name: true, processType: true } },
+            plannedMachine: { select: { code: true, name: true } },
+          },
+          orderBy: { stepNumber: 'asc' },
+        },
+      },
+      orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
+    });
+    const data = orders.map((order: any) => ({
+      id: order.id,
+      moNumber: order.moNumber,
+      partCode: order.part.partNumber,
+      partName: order.part.name,
+      status: order.status,
+      operations: order.operations.map((operation: any) => ({
+        id: operation.id,
+        stepNumber: operation.stepNumber,
+        operationCode: operation.operation.code,
+        operationName: operation.operation.name,
+        processType: operation.operation.processType,
+        status: operation.status,
+        plannedMachine: operation.plannedMachine ? `${operation.plannedMachine.code} - ${operation.plannedMachine.name}` : null,
+      })),
+    }));
+    res.json({ success: true, source: 'POSTGRESQL_MANUFACTURING_ORDERS_AND_READY_OPERATIONS', count: data.length, data });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت گزینه‌های صدور کلاف' });
+  }
+});
+
 apiRouter.get('/inventory/coils', (req: Request, res: Response) => {
   try {
     const { partId, materialGrade, warehouseId, ownership, packNumber, search } = req.query;
