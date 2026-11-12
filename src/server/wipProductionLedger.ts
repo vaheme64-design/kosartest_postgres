@@ -4,7 +4,7 @@ export interface WipProductionLedgerInput {
   wipManufacturingOrderId: string;
   wipOperationId: string;
   idempotencyKey: string;
-  machineId: string;
+  machineId?: string;
   shiftId: string;
   createdByUserId: string;
   reportDate?: string;
@@ -48,7 +48,7 @@ export async function findWipProductionReportByKey(idempotencyKey: string) {
 export async function postWipProductionAtomically(input: WipProductionLedgerInput) {
   const {
     wipManufacturingOrderId, wipOperationId, idempotencyKey,
-    machineId, shiftId, createdByUserId, goodQty, scrapQty,
+    shiftId, createdByUserId, goodQty, scrapQty,
     reworkQty, rejectedQty, operatorName, snapshotPayload,
   } = input;
 
@@ -97,11 +97,15 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
       throw new Error('Linked relational operation does not belong to the linked manufacturing order.');
     }
 
-    const machine = await tx.machine.findUnique({ where: { id: machineId } });
+    const effectiveMachineId = machineId || relationalOperation.plannedMachineId;
+    if (!effectiveMachineId) {
+      throw new Error('A relationalMachineId is required because the linked production operation has no planned machine.');
+    }
+    const machine = await tx.machine.findUnique({ where: { id: effectiveMachineId } });
     if (!machine || !machine.active || machine.status !== 'ACTIVE') {
       throw new Error('A valid active relational machineId is required for the production report.');
     }
-    if (relationalOperation.plannedMachineId && relationalOperation.plannedMachineId !== machineId) {
+    if (relationalOperation.plannedMachineId && relationalOperation.plannedMachineId !== effectiveMachineId) {
       throw new Error('Reported machine does not match the machine assigned to the linked production operation.');
     }
     const shift = await tx.shift.findUnique({ where: { id: shiftId } });
@@ -157,7 +161,7 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
         reportNumber,
         manufacturingOrderId: relationalOrder.id,
         productionOperationId: relationalOperation.id,
-        machineId,
+        machineId: effectiveMachineId,
         shiftId,
         operatorUserId: createdByUserId,
         reportDate,
@@ -201,6 +205,7 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
         physicalCoilId: base.physicalCoilId,
         ownership: base.ownership,
         contractId: base.contractId,
+        contractNumber: base.contractNumber,
         qualityStatus,
       };
       const existing = await tx.stockBalance.findFirst({ where: identity });
@@ -258,6 +263,10 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
     };
 
     let remainingToConsume = totalQty;
+    let remainingGood = goodQty;
+    let remainingScrap = scrapQty;
+    let remainingRework = reworkQty;
+    let remainingRejected = rejectedQty;
     let transactionIndex = 0;
     const postMovement = async (args: {
       base: any;
@@ -314,11 +323,22 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
         transactionType: 'OUTBOUND',
       });
 
+      const isLastSourceSlice = remainingToConsume - take <= 1e-9;
+      const proportionalSlice = (original: number, remaining: number) =>
+        isLastSourceSlice ? remaining : Math.min(remaining, Math.round(original * (take / totalQty) * 1e6) / 1e6);
+      const goodSlice = proportionalSlice(goodQty, remainingGood);
+      const scrapSlice = proportionalSlice(scrapQty, remainingScrap);
+      const reworkSlice = proportionalSlice(reworkQty, remainingRework);
+      const rejectedSlice = proportionalSlice(rejectedQty, remainingRejected);
+      remainingGood -= goodSlice;
+      remainingScrap -= scrapSlice;
+      remainingRework -= reworkSlice;
+      remainingRejected -= rejectedSlice;
       const destinations: Array<{ quantity: number; location: any; qualityStatus: string }> = [
-        { quantity: goodQty * (take / totalQty), location: targetLocation, qualityStatus: 'AVAILABLE' },
-        { quantity: scrapQty * (take / totalQty), location: scrapWarehouse?.locations?.[0], qualityStatus: 'SCRAP' },
-        { quantity: reworkQty * (take / totalQty), location: sourceLocation, qualityStatus: 'REWORK' },
-        { quantity: rejectedQty * (take / totalQty), location: sourceLocation, qualityStatus: 'REJECTED' },
+        { quantity: goodSlice, location: targetLocation, qualityStatus: 'AVAILABLE' },
+        { quantity: scrapSlice, location: scrapWarehouse?.locations?.[0], qualityStatus: 'SCRAP' },
+        { quantity: reworkSlice, location: sourceLocation, qualityStatus: 'REWORK' },
+        { quantity: rejectedSlice, location: sourceLocation, qualityStatus: 'REJECTED' },
       ];
       for (const destination of destinations) {
         if (destination.quantity <= 0) continue;
@@ -336,6 +356,9 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
         });
       }
       remainingToConsume -= take;
+    }
+    if ([remainingGood, remainingScrap, remainingRework, remainingRejected].some(value => Math.abs(value) > 1e-6)) {
+      throw new Error('Inventory movement allocation did not conserve the reported quantities.');
     }
 
     await tx.productionOperation.update({
