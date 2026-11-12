@@ -3538,7 +3538,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         },
       });
 
-      const balanceRemainders = balances.map((balance: any) => ({ balance, remaining: Number(balance.weightKgAvailable) }));
+      const balanceRemainders = balances.map((balance: any) => ({ balance, initialOnHand: Number(balance.weightKgOnHand), initialAvailable: Number(balance.weightKgAvailable), remaining: Number(balance.weightKgAvailable) }));
       const entries: any[] = [];
       let lineNumber = 0;
       const createdRecords: any[] = [];
@@ -3563,10 +3563,10 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           requestRemaining = Math.round((requestRemaining - weight) * 1000) / 1000;
           lineNumber += 1;
           const balance = source.balance;
-          const nextOnHand = Number(balance.weightKgOnHand) - weight;
-          const nextAvailable = Number(balance.weightKgAvailable) - weight;
-          await tx.stockBalance.update({
-            where: { id: balance.id },
+          const nextOnHand = source.initialOnHand - (source.initialAvailable - source.remaining);
+          const nextAvailable = source.remaining;
+          const balanceUpdate = await tx.stockBalance.updateMany({
+            where: { id: balance.id, weightKgAvailable: { gte: weight }, weightKgOnHand: { gte: weight } },
             data: {
               quantityOnHand: { decrement: weight },
               quantityAvailable: { decrement: weight },
@@ -3575,6 +3575,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
               lastTransactionAt: issuedAt,
             },
           });
+          if (balanceUpdate.count !== 1) throw new Error('مانده کاردکس قرارداد هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی کنید.');
           const line = await tx.inventoryDocumentLine.create({
             data: {
               documentId: doc.id,
@@ -3647,6 +3648,12 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         if (requestRemaining > 0.001) throw new Error(`موجودی قابل تخصیص برای سفارش ${request.manufacturingOrderRef || 'نامشخص'} کافی نیست.`);
       }
 
+      if (dbCoil.materialLotId) {
+        await tx.materialLot.updateMany({
+          where: { id: dbCoil.materialLotId, remainingWeightKg: { gte: totalIssuedKg } },
+          data: { remainingWeightKg: { decrement: totalIssuedKg } },
+        }).then((result: any) => { if (result.count !== 1) throw new Error('مانده لوت ماده اولیه با مانده کلاف تطبیق ندارد؛ صدور لغو شد.'); });
+      }
       const coilUpdate = await tx.physicalCoil.updateMany({
         where: { id: dbCoil.id, remainingWeightKg: { gte: totalIssuedKg }, qualityStatus: 'AVAILABLE', physicalStatus: { not: 'BLOCKED' } },
         data: {
@@ -4758,7 +4765,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
           source: 'POSTGRESQL_INVENTORY_LEDGER_AND_PHYSICAL_COIL_RECORDS',
           rowCount: rows.length,
           truncated: transactions.length === 10000 || coils.length === 10000,
-          columns: ['sourceType', 'documentNumber', 'documentType', 'partCode', 'partName', 'quantity', 'unit', 'weightKg', 'coilNumber', 'heatNumber', 'manufacturingOrder', 'warehouse', 'contractNumber', 'date'],
+          columns: ['sourceType', 'documentNumber', 'documentType', 'partCode', 'partName', 'quantity', 'unit', 'weightKg', 'coilNumber', 'coilPackNumber', 'heatNumber', 'manufacturingOrder', 'warehouse', 'contractNumber', 'date'],
           summary: { inventoryTransactions: transactions.length, coilIssueReturnRecords: coils.length, totalRows: rows.length },
           data: rows,
           limitations: ['پیوند مستقیم فیزیکی کویل با تراکنش کاردکس هنوز برقرار نشده است؛ دو منبع داده در گزارش به‌صورت مجزا و با sourceType مشخص نمایش داده می‌شوند.'],
