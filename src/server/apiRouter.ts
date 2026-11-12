@@ -3432,59 +3432,91 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
 /**
  * 16.13.1. Coil Lifecycle & Genealogy Traceability Report
  */
-apiRouter.get('/inventory/coils/:id/genealogy', (req: Request, res: Response) => {
+apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'شناسنامه ردیابی کلاف فقط از پایگاه داده عملیاتی قابل ارائه است.' });
+    }
     const { id } = req.params;
-    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id || c.coilPackNumber === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
-    }
+    const prisma = getPrismaClient();
+    const coil = await prisma.physicalCoil.findFirst({
+      where: { OR: [{ id }, { coilId: id }, { coilPackNumber: id }] },
+      include: {
+        material: { select: { code: true, name: true, grade: true, standard: true } },
+        part: { select: { partNumber: true, name: true } },
+        warehouse: { select: { code: true, name: true } },
+        warehouseLocation: { select: { code: true } },
+        contractAllocations: {
+          include: { contract: { select: { id: true, contractNumber: true, title: true, status: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
+        issueReturnRecords: { orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }] },
+      },
+    });
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی در PostgreSQL یافت نشد.' });
 
-    // Find all issue and return records
-    const records = coilIssueRecordsStore.filter(r => r.coilId === coil.id || r.coilId === coil.coilId);
-
-    // Find related inventory documents mentioning this coil or heat
-    const relatedDocs = inventoryDocsStore.filter(doc =>
-      doc.lines.some(l => l.lotNumber === coil.coilPackNumber || l.lotNumber === coil.coilId || l.heatNumber === coil.heatNumber)
-    );
-
-    // Calculate consumption statistics
-    const totalIssuedKg = records.reduce((sum, r) => sum + (r.issuedWeightKg || 0), 0);
-    const totalReturnedKg = records.reduce((sum, r) => sum + (r.returnedWeightKg || 0), 0);
-    const totalScrappedKg = records.reduce((sum, r) => sum + (r.scrappedKg || 0), 0);
-    const netConsumedKg = Math.max(0, totalIssuedKg - totalReturnedKg);
-
-    let lifecycleStatus: 'FULL' | 'PARTIAL' | 'CONSUMED' = 'FULL';
-    if (coil.remainingWeightKg <= 0) {
-      lifecycleStatus = 'CONSUMED';
-    } else if (coil.remainingWeightKg < coil.originalWeightKg) {
-      lifecycleStatus = 'PARTIAL';
-    }
+    const records = coil.issueReturnRecords.map((row: any) => ({
+      ...row,
+      issuedWeightKg: Number(row.issuedWeightKg),
+      consumedWeightKg: Number(row.consumedWeightKg),
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: Number(row.outstandingWeightKg),
+      varianceWeightKg: Number(row.varianceWeightKg),
+    }));
+    const totalIssuedKg = records.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
+    const totalReturnedKg = records.reduce((sum: number, row: any) => sum + row.returnedWeightKg, 0);
+    const totalConsumedKg = records.reduce((sum: number, row: any) => sum + row.consumedWeightKg, 0);
+    const totalVarianceKg = records.reduce((sum: number, row: any) => sum + row.varianceWeightKg, 0);
+    const remainingWeightKg = Number(coil.remainingWeightKg);
+    const originalWeightKg = Number(coil.originalWeightKg);
+    const allocations = coil.contractAllocations.map((row: any) => ({
+      id: row.id,
+      contractId: row.contractId,
+      contractNumber: row.contract.contractNumber,
+      contractTitle: row.contract.title,
+      contractStatus: row.contract.status,
+      allocatedWeightKg: Number(row.allocatedWeightKg),
+      ownership: row.ownership,
+      sourceDocumentId: row.sourceDocumentId,
+      notes: row.notes,
+    }));
 
     res.json({
       success: true,
+      source: 'POSTGRESQL_PHYSICAL_COIL_GENEALOGY',
       data: {
-        coil,
-        lifecycleStatus,
+        coil: {
+          ...coil,
+          originalWeightKg,
+          remainingWeightKg,
+          thicknessMm: Number(coil.thicknessMm),
+          widthMm: Number(coil.widthMm),
+          warehouseName: coil.warehouse?.name,
+          warehouseCode: coil.warehouse?.code,
+          warehouseLocationCode: coil.warehouseLocation?.code,
+          materialGrade: coil.material?.grade,
+          partCode: coil.part?.partNumber,
+          partName: coil.part?.name,
+        },
+        lifecycleStatus: remainingWeightKg <= 0 ? 'CONSUMED' : remainingWeightKg < originalWeightKg ? 'PARTIAL' : 'FULL',
         metrics: {
-          originalWeightKg: coil.originalWeightKg,
-          remainingWeightKg: coil.remainingWeightKg,
+          originalWeightKg,
+          remainingWeightKg,
           totalIssuedKg,
           totalReturnedKg,
-          totalScrappedKg,
-          netConsumedKg,
-          utilizationPercent: coil.originalWeightKg > 0 ? Math.round((netConsumedKg / coil.originalWeightKg) * 100) : 0,
+          totalConsumedKg,
+          totalVarianceKg,
+          outstandingAtProductionKg: records.reduce((sum: number, row: any) => sum + row.outstandingWeightKg, 0),
+          utilizationPercent: originalWeightKg > 0 ? Math.round(((totalConsumedKg + totalVarianceKg) / originalWeightKg) * 10000) / 100 : 0,
         },
         records,
-        relatedDocs,
-        allocations: coil.allocations || [],
+        allocations,
+        relatedDocuments: [],
+        traceabilityLimitations: ['پیوند مستقیم رکورد کلاف با سند رسید و تراکنش کاردکس هنوز در مدل داده برقرار نشده است.'],
       },
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در استخراج شناسنامه و ردگیری کلاف',
-    });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در استخراج شناسنامه ردیابی کلاف' });
   }
 });
 
