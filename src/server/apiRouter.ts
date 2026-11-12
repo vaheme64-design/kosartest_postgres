@@ -31,6 +31,7 @@ import {
 import { checkDatabaseConnection, getPrismaClient, isDatabaseUrlConfigured } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
+import { linkWipManufacturingOrderToRelational } from './wipIdentityBridge';
 
 import {
   calculateDetailedStockBalances,
@@ -9479,6 +9480,44 @@ apiRouter.get('/erp-services/capacity-overlaps', async (req: Request, res: Respo
       success: false,
       error: error instanceof Error ? error.message : 'خطا در تحلیل تداخل ظرفیت ماشین‌آلات',
     });
+  }
+});
+
+
+/**
+ * POST /api/wip/identity-links
+ * Explicitly maps one snapshot WIP order and all its operations to normalized
+ * production records. This endpoint does not post inventory or production quantities.
+ */
+apiRouter.post('/wip/identity-links', async (req: Request, res: Response) => {
+  try {
+    const { wipManufacturingOrderId, manufacturingOrderId, createdBy, notes } = req.body || {};
+    if (
+      typeof wipManufacturingOrderId !== 'string' || !wipManufacturingOrderId.trim() ||
+      typeof manufacturingOrderId !== 'string' || !manufacturingOrderId.trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'شناسه دستور ساخت WIP و شناسه دستور ساخت دیتابیس الزامی است.',
+      });
+    }
+
+    const result = await linkWipManufacturingOrderToRelational(
+      wipManufacturingOrderId.trim(),
+      manufacturingOrderId.trim(),
+      typeof createdBy === 'string' ? createdBy : undefined,
+      typeof notes === 'string' ? notes : undefined,
+    );
+    return res.status(201).json({
+      success: true,
+      message: 'ارتباط هویتی دستور ساخت و تمام عملیات آن با موفقیت ثبت شد.',
+      data: result,
+      inventoryPosted: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در ایجاد ارتباط هویتی WIP';
+    const status = /not found/i.test(message) ? 404 : 409;
+    return res.status(status).json({ success: false, error: message, inventoryPosted: false });
   }
 });
 
