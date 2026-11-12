@@ -364,6 +364,7 @@ async function main() {
           contractId: contractA.id,
           partId: part.id,
           documentNumber: ids.returned,
+          issuedWeightKg: 0,
           returnedWeightKg: 12,
           outstandingWeightKg: 0,
           status: 'FULLY_RETURNED',
@@ -382,6 +383,7 @@ async function main() {
         tx.inventoryTransaction.findMany({ where: { physicalCoilId: coil.id } }),
         tx.inventoryDocumentLine.findMany({ where: { physicalCoilId: coil.id } }),
       ]);
+      if (!freshCoil || !freshLot) throw new Error('Physical coil or material lot disappeared during the reconciliation test.');
       const balanceWeight = balances.reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
       const outstanding = issueRecords.filter((row: any) => Number(row.issuedWeightKg) > 0).reduce((sum: number, row: any) => sum + Number(row.outstandingWeightKg), 0);
       if (Number(freshCoil.remainingWeightKg) !== 82) throw new Error(`Expected physical coil balance 82, got ${freshCoil.remainingWeightKg}.`);
