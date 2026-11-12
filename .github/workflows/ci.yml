@@ -100,6 +100,9 @@ jobs:
       - name: PostgreSQL customer-order HTTP integration test
         run: bunx tsx scripts/test-planning-customer-orders-http.ts
 
+      - name: PostgreSQL relational planning read-model integration test
+        run: bunx tsx scripts/test-relational-planning-read-model.ts
+
       - name: Management reports tests
         run: bunx tsx scripts/test-management-reports.ts
 
