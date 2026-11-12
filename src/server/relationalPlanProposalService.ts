@@ -61,6 +61,14 @@ function buildAssignments(route: any[]): OperationAssignment[] {
 export async function createRelationalPlanProposal(notes?: string) {
   const readModel = await getRelationalPlanningReadModel();
   const proposalLines: any[] = [];
+  const missingRouteDemand = readModel.requirements.flatMap((requirement: any) =>
+    !requirement.routeId || !requirement.route.length
+      ? requirement.demandLines.filter((line: any) => line.plannedQty > 0).map((line: any) => `${requirement.partCode} / ${line.customerOrderNumber}`)
+      : [],
+  );
+  if (missingRouteDemand.length) {
+    throw new Error(`برای بخشی از تقاضای باز مسیر تولید فعال و پیش‌فرض تعریف نشده است: ${missingRouteDemand.slice(0, 5).join('، ')}. ابتدا مسیر تولید را تکمیل کنید.`);
+  }
 
   for (const requirement of readModel.requirements) {
     if (!requirement.routeId || !requirement.route.length) continue;
