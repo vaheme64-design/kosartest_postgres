@@ -34,6 +34,14 @@ import { formatToJalali } from '../utils/jalali';
 import { linkWipManufacturingOrderToRelational } from './wipIdentityBridge';
 import { findWipProductionReportByKey, postWipProductionAtomically } from './wipProductionLedger';
 import { getRelationalPlanningReadModel } from './relationalPlanningReadModel';
+import {
+  approveRelationalPlanProposal,
+  createRelationalPlanProposal,
+  getRelationalPlanProposal,
+  listRelationalPlanProposals,
+  releaseRelationalPlanProposal,
+  reviseRelationalPlanProposal,
+} from './relationalPlanProposalService';
 
 import {
   calculateDetailedStockBalances,
@@ -6933,6 +6941,81 @@ apiRouter.get('/planning/read-model', async (_req: Request, res: Response) => {
       success: false,
       error: error instanceof Error ? error.message : 'خطا در بارگذاری مدل relational برنامه‌ریزی',
     });
+  }
+});
+
+apiRouter.get('/planning/proposals', async (_req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'مدیریت پیشنهادهای برنامه به PostgreSQL نیاز دارد.' });
+    const data = await listRelationalPlanProposals();
+    return res.json({ success: true, count: data.length, source: 'postgresql', data });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت پیشنهادهای برنامه' });
+  }
+});
+
+apiRouter.get('/planning/proposals/:id', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'مدیریت پیشنهادهای برنامه به PostgreSQL نیاز دارد.' });
+    const data = await getRelationalPlanProposal(req.params.id);
+    if (!data) return res.status(404).json({ success: false, error: 'پیشنهاد برنامه یافت نشد.' });
+    return res.json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت جزئیات پیشنهاد برنامه' });
+  }
+});
+
+apiRouter.post('/planning/proposals/regenerate', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'تولید پیشنهاد برنامه به PostgreSQL نیاز دارد.' });
+    const data = await createRelationalPlanProposal(typeof req.body?.notes === 'string' ? req.body.notes : undefined);
+    return res.status(201).json({ success: true, message: 'پیشنهاد نسخه ۱ از داده‌های relational ایجاد شد.', data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در تولید پیشنهاد برنامه';
+    return res.status(/وجود ندارد|پوشش می‌دهند|مسیر تولید ناقص/i.test(message) ? 409 : 500).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/revise', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'اصلاح پیشنهاد به PostgreSQL نیاز دارد.' });
+    const data = await reviseRelationalPlanProposal(
+      req.params.id,
+      Array.isArray(req.body?.changes) ? req.body.changes : [],
+      typeof req.body?.note === 'string' ? req.body.note : 'اصلاح دستی پیشنهاد برنامه',
+    );
+    return res.status(201).json({ success: true, message: `نسخه ${data.version} به‌صورت پیش‌نویس ایجاد شد.`, data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در اصلاح پیشنهاد برنامه';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 400).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/approve', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'تایید پیشنهاد به PostgreSQL نیاز دارد.' });
+    const approvedBy = typeof req.body?.approvedBy === 'string' && req.body.approvedBy.trim() ? req.body.approvedBy.trim() : 'کاربر تاییدکننده';
+    const data = await approveRelationalPlanProposal(req.params.id, approvedBy);
+    return res.json({ success: true, message: 'پیشنهاد در PostgreSQL تایید شد.', data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در تایید پیشنهاد';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 409).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/release', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'صدور برنامه به PostgreSQL نیاز دارد.' });
+    const releasedBy = typeof req.body?.releasedBy === 'string' && req.body.releasedBy.trim() ? req.body.releasedBy.trim() : 'کاربر صادرکننده';
+    const data = await releaseRelationalPlanProposal(req.params.id, releasedBy);
+    return res.status(data.replayed ? 200 : 201).json({
+      success: true,
+      message: data.replayed ? 'این پیشنهاد قبلاً صادر شده است؛ دستورهای ساخت قبلی بازگردانده شدند.' : 'برنامه تولید و دستورهای ساخت به‌صورت تراکنشی صادر شدند.',
+      data,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در صدور برنامه تولید';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 409).json({ success: false, error: message });
   }
 });
 
