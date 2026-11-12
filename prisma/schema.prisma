@@ -579,6 +579,7 @@ model CustomerOrder {
   orderDate               DateTime
   requestedDeliveryDate   DateTime
   customerContractNumber  String?        // شماره قرارداد یا برنامه ساپکو
+  priority                Int            @default(2) // 1: فوری، 2: عادی، 3: کم‌اهمیت
   documentStatus          DocumentStatus @default(DRAFT)
   notes                   String?
   totalAmount             Decimal?
