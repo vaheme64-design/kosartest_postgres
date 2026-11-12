@@ -3661,7 +3661,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
 
     for (const request of requested) {
       if (!request.initialInputQuantityPcs) continue;
-      if (requested.length !== 1 || !Number.isFinite(request.initialInputQuantityPcs) || request.initialInputQuantityPcs <= 0) {
+      if (requested.length !== 1 || !Number.isInteger(request.initialInputQuantityPcs) || request.initialInputQuantityPcs <= 0) {
         throw new Error('تعداد ورودی مرحله اول باید مثبت و برای یک دستور ساخت باشد.');
       }
       if (!request.wipManufacturingOrderId) throw new Error('دستور WIP متناظر با دستور ساخت پیدا نشد.');
@@ -3804,6 +3804,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           };
         }
 
+        let remainingPcsToAllocate = request.initialInputQuantityPcs;
         for (const source of balanceRemainders) {
           if (requestRemaining <= 0) break;
           if (source.remaining <= 0) continue;
@@ -3896,7 +3897,11 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
           createdRecords.push(record);
           if (wipPostingContext) {
             const netMaterialKg = Math.max(0, weight - varianceForSegment);
-            const pcsShare = request.initialInputQuantityPcs * (netMaterialKg / wipPostingContext.totalNetMaterialKg);
+            const proportionalPcs = Math.floor(request.initialInputQuantityPcs * (netMaterialKg / wipPostingContext.totalNetMaterialKg));
+            const pcsShare = requestRemaining <= 0.001
+              ? remainingPcsToAllocate
+              : Math.min(remainingPcsToAllocate, proportionalPcs);
+            remainingPcsToAllocate -= pcsShare;
             if (pcsShare > 0) {
               const wipWeightKg = pcsShare * wipPostingContext.netWeightPerPiece;
               const wipIdentity = {
@@ -3942,7 +3947,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
         if (requestRemaining > 0.001) throw new Error(`موجودی قابل تخصیص برای سفارش ${request.manufacturingOrderRef || 'نامشخص'} کافی نیست.`);
         if (wipPostingContext) {
           wipPostingContext.wipOperation.waitingInputQty = Number(wipPostingContext.wipOperation.waitingInputQty || 0) + request.initialInputQuantityPcs;
-          wipPostingContext.wipOperation.status = 'READY';
+          if (wipPostingContext.wipOperation.status === 'PENDING') wipPostingContext.wipOperation.status = 'READY';
           wipPostingContext.wipOperation.lastActivityAt = issuedAt.toISOString();
           wipPostingContext.wipOrder.initialInputQuantity = Number(wipPostingContext.wipOrder.initialInputQuantity || 0) + request.initialInputQuantityPcs;
           wipPostingContext.wipOrder.updatedAt = issuedAt.toISOString();
@@ -3981,7 +3986,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
       const linkedOperation = wipOrder?.operations.find(row => row.id === persisted.wipInput.wipOperationId);
       if (wipOrder && linkedOperation) {
         linkedOperation.waitingInputQty += persisted.wipInput.quantityPcs;
-        linkedOperation.status = 'READY';
+        if (linkedOperation.status === 'PENDING') linkedOperation.status = 'READY';
         linkedOperation.lastActivityAt = new Date().toISOString();
         wipOrder.initialInputQuantity += persisted.wipInput.quantityPcs;
         wipOrder.updatedAt = new Date().toISOString();
