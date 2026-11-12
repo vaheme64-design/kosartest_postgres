@@ -68,7 +68,7 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
     // Idempotency is checked inside the same serializable transaction as every posting.
     const alreadyPosted = await tx.productionReport.findUnique({
       where: { wipIdempotencyKey: idempotencyKey },
-      select: { id: true, reportNumber: true, goodQuantity: true, scrapQuantity: true, reworkQuantity: true, rejectedQuantity: true },
+      select: { id: true, reportNumber: true, goodQuantity: true, scrapQuantity: true, reworkQuantity: true, rejectedQuantity: true, scrapReasonText: true },
     });
     if (alreadyPosted) {
       return { duplicate: true, report: alreadyPosted, transactionCount: 0 };
