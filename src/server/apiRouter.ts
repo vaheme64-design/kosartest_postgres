@@ -379,8 +379,6 @@ export async function loadInventoryAppState(): Promise<void> {
     if (
       !payload ||
       !Array.isArray(payload.contracts) ||
-      !Array.isArray(payload.physicalCoils) ||
-      !Array.isArray(payload.coilIssueRecords) ||
       !Array.isArray(payload.reservations) ||
       !Array.isArray(payload.inventoryDocuments) ||
       !Array.isArray(payload.auditLogs) ||
@@ -390,8 +388,6 @@ export async function loadInventoryAppState(): Promise<void> {
     }
 
     contractsStore.splice(0, contractsStore.length, ...payload.contracts);
-    physicalCoilsStore.splice(0, physicalCoilsStore.length, ...payload.physicalCoils);
-    coilIssueRecordsStore.splice(0, coilIssueRecordsStore.length, ...payload.coilIssueRecords);
     reservationsStore.splice(0, reservationsStore.length, ...payload.reservations);
     inventoryDocsStore.splice(0, inventoryDocsStore.length, ...payload.inventoryDocuments);
     auditLogsStore.splice(0, auditLogsStore.length, ...payload.auditLogs);
