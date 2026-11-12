@@ -169,6 +169,7 @@ export async function postWipProductionAtomically(input: WipProductionLedgerInpu
         scrapQuantity: scrapQty,
         reworkQuantity: reworkQty,
         rejectedQuantity: rejectedQty,
+        scrapReasonText: input.scrapReason || null,
         notes: input.notes || null,
         documentStatus: 'CONFIRMED',
         postingStatus: 'POSTED',
