@@ -26,7 +26,7 @@ async function requestJson(baseUrl: string, path: string, method = 'GET', body?:
 async function main() {
   assert(process.env.DATABASE_URL, 'DATABASE_URL is required for HTTP inventory integration tests.');
 
-  const [warehouse, location, customer, mo, partCandidates] = await Promise.all([
+  const [warehouse, location, partCandidates, customer, mo] = await Promise.all([
     prisma.warehouse.findFirst({ where: { code: 'WH-RAW', active: true } }),
     prisma.warehouseLocation.findFirst({ where: { code: 'LOC-RAW-A1', active: true, warehouse: { code: 'WH-RAW' } } }),
     prisma.part.findMany({
