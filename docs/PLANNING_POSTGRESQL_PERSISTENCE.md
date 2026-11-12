@@ -51,3 +51,30 @@ Planning suggestions, dashboard metrics, manual machine evaluation, approval, re
 - Raw material availability is matched by the finished-good part's `materialId` to raw-material parts in active `RAW_MATERIALS` warehouses.
 - Required sheet weight uses `Part.weightGrossKg` multiplied by the sum of route-operation scrap norms. If material identity or engineering gross weight is missing, the read model emits a warning and does not claim a valid material-shortage calculation.
 - Route-level eligible machine candidates are now filtered from relational machine capabilities, machine status, machine tonnage, material-thickness limits, and explicit die-to-machine compatibility. Preferred capability and closer tonnage fit are used only to order the eligible list. These are technical eligibility candidates, not a finite-capacity schedule: shift calendars, setup/load commitments, downtime, and existing assignments are not yet netted, so the list must not be interpreted as a final dispatch schedule.
+
+
+## Persisted proposal lifecycle (implemented; UI and execution bridge remain)
+
+The proposal lifecycle is now backed by `ProductionPlanProposal` and `ProductionPlanProposalLine`.
+
+- Proposal versions are stored with a stable revision-group ID, monotonically increasing version, status, generation timestamp, and immutable JSON input snapshot.
+- Each proposal line links to the exact `CustomerOrderLine`, relational `Part`, and active `PartRoute`. This preserves demand traceability down to the customer-order line rather than only the order header.
+- Demand is allocated to order lines by customer priority, requested date, and line number. Finished-goods/WIP stock cover is applied once in that order. Quantities already committed to open plan lines (PLANNED/RELEASED/IN_PROGRESS) are excluded from new proposals.
+- Regeneration supersedes older DRAFT proposals. A new proposal is blocked while an APPROVED proposal remains unreleased, preventing two approved plans from claiming the same demand.
+- Proposal operation assignments store the selected machine and eligible-machine IDs from the relational capability calculation. Revision creates a new version and supersedes the previous DRAFT version; machine selections are restricted to the original eligible list.
+- Approval records approver and timestamp. Release revalidates each selected machine's active state, operation capability, tonnage, material-thickness range, and die compatibility inside the release transaction.
+- Release creates a relational `ProductionPlan`, demand-linked `ProductionPlanLine` records, one `ManufacturingOrder` per proposal line, and all route `ProductionOperation` rows in one Serializable PostgreSQL transaction. The first operation is READY; later operations are PENDING. The source customer order line is moved to IN_PRODUCTION.
+- Repeated release of an already released proposal returns the original plan and MOs; it does not create duplicates.
+
+### API
+
+- `GET /api/planning/proposals`
+- `GET /api/planning/proposals/:id`
+- `POST /api/planning/proposals/regenerate` (optional body: `{ "notes": "..." }`)
+- `POST /api/planning/proposals/:id/revise` (body: `{ "note": "...", "changes": [{ "proposalLineId": "...", "operationAssignments": [{ "routeOperationId": "...", "machineId": "..." }] }] }`)
+- `POST /api/planning/proposals/:id/approve` (body: `{ "approvedBy": "..." }`)
+- `POST /api/planning/proposals/:id/release` (body: `{ "releasedBy": "..." }`)
+
+### Explicit operational boundary
+
+This increment persists planning proposals and creates relational plans/MOs, but it does not yet reserve raw materials or create a coil issue. It also does not yet create the legacy WIP snapshot identity link for a newly released MO; the normalized MO and route operations are durable, while the WIP execution bridge remains a separate integration step. Proposal dates currently use generation date through customer requested date as a planning window, not a finite-capacity schedule. Machine eligibility is technical filtering only; shift capacity, downtime, setup/load commitments, and dispatch sequencing are not solved here. The existing legacy planning UI still uses the old suggestion endpoints; UI wiring to the new `/planning/proposals` API is a follow-up, and legacy sample-backed endpoints remain blocked in database mode.
