@@ -42,6 +42,10 @@ No destination receipt confirmation is required. A report is rejected if the sou
 
 This flow preserves the requested one-way operational handoff: once the production report is posted, good output automatically moves to the next stage; no receiving confirmation is added.
 
+### End-to-end CI coverage
+
+`scripts/test-first-operation-coil-wip.ts` exercises the HTTP route against disposable PostgreSQL data. It allocates one 100 kg coil across two contracts (60/40 kg), issues 70 kg to the first operation, and verifies that the operator-confirmed 15 PCS are posted as 12/3 PCS while preserving each contract, coil, lot, and MO identity. It then returns a 5 kg remnant and verifies that the coil and lot reconcile to 35 kg without changing WIP PCS. Finally, it forces the material-lot guard to fail after the issue transaction has begun and verifies that coil, raw stock, WIP stock, and issue-document counts remain unchanged. The fixture temporarily reopens the seeded first operation in the disposable CI database and restores its original status during cleanup.
+
 ## Required master-data and operational prerequisites
 
 - The WIP order must be explicitly linked to a normalized relational MO with the same part number and a one-to-one operation mapping.
