@@ -1703,6 +1703,7 @@ model DowntimeLog {
 model WipStateSnapshot {
   id        String   @id
   payload   Json
+  version   Int      @default(1)
   updatedAt DateTime @updatedAt
 
   @@map("wip_state_snapshots")
