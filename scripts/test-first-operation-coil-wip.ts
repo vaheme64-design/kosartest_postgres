@@ -1,7 +1,7 @@
 import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { apiRouter, loadInventoryAppState } from '../src/server/apiRouter';
-import { manufacturingOrdersStore } from '../src/server/productionWipEngine';
+import { loadProductionWipState, manufacturingOrdersStore } from '../src/server/productionWipEngine';
 import { INITIAL_PARTS } from '../src/server/sampleData';
 
 const prisma = new PrismaClient();
@@ -109,6 +109,7 @@ async function run() {
   };
 
   try {
+    await loadProductionWipState();
     await loadInventoryAppState();
     // Preserve the existing snapshot and append one isolated WIP identity fixture.
     originalWipOrders = JSON.parse(JSON.stringify(manufacturingOrdersStore));
