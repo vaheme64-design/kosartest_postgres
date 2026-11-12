@@ -1,17 +1,13 @@
 import 'dotenv/config';
 
-// Force validate/sanitize DATABASE_URL immediately so PostgreSQL provider in Prisma is always valid
-if (!process.env.DATABASE_URL || (!process.env.DATABASE_URL.startsWith('postgresql://') && !process.env.DATABASE_URL.startsWith('postgres://'))) {
-  process.env.DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
-}
-
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
-import { apiRouter } from './src/server/apiRouter';
+import { apiRouter, loadInventoryAppState } from './src/server/apiRouter';
 import { resolveDatabaseUrl } from './src/server/db/prisma';
+import { loadProductionWipState } from './src/server/productionWipEngine';
 
 resolveDatabaseUrl();
 
@@ -29,6 +25,11 @@ const PORT = Number(process.env.PORT) || portFromArgs || 3000;
 const HOST = process.env.HOST || hostFromArgs || '0.0.0.0';
 
 async function startServer() {
+  // Restore relational inventory data and custom coil/contract state before exposing API routes.
+  await loadInventoryAppState();
+  // Load durable WIP state before exposing API routes.
+  await loadProductionWipState();
+
   const app = express();
 
   // Support large Excel/CSV file imports (up to 50MB payloads)
