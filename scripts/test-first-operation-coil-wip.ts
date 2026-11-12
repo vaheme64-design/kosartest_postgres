@@ -272,6 +272,7 @@ async function run() {
       _sum: { quantityOnHand: true },
     }))._sum.quantityOnHand);
     const failedIssue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', {
+      issueRequestKey: `${nonce}-ROLLBACK-REQUEST-1`,
       issuedWeightKg: 1,
       moId: relationalOrder.moNumber,
       moOperationId: operation10.id,
