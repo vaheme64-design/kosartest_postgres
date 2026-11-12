@@ -26,3 +26,28 @@ The next implementation stage is to build a relational planning read model:
 ## Migration and deployment
 
 The new `priority` column is part of the Prisma schema. CI generates and applies an initial migration preview against a clean disposable PostgreSQL database. No live factory database migration is performed by this repository workflow.
+
+
+## Relational planning read model (implemented; lifecycle still pending)
+
+The first database-backed read-model increment is now implemented in `src/server/relationalPlanningReadModel.ts`.
+
+- Reads confirmed customer orders and their non-completed order lines directly from PostgreSQL, resolving demand by relational `Part.id` and retaining customer-order IDs/numbers.
+- Loads active finished-good parts, their material master, and the active default route with ordered route operations, linked operations, assigned machines, and dies.
+- Reads available finished-good balances, WIP balances, active non-expired finished-good reservations, and raw-material balances from relational stock tables.
+- Calculates remaining demand, available finished goods, downstream WIP credit, net production quantity, engineering gross-material requirement (including route scrap norms), and raw-material shortage.
+- Includes relational machine capabilities and die-to-machine compatibility in the read model for the next machine-evaluation increment.
+- `GET /api/planning/read-model` exposes the complete read model; `GET /api/planning/net-requirements` now uses it whenever PostgreSQL is configured.
+- Added an HTTP integration test that creates a real relational customer order, verifies demand and route identity, checks netting arithmetic, and ensures legacy sample-backed endpoints fail closed.
+
+### Safety boundary
+
+Planning suggestions, dashboard metrics, manual machine evaluation, approval, revision, and MO release still depend on the legacy in-memory engine. In database mode these endpoints now return HTTP 409 with an explicit pending-implementation code rather than displaying or mutating sample/in-memory planning data. They will be re-enabled only after proposal persistence and the approval/release lifecycle are implemented transactionally.
+
+### Calculation assumptions to validate with factory data
+
+- Finished-goods stock is read from active `FINISHED_GOODS` warehouses and `AVAILABLE` quality-status balances. Active reservations are subtracted from physical on-hand quantity.
+- WIP credit is the sum of available balances in active `WIP` warehouses for the same finished-good part. This assumes stage stock uses the same part identity across the route.
+- Raw material availability is matched by the finished-good part's `materialId` to raw-material parts in active `RAW_MATERIALS` warehouses.
+- Required sheet weight uses `Part.weightGrossKg` multiplied by the sum of route-operation scrap norms. If material identity or engineering gross weight is missing, the read model emits a warning and does not claim a valid material-shortage calculation.
+- Machine capability data is loaded but no recommendation is issued yet. A candidate must later pass process, tonnage, material-thickness, machine-status, and die-compatibility checks; schedule capacity must not be inferred from the previous sample workload map.
