@@ -3634,9 +3634,9 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
               issuedWeightKg: weight,
               consumedWeightKg: 0,
               returnedWeightKg: 0,
-              outstandingWeightKg: weight,
+              outstandingWeightKg: Math.max(0, weight - varianceForSegment),
               varianceWeightKg: varianceForSegment,
-              status: 'ISSUED',
+              status: weight - varianceForSegment <= 0.001 ? 'CONSUMED' : 'ISSUED',
               issuedAt,
               notes: request.notes || `حواله ${weight} کیلوگرم به ${mo?.moNumber || request.manufacturingOrderRef || 'خط تولید'}؛ قرارداد ${balance.contractNumber || 'بدون تخصیص'}`,
             },
@@ -3722,9 +3722,11 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
       varianceWeightKg: Number(row.varianceWeightKg),
     }));
     const totalIssuedKg = records.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
-    const totalReturnedKg = records.reduce((sum: number, row: any) => sum + row.returnedWeightKg, 0);
-    const totalConsumedKg = records.reduce((sum: number, row: any) => sum + row.consumedWeightKg, 0);
-    const totalVarianceKg = records.reduce((sum: number, row: any) => sum + row.varianceWeightKg, 0);
+    const issueEvents = records.filter((row: any) => row.issuedWeightKg > 0);
+    const returnEvents = records.filter((row: any) => row.issuedWeightKg <= 0 && row.returnedWeightKg > 0);
+    const totalReturnedKg = returnEvents.reduce((sum: number, row: any) => sum + row.returnedWeightKg, 0);
+    const totalConsumedKg = issueEvents.reduce((sum: number, row: any) => sum + row.consumedWeightKg, 0);
+    const totalVarianceKg = issueEvents.reduce((sum: number, row: any) => sum + row.varianceWeightKg, 0);
     const remainingWeightKg = Number(coil.remainingWeightKg);
     const originalWeightKg = Number(coil.originalWeightKg);
     const allocations = coil.contractAllocations.map((row: any) => ({
@@ -3764,7 +3766,7 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
           totalReturnedKg,
           totalConsumedKg,
           totalVarianceKg,
-          outstandingAtProductionKg: records.reduce((sum: number, row: any) => sum + row.outstandingWeightKg, 0),
+          outstandingAtProductionKg: issueEvents.reduce((sum: number, row: any) => sum + row.outstandingWeightKg, 0),
           utilizationPercent: originalWeightKg > 0 ? Math.round(((totalConsumedKg + totalVarianceKg) / originalWeightKg) * 10000) / 100 : 0,
         },
         records,
