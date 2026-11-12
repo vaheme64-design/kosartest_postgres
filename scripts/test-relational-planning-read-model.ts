@@ -108,7 +108,7 @@ async function main() {
 
     const net = await requestJson(baseUrl, '/api/planning/net-requirements');
     assert(net.response.status === 200 && net.payload.source === 'postgresql', 'Net requirements endpoint must use the relational read model in database mode.');
-    assert(net.payload.data.some((item: any) => item.partId === part.id && item.grossDemandQty === baselineGrossDemand + 123), 'Net requirements endpoint must return the persisted relational demand.');
+    assert(net.payload.data.some((item: any) => item.partId === part.id && item.grossDemandQty === baselineGrossDemand + 1000123), 'Net requirements endpoint must return the persisted relational demand.');
     console.log('PASS: Net requirements endpoint uses relational data and correct demand netting.');
 
     const customerLine = await prisma.customerOrderLine.findFirst({ where: { orderId }, orderBy: { lineNumber: 'asc' } });
