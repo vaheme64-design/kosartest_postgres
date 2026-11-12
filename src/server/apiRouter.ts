@@ -3203,6 +3203,7 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
     }
 
     const prisma = getPrismaClient();
+    const receiptDocumentNumber = `RCV-CL-${Date.now()}`;
     const dbCoil = await prisma.$transaction(async (tx: any) => {
       const dbWarehouse = await tx.warehouse.findFirst({
         where: { OR: [{ id: payload.warehouseId }, { code: warehouse?.code || payload.warehouseId }] },
@@ -3210,30 +3211,70 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
       if (!dbWarehouse) throw new Error('انبار انتخاب‌شده در اطلاعات پایه PostgreSQL یافت نشد.');
       const dbPart = await tx.part.findFirst({
         where: { OR: [{ id: payload.partId }, { partNumber: part?.code || payload.partCode || payload.partId }] },
+        include: { unit: { select: { code: true } } },
       });
       if (!dbPart) throw new Error('قطعه یا ماده پایه کلاف در PostgreSQL یافت نشد.');
+      if (dbPart.unit?.code !== 'KG') throw new Error('واحد پایه کالای کلاف باید KG باشد تا وزن و موجودی با یکدیگر مغایرت پیدا نکنند.');
       const grade = newCoil.materialGrade;
       const dbMaterial = dbPart.materialId
         ? await tx.material.findUnique({ where: { id: dbPart.materialId } })
         : await tx.material.findFirst({ where: { OR: [{ grade }, { code: `MAT-${grade}` }] } });
+      if (!dbMaterial) throw new Error(`ماده با گرید ${grade} در اطلاعات پایه PostgreSQL یافت نشد.`);
       const dbLocation = newCoil.warehouseLocationCode
         ? await tx.warehouseLocation.findFirst({ where: { warehouseId: dbWarehouse.id, code: newCoil.warehouseLocationCode } })
         : null;
+      if (!dbLocation) throw new Error('موقعیت انبار کلاف در اطلاعات پایه PostgreSQL یافت نشد.');
 
+      const allocations = [];
+      let allocatedTotal = 0;
+      for (const allocation of (newCoil.allocations || [])) {
+        const allocatedWeightKg = Number(allocation.allocatedWeightKg);
+        if (!Number.isFinite(allocatedWeightKg) || allocatedWeightKg <= 0) throw new Error('وزن تخصیص قرارداد باید عددی مثبت باشد.');
+        const contract = await tx.materialContract.findFirst({
+          where: { OR: [{ id: allocation.contractId }, { contractNumber: allocation.contractNumber || allocation.contractId }] },
+        });
+        if (!contract) throw new Error(`قرارداد ${allocation.contractNumber || allocation.contractId} در PostgreSQL یافت نشد؛ ثبت کلاف لغو شد.`);
+        const alreadyReceived = Number(contract.receivedWeightKg || 0);
+        if (alreadyReceived + allocatedWeightKg > Number(contract.totalAllocatedWeightKg)) {
+          throw new Error(`وزن دریافتی قرارداد ${contract.contractNumber} از سقف تناژ قرارداد بیشتر می‌شود.`);
+        }
+        allocations.push({ contract, allocatedWeightKg, ownership: allocation.ownership || newCoil.ownership, notes: allocation.notes || null });
+        allocatedTotal += allocatedWeightKg;
+      }
+      if (allocatedTotal > newCoil.originalWeightKg) throw new Error('مجموع تخصیص قراردادها از وزن اولیه کلاف بیشتر است.');
+
+      const supplierContractId = allocations.length === 1 ? allocations[0].contract.id : null;
+      const materialLot = await tx.materialLot.create({
+        data: {
+          lotNumber: newCoil.coilId,
+          materialId: dbMaterial.id,
+          partId: dbPart.id,
+          supplierContractId,
+          heatNumber: newCoil.heatNumber || null,
+          coilSerialNumber: newCoil.coilId,
+          thicknessMm: newCoil.thicknessMm,
+          widthMm: newCoil.widthMm,
+          initialWeightKg: newCoil.originalWeightKg,
+          remainingWeightKg: newCoil.remainingWeightKg,
+          warehouseLocationId: dbLocation.id,
+          receivedDate: new Date(newCoil.receiptDate),
+        },
+      });
       const created = await tx.physicalCoil.create({
         data: {
           id: newCoil.id,
           coilId: newCoil.coilId,
           coilPackNumber: newCoil.coilPackNumber,
           partId: dbPart.id,
-          materialId: dbMaterial?.id || undefined,
+          materialId: dbMaterial.id,
+          materialLotId: materialLot.id,
           heatNumber: newCoil.heatNumber || null,
           thicknessMm: newCoil.thicknessMm,
           widthMm: newCoil.widthMm,
           originalWeightKg: newCoil.originalWeightKg,
           remainingWeightKg: newCoil.remainingWeightKg,
           warehouseId: dbWarehouse.id,
-          warehouseLocationId: dbLocation?.id || null,
+          warehouseLocationId: dbLocation.id,
           ownership: newCoil.ownership,
           qualityStatus: newCoil.qualityStatus,
           physicalStatus: newCoil.physicalStatus,
@@ -3242,20 +3283,121 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
         },
       });
 
-      for (const allocation of (newCoil.allocations || [])) {
-        const contract = await tx.materialContract.findFirst({
-          where: { OR: [{ id: allocation.contractId }, { contractNumber: allocation.contractNumber || allocation.contractId }] },
-        });
-        if (!contract) throw new Error(`قرارداد ${allocation.contractNumber || allocation.contractId} در PostgreSQL یافت نشد؛ ثبت کلاف لغو شد.`);
-        await tx.contractCoilAllocation.create({
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای ثبت سند رسمی انبار، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+      const receiptDoc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: receiptDocumentNumber,
+          documentType: 'RECEIPT',
+          documentDate: new Date(newCoil.receiptDate),
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: dbWarehouse.id,
+          referenceType: 'SAPCO_COIL',
+          referenceNumber: newCoil.coilPackNumber,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: new Date(),
+          notes: `رسید رسمی کلاف ${newCoil.coilId}؛ پکینگ ${newCoil.coilPackNumber}؛ ذوب ${newCoil.heatNumber || 'ثبت‌نشده'}`,
+        },
+      });
+
+      const segments = allocations.map(row => ({ ...row, contractId: row.contract.id, contractNumber: row.contract.contractNumber }));
+      if (newCoil.originalWeightKg - allocatedTotal > 0) {
+        segments.push({ contract: null, contractId: null, contractNumber: null, allocatedWeightKg: newCoil.originalWeightKg - allocatedTotal, ownership: newCoil.ownership, notes: null });
+      }
+      let lineNumber = 0;
+      for (const segment of segments) {
+        lineNumber += 1;
+        const weight = segment.allocatedWeightKg;
+        const line = await tx.inventoryDocumentLine.create({
           data: {
-            contractId: contract.id,
-            coilId: created.id,
-            allocatedWeightKg: Number(allocation.allocatedWeightKg),
-            ownership: allocation.ownership || newCoil.ownership,
-            notes: allocation.notes || null,
+            documentId: receiptDoc.id,
+            lineNumber,
+            partId: dbPart.id,
+            physicalCoilId: created.id,
+            materialLotId: materialLot.id,
+            locationId: dbLocation.id,
+            quantity: weight,
+            unitId: dbPart.unitId,
+            weightKg: weight,
+            ownership: segment.ownership,
+            contractId: segment.contractId,
+            contractNumber: segment.contractNumber,
+            qualityStatus: newCoil.qualityStatus,
+            notes: `رسید کلاف ${newCoil.coilId}؛ قرارداد ${segment.contractNumber || 'بدون تخصیص'}`,
           },
         });
+        const transactionNumber = `TRX-COIL-RCV-${Date.now()}-${lineNumber}`;
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber,
+            documentId: receiptDoc.id,
+            documentLineId: line.id,
+            partId: dbPart.id,
+            materialLotId: materialLot.id,
+            physicalCoilId: created.id,
+            warehouseId: dbWarehouse.id,
+            locationId: dbLocation.id,
+            transactionType: 'INBOUND',
+            quantity: weight,
+            quantitySigned: weight,
+            unitId: dbPart.unitId,
+            weightKg: weight,
+            weightKgSigned: weight,
+            ownership: segment.ownership,
+            contractId: segment.contractId,
+            contractNumber: segment.contractNumber,
+            qualityStatus: newCoil.qualityStatus,
+            transactionDate: new Date(newCoil.receiptDate),
+            createdByUserId: user.id,
+          },
+        });
+        const balance = await tx.stockBalance.findFirst({
+          where: {
+            partId: dbPart.id, warehouseId: dbWarehouse.id, locationId: dbLocation.id,
+            materialLotId: materialLot.id, physicalCoilId: created.id, ownership: segment.ownership,
+            contractId: segment.contractId, qualityStatus: newCoil.qualityStatus,
+          },
+        });
+        if (balance) {
+          await tx.stockBalance.update({
+            where: { id: balance.id },
+            data: {
+              quantityOnHand: { increment: weight }, quantityAvailable: { increment: weight },
+              weightKgOnHand: { increment: weight }, weightKgAvailable: { increment: weight },
+              lastTransactionAt: new Date(newCoil.receiptDate),
+            },
+          });
+        } else {
+          await tx.stockBalance.create({
+            data: {
+              partId: dbPart.id, warehouseId: dbWarehouse.id, locationId: dbLocation.id,
+              materialLotId: materialLot.id, physicalCoilId: created.id,
+              quantityOnHand: weight, quantityReserved: 0, quantityAvailable: weight,
+              weightKgOnHand: weight, weightKgReserved: 0, weightKgAvailable: weight,
+              ownership: segment.ownership, contractId: segment.contractId,
+              contractNumber: segment.contractNumber, qualityStatus: newCoil.qualityStatus,
+              lastTransactionAt: new Date(newCoil.receiptDate),
+            },
+          });
+        }
+        if (segment.contractId) {
+          await tx.contractCoilAllocation.create({
+            data: {
+              contractId: segment.contractId,
+              coilId: created.id,
+              allocatedWeightKg: weight,
+              ownership: segment.ownership,
+              sourceDocumentId: receiptDoc.id,
+              notes: segment.notes,
+            },
+          });
+          await tx.materialContract.update({
+            where: { id: segment.contractId },
+            data: { receivedWeightKg: { increment: weight } },
+          });
+        }
       }
       return created;
     });
@@ -3265,7 +3407,7 @@ apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
     // Also create a corresponding posted RECEIPT_RAW_MATERIAL document in inventoryDocsStore so StockInquiryView and IssueFormModal see the new coil immediately
     const autoDoc: InventoryDocument = {
       id: `DOC-COIL-${Date.now()}`,
-      documentNumber: `RCV-CL-${Math.floor(10000 + Math.random() * 90000)}`,
+      documentNumber: receiptDocumentNumber,
       documentType: 'RECEIPT_RAW_MATERIAL',
       documentDate: newCoil.receiptDate || new Date().toISOString(),
       documentStatus: 'CONFIRMED',
