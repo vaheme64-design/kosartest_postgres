@@ -248,11 +248,12 @@ export function evaluateMachineEligibility(params: {
   const dailyShiftHours = 15; // 2 shifts of 7.5 hours
 
   // Find assigned die/mold if specified
+  const hasAssignedDie = Boolean(params.assignedDieCode || params.assignedDieId);
   const assignedDie = params.assignedDieCode
     ? dies.find(d => d.code === params.assignedDieCode)
     : params.assignedDieId
-    ? dies.find(d => d.id === params.assignedDieId)
-    : undefined;
+      ? dies.find(d => d.id === params.assignedDieId)
+      : undefined;
 
   const results: MachineEligibilityCheck[] = [];
 
@@ -275,12 +276,19 @@ export function evaluateMachineEligibility(params: {
     }
 
     // 3. Die / Mold Compatibility Check
-    let dieCompatible = true;
-    if (assignedDie) {
+    let dieCompatible = !hasAssignedDie || Boolean(assignedDie);
+    if (hasAssignedDie && !assignedDie) {
+      dieCompatible = false;
+      ineligibilityReasons.push(`قالب تخصیص‌یافته با شناسه «${params.assignedDieCode || params.assignedDieId}» در اطلاعات پایه یافت نشد؛ انتخاب دستگاه متوقف شد.`);
+    } else if (assignedDie) {
       const compatibleCodes = assignedDie.compatibleMachineCodes || [];
-      if (compatibleCodes.length > 0 && !compatibleCodes.includes(machine.code)) {
+      if (compatibleCodes.length === 0 || !compatibleCodes.includes(machine.code)) {
         dieCompatible = false;
-        ineligibilityReasons.push(`قالب ${assignedDie.code} (${assignedDie.name}) با ابعاد میز و فک این دستگاه ناسازگار است.`);
+        ineligibilityReasons.push(
+          compatibleCodes.length === 0
+            ? `فهرست سازگاری ماشین‌آلات برای قالب ${assignedDie.code} تعریف نشده است؛ انتخاب دستگاه متوقف شد.`
+            : `قالب ${assignedDie.code} (${assignedDie.name}) با ابعاد میز و فک این دستگاه ناسازگار است.`
+        );
       }
     }
 
