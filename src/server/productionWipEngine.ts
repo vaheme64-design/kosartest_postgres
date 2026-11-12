@@ -15,6 +15,18 @@ export const wipTransfersStore: WipTransfer[] = [];
 export const productionLogsStore: ProductionActivityLog[] = [];
 
 const WIP_SNAPSHOT_ID = 'production-wip-state';
+let productionWipSnapshotVersion = 0;
+
+export function getProductionWipSnapshotVersion(): number {
+  return productionWipSnapshotVersion;
+}
+
+export function advanceProductionWipSnapshotVersion(expectedVersion: number): void {
+  if (productionWipSnapshotVersion !== expectedVersion) {
+    throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: local snapshot version changed during commit.');
+  }
+  productionWipSnapshotVersion = expectedVersion + 1;
+}
 
 export async function loadProductionWipState(): Promise<boolean> {
   if (!isDatabaseUrlConfigured()) {
@@ -27,10 +39,12 @@ export async function loadProductionWipState(): Promise<boolean> {
     manufacturingOrdersStore.splice(0);
     wipTransfersStore.splice(0);
     productionLogsStore.splice(0);
+    productionWipSnapshotVersion = 0;
     await persistProductionWipState();
     return false;
   }
 
+  productionWipSnapshotVersion = snapshot.version ?? 1;
   const payload = snapshot.payload as {
     manufacturingOrders?: ManufacturingOrder[];
     wipTransfers?: WipTransfer[];
@@ -64,11 +78,28 @@ export async function persistProductionWipState(): Promise<void> {
     productionLogs: productionLogsStore,
   }));
 
-  await prisma.wipStateSnapshot.upsert({
-    where: { id: WIP_SNAPSHOT_ID },
-    create: { id: WIP_SNAPSHOT_ID, payload },
-    update: { payload },
+  if (productionWipSnapshotVersion === 0) {
+    try {
+      const created = await prisma.wipStateSnapshot.create({
+        data: { id: WIP_SNAPSHOT_ID, payload, version: 1 },
+      });
+      productionWipSnapshotVersion = created.version;
+      return;
+    } catch (error: any) {
+      if (error?.code !== 'P2002') throw error;
+      throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: another server initialized the WIP snapshot; reload state and retry.');
+    }
+  }
+
+  const expectedVersion = productionWipSnapshotVersion;
+  const updated = await prisma.wipStateSnapshot.updateMany({
+    where: { id: WIP_SNAPSHOT_ID, version: expectedVersion },
+    data: { payload, version: { increment: 1 } },
   });
+  if (updated.count !== 1) {
+    throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: WIP data changed on another server. The stale update was rejected.');
+  }
+  productionWipSnapshotVersion = expectedVersion + 1;
 }
 
 // Helper to determine warehouse location based on operation process
