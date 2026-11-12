@@ -3615,49 +3615,88 @@ apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response
 
 apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'تخصیص قرارداد کلاف بدون اتصال PostgreSQL مجاز نیست.' });
+    }
     const { id } = req.params;
     const { allocations } = req.body;
-
-    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
-    }
-
     if (!Array.isArray(allocations) || allocations.length === 0) {
-      return res.status(400).json({ success: false, error: 'لیست تخصیص قراردادها مشخص نشده است.' });
+      return res.status(400).json({ success: false, error: 'حداقل یک تخصیص قرارداد لازم است.' });
     }
-
-    const totalAllocated = allocations.reduce((sum: number, a: any) => sum + Number(a.allocatedWeightKg || 0), 0);
-    if (totalAllocated > coil.originalWeightKg) {
-      return res.status(400).json({
-        success: false,
-        error: `مجموع وزن تخصیص داده شده (${totalAllocated} kg) بیشتر از وزن فیزیکی کلاف (${coil.originalWeightKg} kg) است.`,
-      });
-    }
-
-    coil.allocations = allocations.map((a: any) => ({
-      contractId: a.contractId,
-      contractNumber: a.contractNumber || a.contractId,
-      coilId: coil.id,
-      allocatedWeightKg: Number(a.allocatedWeightKg),
-      ownership: a.ownership || coil.ownership,
+    const normalized = allocations.map((row: any) => ({
+      contractId: String(row.contractId || ''),
+      contractNumber: String(row.contractNumber || row.contractId || ''),
+      allocatedWeightKg: Number(row.allocatedWeightKg),
+      ownership: String(row.ownership || 'SAPCO_SUPPLIER_OWNED'),
+      notes: row.notes ? String(row.notes) : null,
     }));
+    if (normalized.some((row: any) => !row.contractId || !Number.isFinite(row.allocatedWeightKg) || row.allocatedWeightKg <= 0)) {
+      return res.status(400).json({ success: false, error: 'شناسه قرارداد و وزن مثبت برای تمام ردیف‌های تخصیص الزامی است.' });
+    }
+    const totalAllocated = normalized.reduce((sum: number, row: any) => sum + row.allocatedWeightKg, 0);
+    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
+    if (totalAllocated > coil.originalWeightKg) {
+      return res.status(400).json({ success: false, error: `مجموع تخصیص (${totalAllocated} kg) از وزن اولیه کلاف (${coil.originalWeightKg} kg) بیشتر است.` });
+    }
 
-    await persistInventoryAppState();
+    const prisma = getPrismaClient();
+    const persisted = await prisma.$transaction(async (tx: any) => {
+      const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد؛ ابتدا رسید کلاف را ثبت کنید.');
+      if (totalAllocated > Number(dbCoil.originalWeightKg)) throw new Error('مجموع تخصیص از وزن اولیه ثبت‌شده کلاف بیشتر است.');
+
+      const resolved: any[] = [];
+      for (const row of normalized) {
+        const contract = await tx.materialContract.findFirst({
+          where: { OR: [{ id: row.contractId }, { contractNumber: row.contractNumber }] },
+        });
+        if (!contract) throw new Error(`قرارداد «${row.contractNumber}» در PostgreSQL یافت نشد.`);
+        const otherAllocations = await tx.contractCoilAllocation.aggregate({
+          where: { contractId: contract.id, coilId: { not: dbCoil.id } },
+          _sum: { allocatedWeightKg: true },
+        });
+        const alreadyAllocated = Number(otherAllocations._sum.allocatedWeightKg || 0);
+        if (alreadyAllocated + row.allocatedWeightKg > Number(contract.totalAllocatedWeightKg)) {
+          throw new Error(`تخصیص قرارداد ${contract.contractNumber} از سقف وزنی قرارداد بیشتر می‌شود. باقیمانده قابل تخصیص: ${Math.max(0, Number(contract.totalAllocatedWeightKg) - alreadyAllocated)} kg.`);
+        }
+        resolved.push({ ...row, contractId: contract.id });
+      }
+
+      await tx.contractCoilAllocation.deleteMany({ where: { coilId: dbCoil.id } });
+      await tx.contractCoilAllocation.createMany({
+        data: resolved.map(row => ({
+          contractId: row.contractId,
+          coilId: dbCoil.id,
+          allocatedWeightKg: row.allocatedWeightKg,
+          ownership: row.ownership,
+          notes: row.notes,
+        })),
+      });
+      return resolved.map(row => ({
+        ...row,
+        coilId: dbCoil.id,
+        contractNumber: normalized.find((n: any) => n.contractId === row.contractId || n.contractNumber === row.contractNumber)?.contractNumber || row.contractNumber,
+      }));
+    });
+
+    coil.allocations = persisted;
+    coil.updatedAt = new Date().toISOString();
     res.json({
       success: true,
-      message: `تخصیص چندقراردادی کلاف شماره «${coil.coilId}» به‌روزرسانی شد.`,
+      message: `تخصیص ${persisted.length} قرارداد برای کلاف «${coil.coilId}» به‌صورت تراکنشی در PostgreSQL ثبت شد.`,
       coil,
+      allocations: persisted,
+      persistence: 'POSTGRESQL_TRANSACTIONAL',
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(409).json({
       success: false,
-      error: error instanceof Error ? error.message : 'خطا در به‌روزرسانی تخصیص قراردادهای کلاف',
+      error: error instanceof Error ? error.message : 'خطا در ثبت تخصیص قراردادهای کلاف',
     });
   }
 });
 
-/**
 /**
  * 16.13b. Atomic Operation Execution & Multi-Tier BOM Backflush Engine
  * Automatically deducts consumed raw materials / fasteners / WIP sub-assemblies
