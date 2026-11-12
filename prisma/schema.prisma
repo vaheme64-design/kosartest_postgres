@@ -306,7 +306,6 @@ model Part {
   customerOrderLines   CustomerOrderLine[]
   productionPlanLines  ProductionPlanLine[]
   planProposalLines    ProductionPlanProposalLine[]
-  planProposalLines    ProductionPlanProposalLine[]
   manufacturingOrders  ManufacturingOrder[]
   inventoryDocLines    InventoryDocumentLine[]
   transactions         InventoryTransaction[]
