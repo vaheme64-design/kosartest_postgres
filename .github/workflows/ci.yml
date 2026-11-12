@@ -91,6 +91,8 @@ jobs:
 
       - name: Atomic WIP production ledger integration test
         run: bunx tsx scripts/test-wip-production-ledger.ts
+      - name: WIP snapshot optimistic concurrency integration test
+        run: bunx tsx scripts/test-wip-snapshot-concurrency.ts
 
       - name: Production planning tests
         run: bunx tsx scripts/test-production-planning.ts
