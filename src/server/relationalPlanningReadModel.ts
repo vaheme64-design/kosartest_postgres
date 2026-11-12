@@ -26,6 +26,8 @@ export interface RelationalNetRequirement {
     stepName: string;
     processType: string;
     requiredTonnage: number;
+    eligibleMachines: Array<{ id: string; code: string; name: string; tonnageCapacity: number | null; preferred: boolean }>;
+    machineSelectionStatus: 'CANDIDATES_FOUND' | 'NO_ELIGIBLE_MACHINE';
     setupTimeMin: number;
     standardCycleTimeSec: number;
     scrapNormPercent: number;
@@ -182,6 +184,32 @@ export async function getRelationalPlanningReadModel() {
       stepName: step.stepName,
       processType: step.operation.processType,
       requiredTonnage: n(step.die?.tonnageRequired),
+      eligibleMachines: machines
+        .map((machine: any) => {
+          const capability = machine.capabilities.find((item: any) => item.operationId === step.operationId);
+          const requiredTonnage = n(step.die?.tonnageRequired);
+          const thickness = part.thicknessMm == null ? null : n(part.thicknessMm);
+          const hasDieCompatibility = !step.dieId || machine.dieCompatibilities.some((item: any) => item.dieId === step.dieId);
+          const tonnageFits = requiredTonnage <= 0
+            ? true
+            : n(machine.tonnageCapacity) >= requiredTonnage &&
+              (!capability?.maxTonnage || n(capability.maxTonnage) >= requiredTonnage);
+          const thicknessFits = !capability ||
+            ((capability.minThicknessMm == null || (thickness != null && thickness >= n(capability.minThicknessMm))) &&
+             (capability.maxThicknessMm == null || (thickness != null && thickness <= n(capability.maxThicknessMm))));
+          if (!capability || machine.status !== 'ACTIVE' || !hasDieCompatibility || !tonnageFits || !thicknessFits) return null;
+          return {
+            id: machine.id,
+            code: machine.code,
+            name: machine.name,
+            tonnageCapacity: machine.tonnageCapacity == null ? null : n(machine.tonnageCapacity),
+            preferred: capability.isPreferred,
+          };
+        })
+        .filter((candidate: any) => candidate !== null)
+        .sort((a: any, b: any) => Number(b.preferred) - Number(a.preferred) ||
+          ((a.tonnageCapacity ?? Number.MAX_SAFE_INTEGER) - (b.tonnageCapacity ?? Number.MAX_SAFE_INTEGER))),
+      machineSelectionStatus: 'CANDIDATES_FOUND' as const,
       setupTimeMin: step.setupTimeMin,
       standardCycleTimeSec: step.standardCycleTimeSec,
       scrapNormPercent: n(step.scrapNormPercent),
@@ -192,6 +220,9 @@ export async function getRelationalPlanningReadModel() {
         name: step.die.name,
         tonnageRequired: n(step.die.tonnageRequired),
       } : null,
+    })).map((step: any) => ({
+      ...step,
+      machineSelectionStatus: step.eligibleMachines.length > 0 ? 'CANDIDATES_FOUND' : 'NO_ELIGIBLE_MACHINE',
     }));
     const scrapPercent = route.reduce((sum: number, step: any) => sum + step.scrapNormPercent, 0);
     const requiredMaterialKg = round1(netQty * n(part.weightGrossKg) * (1 + scrapPercent / 100));
