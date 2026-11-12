@@ -31,6 +31,17 @@ The posted inventory movements:
 
 No destination receipt confirmation is required. A report is rejected if the source location does not have enough available stock, a location code is ambiguous/missing, or required relational master data is inactive/missing. The transaction rolls back completely in those cases.
 
+## First-operation raw-material / coil issue integration
+
+`POST /api/inventory/coils/:id/issue` can seed the first WIP operation for a single-MO coil issue:
+1. The issue-options endpoint returns the matching WIP snapshot ID and the part's engineering net/gross weights. The first route operation is explicitly marked; a later ready operation is never treated as the first step.
+2. The UI suggests a whole-piece input quantity using the issued net material weight and engineering gross weight per piece. The operator can edit and confirm the PCS quantity before posting.
+3. The API validates the matching WIP and relational MO, creates the explicit identity bridge when absent, and rejects non-integer PCS quantities or attempts to seed a non-first operation.
+4. In the same PostgreSQL transaction as the coil issue, the API creates first-stage PCS stock balances and inbound inventory transactions split by the source contract/lot/coil identity. Whole PCS are allocated across contract balances, with any rounding remainder assigned to the final segment.
+5. The WIP snapshot's initial input and first-operation waiting queue are updated before the transaction commits. A failure in any raw-material or WIP posting step rolls back both sides.
+
+This flow preserves the requested one-way operational handoff: once the production report is posted, good output automatically moves to the next stage; no receiving confirmation is added.
+
 ## Required master-data and operational prerequisites
 
 - The WIP order must be explicitly linked to a normalized relational MO with the same part number and a one-to-one operation mapping.
@@ -45,7 +56,7 @@ No destination receipt confirmation is required. A report is rejected if the sou
 ## Known limitations / next hardening steps
 
 - The current WIP engine remains process-memory based with a JSON snapshot. The production endpoint serializes requests within one server process and commits its proposed snapshot atomically with the ledger. Multi-instance execution still needs database-backed locking/version checks for the snapshot to prevent stale in-memory state from competing across application instances.
-- Operation-input loading and initial raw-material issue are not yet dual-posted by this slice. The source stock balance must already exist at the WIP operation location; first-stage raw material/coil issue integration remains a separate step.
+- The physical-coil issue flow now supports first-operation input posting when a matching WIP order exists. The operator sees an editable PCS suggestion calculated from (issued coil weight - recorded weight variance) / the part's engineering gross weight per piece. On confirmation, the same database transaction posts the raw-coil issue by contract/lot and creates the first-stage PCS stock balance and inbound inventory transaction, preserving coil, lot, ownership, and contract lineage. The WIP snapshot's initial input and first-operation waiting queue are updated in that transaction. This path requires a matching WIP order number/part, a valid one-to-one WIP identity mapping, a PCS unit, positive engineering net weight, and a unique active first-stage location. Multi-part coil issues and non-coil material issue are not yet integrated with the WIP queue.
 - Rework and rejected stock are distinguished by quality status at the source location. A dedicated rework route and a dedicated QC quarantine location/workflow are future enhancements.
 - Stage-specific input/output part identities are not yet modeled. Routes where the physical part identity changes between operations must not be posted through this fallback.
 - The transaction uses \`Serializable\` isolation and source-balance checks; concurrency tests for two simultaneous WIP reports against the same balance, rollback on movement failure, and idempotent replay should be added to the integration suite.
