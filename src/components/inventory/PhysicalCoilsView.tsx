@@ -222,6 +222,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
   const [issueMoId, setIssueMoId] = useState('');
   const [issueOperationId, setIssueOperationId] = useState('');
   const [issueScrap, setIssueScrap] = useState('0');
+  const [issueRequestKey, setIssueRequestKey] = useState('');
   const [initialInputQuantityPcs, setInitialInputQuantityPcs] = useState('');
   const [multiPartsList, setMultiPartsList] = useState<Array<{ partName: string; moId: string; moOperationId: string; issuedWeightKg: string }>>([
     { partName: '', moId: '', moOperationId: '', issuedWeightKg: '' },
@@ -358,6 +359,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            issueRequestKey,
             multiParts: validParts.map(p => ({
               partName: p.partName,
               moId: p.moId,
@@ -374,6 +376,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
         } else {
           setNotification({ type: 'success', message: data.message });
           setIssueModalOpen(false);
+          setIssueRequestKey('');
           fetchCoils();
         }
       } catch (err: any) {
@@ -398,6 +401,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            issueRequestKey,
             issuedWeightKg: issuedKg,
             moId: issueMoId.trim(),
             moOperationId: issueOperationId.trim(),
@@ -413,6 +417,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
         } else {
           setNotification({ type: 'success', message: data.message });
           setIssueModalOpen(false);
+          setIssueRequestKey('');
           setIssueWeight('');
           fetchCoils();
         }
@@ -820,6 +825,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                               setIssueOperationId('');
                               setIssueScrap('0');
                               setInitialInputQuantityPcs('');
+                              setIssueRequestKey(globalThis.crypto?.randomUUID?.() || `coil-issue-${Date.now()}-${Math.random().toString(36).slice(2)}`);
                               setIssueMode('SINGLE');
                               setIssueModalOpen(true);
                             }}
