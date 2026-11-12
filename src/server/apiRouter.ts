@@ -6700,6 +6700,8 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
       };
       const beforeStart = (date: Date) => Boolean(filters.startDate && date < new Date(filters.startDate));
       const issuedRows = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id);
+      const receiptLedgerTotal = contractTx.filter(isReceipt).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const ledgerCompleteness = Math.abs(receiptLedgerTotal - Number(contract.receivedWeightKg)) <= 0.001 ? 'COMPLETE' : 'PARTIAL_HISTORY';
       const openingReceipts = contractTx.filter((tx: any) => isReceipt(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const openingSupplierReturns = contractTx.filter((tx: any) => isReturn(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const isContractBookMovement = (tx: any) =>
@@ -6710,14 +6712,14 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
       const movementDelta = (rows: any[]) => rows.filter(isContractBookMovement)
         .reduce((sum: number, tx: any) => sum + Number(tx.weightKgSigned), 0);
       const openingInventoryMovement = movementDelta(issuedRows.filter((tx: any) => beforeStart(tx.transactionDate)));
-      const openingBalanceKg = contractTx.length
+      const openingBalanceKg = ledgerCompleteness === 'COMPLETE'
         ? openingReceipts - openingSupplierReturns + openingInventoryMovement
         : (filters.startDate ? Number(contract.receivedWeightKg) + openingInventoryMovement : 0);
       const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const issued = issuedRows.filter((tx: any) => tx.transactionType === 'OUTBOUND' && inRange(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const periodInventoryMovement = movementDelta(issuedRows.filter((tx: any) => inRange(tx.transactionDate)));
-      const totalReceivedKg = contractTx.length
+      const totalReceivedKg = ledgerCompleteness === 'COMPLETE'
         ? receivedInRange
         : filters.startDate || filters.endDate ? 0 : Number(contract.receivedWeightKg);
       const closingBookBalanceKg = openingBalanceKg + totalReceivedKg - supplierReturns + periodInventoryMovement;
@@ -6736,7 +6738,7 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
         discrepancyKg: Number((physicalStockInPlantKg - closingBookBalanceKg).toFixed(3)),
         status: contract.status,
         supplier: contract.supplierCustomer.name,
-        ledgerCompleteness: contractTx.length ? 'COMPLETE' : 'LEGACY_RECEIVED_WEIGHT_ONLY',
+        ledgerCompleteness,
         physicalStockAsOf: new Date().toISOString(),
       };
     });
