@@ -26,9 +26,10 @@ async function requestJson(baseUrl: string, path: string, method = 'GET', body?:
 async function main() {
   assert(process.env.DATABASE_URL, 'DATABASE_URL is required for HTTP inventory integration tests.');
 
-  const [warehouse, location, partCandidates, customer, mo] = await Promise.all([
-    prisma.warehouse.findFirst({ where: { code: 'WH-RAW', active: true } }),
-    prisma.warehouseLocation.findFirst({ where: { code: 'LOC-RAW-A1', active: true, warehouse: { code: 'WH-RAW' } } }),
+  const warehouse = await prisma.warehouse.findFirst({ where: { code: 'WH-RAW', active: true } });
+  assert(warehouse, 'CI seed must contain the raw-material warehouse WH-RAW.');
+  const [location, partCandidates, customer, mo] = await Promise.all([
+    prisma.warehouseLocation.findFirst({ where: { code: 'LOC-RAW-A1', active: true, warehouseId: warehouse.id } }),
     prisma.part.findMany({
       where: { active: true, category: 'RAW_MATERIAL', materialId: { not: null }, partNumber: { in: INITIAL_PARTS.filter(p => p.unit === 'KG' && p.materialGrade).map(p => p.code) } },
       include: { unit: true, material: true },
@@ -40,7 +41,7 @@ async function main() {
     }),
   ]);
   const dbPart = partCandidates.find(row => row.unit.code === 'KG' && row.material);
-  assert(warehouse && location && dbPart?.material && customer && mo?.operations[0], 'CI seed must contain WH-RAW/LOC-RAW-A1, a KG raw material, a customer and an in-progress MO operation.');
+  assert(location && dbPart?.material && customer && mo?.operations[0], 'CI seed must contain LOC-RAW-A1, a KG raw material, a customer and an in-progress MO operation.');
 
   const appPart = INITIAL_PARTS.find(p => p.code === dbPart.partNumber);
   assert(appPart, `No application part mapping found for ${dbPart.partNumber}.`);
