@@ -111,7 +111,6 @@ import {
   getProductionBacklogReport,
   getWipByPartAndOperationReport,
   getWipAgingReport,
-  getMaterialConsumptionVsStandardReport,
   getSapcoMaterialAccountReport,
   getInventoryValuationQuantitiesReport,
   getScrapByPartAndOperationReport,
@@ -7250,13 +7249,183 @@ apiRouter.get('/reports/wip-aging', async (req: Request, res: Response) => {
 });
 
 // 19.6 Material Consumption vs Standard
-apiRouter.get('/reports/material-consumption-vs-standard', (req: Request, res: Response) => {
+// BOM variance is intentionally unavailable until actual issue quantities can be reconciled
+// against an approved, versioned BOM. Never fall back to sample or estimated consumption.
+apiRouter.get('/reports/material-consumption-vs-standard', (_req: Request, res: Response) => {
+  return res.status(409).json({
+    success: false,
+    error: 'مقایسه با استاندارد BOM تا زمان اتصال BOM نسخه‌دار و تأییدشده به مصرف واقعی غیرفعال است. برای مشاهده مصرف ثبت‌شده، گزارش مصرف واقعی مواد را باز کنید.',
+    source: 'BOM_VARIANCE_DISABLED_UNTIL_VERSIONED_BOM_RECONCILIATION',
+  });
+});
+
+// 19.6a Actual Material Consumption from Posted Inventory Transactions and Production Reports
+apiRouter.get('/reports/material-consumption-actual', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش مصرف واقعی فقط با اتصال PostgreSQL قابل ارائه است.' });
+    }
+
     const filters = extractReportFilters(req);
-    const report = getMaterialConsumptionVsStandardReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const transactionDate: any = {};
+    if (filters.startDate) transactionDate.gte = new Date(filters.startDate);
+    if (filters.endDate) transactionDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+
+    const transactions = await prisma.inventoryTransaction.findMany({
+      where: {
+        postingStatus: 'POSTED',
+        transactionType: 'OUTBOUND',
+        weightKgSigned: { lt: 0 },
+        manufacturingOrderId: { not: null },
+        productionOperationId: { not: null },
+        ...(Object.keys(transactionDate).length ? { transactionDate } : {}),
+      },
+      include: {
+        part: { select: { partNumber: true, name: true, material: { select: { grade: true } } } },
+        manufacturingOrder: {
+          select: {
+            id: true,
+            moNumber: true,
+            partId: true,
+            part: { select: { partNumber: true, name: true } },
+          },
+        },
+        productionOperation: {
+          select: {
+            id: true,
+            stepNumber: true,
+            operation: { select: { code: true, name: true, processType: true } },
+          },
+        },
+        physicalCoil: { select: { coilId: true, coilPackNumber: true, heatNumber: true, material: { select: { grade: true } } } },
+        materialLot: { select: { lotNumber: true, heatNumber: true, material: { select: { grade: true } } } },
+      },
+      orderBy: [{ transactionDate: 'desc' }],
+      take: 10000,
+    });
+
+    const operationIds = [...new Set(transactions.map((row: any) => row.productionOperationId).filter(Boolean))] as string[];
+    const reportDate: any = {};
+    if (filters.startDate) reportDate.gte = new Date(filters.startDate);
+    if (filters.endDate) reportDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    const productionReports = operationIds.length
+      ? await prisma.productionReport.findMany({
+          where: {
+            productionOperationId: { in: operationIds },
+            postingStatus: 'POSTED',
+            ...(Object.keys(reportDate).length ? { reportDate } : {}),
+            ...(filters.machineId ? { machineId: filters.machineId } : {}),
+          },
+          include: {
+            machine: { select: { code: true, name: true } },
+            operatorUser: { select: { fullName: true } },
+            scraps: { select: { quantity: true, weightKg: true } },
+          },
+          orderBy: [{ reportDate: 'asc' }],
+          take: 10000,
+        })
+      : [];
+
+    const reportsByOperation = new Map<string, any[]>();
+    for (const report of productionReports) {
+      const rows = reportsByOperation.get(report.productionOperationId) || [];
+      rows.push(report);
+      reportsByOperation.set(report.productionOperationId, rows);
+    }
+
+    const grouped = new Map<string, any>();
+    for (const tx of transactions as any[]) {
+      const mo = tx.manufacturingOrder;
+      const operation = tx.productionOperation;
+      if (!mo || !operation) continue;
+      if (filters.partId && mo.partId !== filters.partId && mo.part.partNumber !== filters.partId) continue;
+      if (filters.processType && operation.operation.processType !== filters.processType) continue;
+
+      const operationReports = reportsByOperation.get(operation.id) || [];
+      if (filters.machineId && operationReports.length === 0) continue;
+      const key = [mo.id, operation.id, tx.partId].join('|');
+      let item = grouped.get(key);
+      if (!item) {
+        item = {
+          moId: mo.id,
+          moNumber: mo.moNumber,
+          productPartCode: mo.part.partNumber,
+          productPartName: mo.part.name,
+          operationId: operation.id,
+          operationStep: operation.stepNumber,
+          operationCode: operation.operation.code,
+          operationName: operation.operation.name,
+          processType: operation.operation.processType,
+          materialCode: tx.part.partNumber,
+          materialName: tx.part.name,
+          materialGrade: tx.part.material?.grade || tx.physicalCoil?.material?.grade || tx.materialLot?.material?.grade || '—',
+          actualIssuedMaterialKg: 0,
+          actualProducedGoodQty: 0,
+          actualScrapQty: 0,
+          actualScrapWeightKg: 0,
+          actualMachineNames: [],
+          actualOperatorNames: [],
+          coilNumbers: [],
+          contractNumbers: [],
+          productionReportCount: 0,
+          lastProductionReportAt: undefined,
+        };
+        grouped.set(key, item);
+      }
+
+      item.actualIssuedMaterialKg += Math.abs(Number(tx.weightKgSigned));
+      const coilNumber = tx.physicalCoil?.coilId || tx.materialLot?.lotNumber;
+      if (coilNumber && !item.coilNumbers.includes(coilNumber)) item.coilNumbers.push(coilNumber);
+      if (tx.contractNumber && !item.contractNumbers.includes(tx.contractNumber)) item.contractNumbers.push(tx.contractNumber);
+
+      for (const report of operationReports) {
+        item.actualProducedGoodQty += Number(report.goodQuantity);
+        item.actualScrapQty += Number(report.scrapQuantity);
+        item.actualScrapWeightKg += report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.weightKg), 0);
+        const machineName = report.machine ? `${report.machine.code} - ${report.machine.name}` : '';
+        const operatorName = report.operatorUser?.fullName || '';
+        if (machineName && !item.actualMachineNames.includes(machineName)) item.actualMachineNames.push(machineName);
+        if (operatorName && !item.actualOperatorNames.includes(operatorName)) item.actualOperatorNames.push(operatorName);
+        item.productionReportCount += 1;
+        const reportAt = report.reportDate.toISOString();
+        if (!item.lastProductionReportAt || reportAt > item.lastProductionReportAt) item.lastProductionReportAt = reportAt;
+      }
+    }
+
+    const data = [...grouped.values()].map(item => ({
+      ...item,
+      actualIssuedMaterialKg: Math.round(item.actualIssuedMaterialKg * 1000) / 1000,
+      actualProducedGoodQty: Math.round(item.actualProducedGoodQty * 1000) / 1000,
+      actualScrapQty: Math.round(item.actualScrapQty * 1000) / 1000,
+      actualScrapWeightKg: Math.round(item.actualScrapWeightKg * 1000) / 1000,
+    })).sort((a, b) => a.moNumber.localeCompare(b.moNumber) || a.operationStep - b.operationStep || a.materialCode.localeCompare(b.materialCode));
+
+    return res.json({
+      success: true,
+      source: 'POSTGRESQL_POSTED_INVENTORY_LEDGER_AND_ACTUAL_PRODUCTION_REPORTS',
+      meta: {
+        reportTitle: 'گزارش مصرف واقعی مواد به تفکیک دستور ساخت، عملیات و عملکرد واقعی خط',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined && value !== '').map(([key, value]) => [key, String(value)])),
+        totalRecordsCount: data.length,
+      },
+      summary: {
+        inventoryIssueTransactions: transactions.length,
+        productionReports: productionReports.length,
+        reportRows: data.length,
+      },
+      data,
+      limitations: [
+        'مصرف واقعی از تراکنش‌های خروج قطعی کاردکس محاسبه می‌شود؛ برگشت ته‌کلاف به‌عنوان مصرف منفی دوباره‌شماری نمی‌شود.',
+        'ماشین و اپراتور از گزارش عملکرد واقعی تولید خوانده می‌شوند، نه از ماشین برنامه‌ریزی‌شده عملیات.',
+        'اگر برای یک عملیات گزارش عملکرد ثبت نشده باشد، مقادیر تولید، ضایعات، ماشین و اپراتور صفر/خالی می‌مانند.',
+        'مقایسه با BOM تا اتصال نسخه تأییدشده BOM به مصرف واقعی غیرفعال است.',
+      ],
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش مصرف مواد' });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش مصرف واقعی مواد' });
   }
 });
 
