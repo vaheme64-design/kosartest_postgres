@@ -516,6 +516,8 @@ export async function loadInventoryAppState(): Promise<void> {
       partCode: row.part?.partNumber || undefined,
       partName: row.part?.name || undefined,
       operationStep: row.productionOperation?.stepNumber,
+      operationName: row.productionOperation?.operation?.name,
+      plannedMachine: row.productionOperation?.plannedMachine ? `${row.productionOperation.plannedMachine.code} - ${row.productionOperation.plannedMachine.name}` : undefined,
     } as CoilIssueReturnRecord)));
   }
 
@@ -3867,11 +3869,17 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
           orderBy: { createdAt: 'asc' },
         },
         issueReturnRecords: {
-          include: { inventoryDocument: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } } },
+          include: {
+            inventoryDocument: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } },
+            productionOperation: { include: { operation: { select: { code: true, name: true } }, plannedMachine: { select: { code: true, name: true } } } },
+          },
           orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }],
         },
         inventoryTransactions: {
-          include: { document: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } } },
+          include: {
+            document: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } },
+            productionOperation: { include: { operation: { select: { code: true, name: true } }, plannedMachine: { select: { code: true, name: true } } } },
+          },
           orderBy: [{ transactionDate: 'asc' }],
         },
         inventoryDocumentLines: {
@@ -3911,6 +3919,9 @@ apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Respon
       weightKgSigned: Number(tx.weightKgSigned),
       contractNumber: tx.contractNumber,
       transactionDate: tx.transactionDate.toISOString(),
+      operationStep: tx.productionOperation?.stepNumber || null,
+      operationName: tx.productionOperation?.operation?.name || null,
+      plannedMachine: tx.productionOperation?.plannedMachine ? `${tx.productionOperation.plannedMachine.code} - ${tx.productionOperation.plannedMachine.name}` : null,
     }));
     const allocations = coil.contractAllocations.map((row: any) => ({
       id: row.id,
@@ -4974,6 +4985,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
               part: { select: { partNumber: true, name: true } },
               materialLot: { select: { lotNumber: true, heatNumber: true, coilSerialNumber: true } },
               physicalCoil: { select: { coilId: true, coilPackNumber: true, heatNumber: true } },
+              productionOperation: { include: { operation: { select: { code: true, name: true } }, plannedMachine: { select: { code: true, name: true } } } },
               warehouse: { select: { code: true, name: true } },
               unit: { select: { code: true, symbol: true } },
               manufacturingOrder: { select: { moNumber: true } },
@@ -5011,6 +5023,9 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
           manufacturingOrder: tx.manufacturingOrder?.moNumber || tx.manufacturingOrderId || tx.document?.referenceNumber || '—',
           warehouse: tx.warehouse ? `${tx.warehouse.code} - ${tx.warehouse.name}` : tx.warehouseId,
           contractNumber: tx.contractNumber || '—',
+          operationStep: tx.productionOperation?.stepNumber || null,
+          operationName: tx.productionOperation?.operation?.name || null,
+          plannedMachine: tx.productionOperation?.plannedMachine ? `${tx.productionOperation.plannedMachine.code} - ${tx.productionOperation.plannedMachine.name}` : '—',
           date: tx.transactionDate.toISOString(),
         }));
         const coilRows = coils.filter((record: any) => !record.inventoryDocumentId).map((record: any) => ({
@@ -5040,7 +5055,7 @@ apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) =
           source: 'POSTGRESQL_INVENTORY_LEDGER_AND_PHYSICAL_COIL_RECORDS',
           rowCount: rows.length,
           truncated: transactions.length === 10000 || coils.length === 10000,
-          columns: ['sourceType', 'documentNumber', 'documentType', 'partCode', 'partName', 'quantity', 'unit', 'weightKg', 'coilNumber', 'coilPackNumber', 'heatNumber', 'manufacturingOrder', 'warehouse', 'contractNumber', 'date'],
+          columns: ['sourceType', 'documentNumber', 'documentType', 'partCode', 'partName', 'quantity', 'unit', 'weightKg', 'coilNumber', 'coilPackNumber', 'heatNumber', 'manufacturingOrder', 'operationStep', 'operationName', 'plannedMachine', 'warehouse', 'contractNumber', 'date'],
           summary: { inventoryTransactions: transactions.length, coilIssueReturnRecords: coils.length, totalRows: rows.length },
           data: rows,
           limitations: ['پیوند مستقیم فیزیکی کویل با تراکنش کاردکس هنوز برقرار نشده است؛ دو منبع داده در گزارش به‌صورت مجزا و با sourceType مشخص نمایش داده می‌شوند.'],
