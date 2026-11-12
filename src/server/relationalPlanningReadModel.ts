@@ -182,6 +182,7 @@ export async function getRelationalPlanningReadModel() {
       requestedQty: number;
       deliveredQty: number;
       remainingQty: number;
+      alreadyPlannedQty: number;
       plannedQty: number;
       dueDate: Date;
     }>;
