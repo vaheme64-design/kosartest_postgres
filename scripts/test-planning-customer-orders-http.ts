@@ -60,6 +60,14 @@ async function main() {
     assert(create.payload.data.lines[0].partCode === part.partNumber && create.payload.data.lines[0].remainingQuantity === 90, 'Created line must resolve relational part identity and calculate remaining quantity.');
     console.log('PASS: Customer order and lines are created in PostgreSQL.');
 
+    const duplicate = await requestJson(baseUrl, '/api/planning/customer-orders', 'POST', {
+      orderNumber,
+      customerCode: customer.code,
+      lines: [{ partCode: part.partNumber, orderedQuantity: 1 }],
+    });
+    assert(duplicate.response.status === 409 && duplicate.payload.success === false, 'Duplicate customer order number must return HTTP 409.');
+    console.log('PASS: Duplicate customer order number is rejected with HTTP 409.');
+
     const persisted = await prisma.customerOrder.findUnique({
       where: { id: orderId },
       include: { orderLines: true },
