@@ -6663,7 +6663,7 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
     const contracts = await prisma.materialContract.findMany({
       where: {
         ...(filters.status && filters.status !== 'ALL' ? { status: filters.status as any } : {}),
-        ...(filters.partId ? { OR: [{ materialId: filters.partId }, { material: { code: filters.partId } }, { material: { grade: filters.partId } }] } : {}),
+        ...(filters.partId ? { OR: [{ materialId: filters.partId }, { material: { is: { code: filters.partId } } }, { material: { is: { grade: filters.partId } } }] } : {}),
       },
       include: {
         material: { select: { code: true, grade: true, name: true } },
@@ -6696,14 +6696,7 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
         ])
       : [[], []];
 
-    const data = contracts.filter((contract: any) => {
-      const start = filters.startDate ? new Date(filters.startDate) : null;
-      const end = filters.endDate ? new Date(filters.endDate + 'T23:59:59.999Z') : null;
-      return contract.transactions.some((tx: any) => {
-        const date = tx.receiptDate.getTime();
-        return (!start || date >= start.getTime()) && (!end || date <= end.getTime());
-      }) || !filters.startDate && !filters.endDate || Number(contract.receivedWeightKg) === 0;
-    }).map((contract: any) => {
+    const data = contracts.map((contract: any) => {
       const contractTx = contract.transactions;
       const isReceipt = (tx: any) => tx.transactionType === 'RECEIPT';
       const isReturn = (tx: any) => tx.transactionType === 'RETURN';
@@ -6712,9 +6705,9 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
         return (!filters.startDate || time >= new Date(filters.startDate).getTime()) &&
           (!filters.endDate || time <= new Date(filters.endDate + 'T23:59:59.999Z').getTime());
       };
-      const openingBalanceKg = filters.startDate
-        ? contractTx.filter((tx: any) => isReceipt(tx) && tx.receiptDate < new Date(filters.startDate!)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0)
-        : 0;
+      const openingBalanceKg = contractTx.length
+        ? (filters.startDate ? contractTx.filter((tx: any) => isReceipt(tx) && tx.receiptDate < new Date(filters.startDate!)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0) : 0)
+        : (filters.startDate ? Number(contract.receivedWeightKg) : 0);
       const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const issued = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
@@ -6763,7 +6756,7 @@ apiRouter.get('/reports/inventory-valuation-quantities', async (req: Request, re
     const prisma = getPrismaClient();
     const balances = await prisma.stockBalance.findMany({
       where: {
-        ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { partNumber: filters.partId } }] } : {}),
+        ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
         ...(filters.startDate || filters.endDate ? {
           updatedAt: {
             ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
