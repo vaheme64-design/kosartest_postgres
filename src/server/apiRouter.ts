@@ -6756,11 +6756,105 @@ apiRouter.get('/reports/customer-order-fulfillment', async (req: Request, res: R
 });
 
 // 19.3 Production Backlog
-apiRouter.get('/reports/production-backlog', (req: Request, res: Response) => {
+apiRouter.get('/reports/production-backlog', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش معوقات تولید فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getProductionBacklogReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const orders = await prisma.manufacturingOrder.findMany({
+      where: {
+        status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS', 'SUSPENDED'] },
+        ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
+        ...(filters.customerId ? { planLine: { is: { customerOrder: { is: { customerId: filters.customerId } } } } } : {}),
+        ...(filters.startDate || filters.endDate ? {
+          scheduledEndDate: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+      },
+      include: {
+        part: { select: { id: true, partNumber: true, name: true, carModel: true, weightGrossKg: true, materialId: true } },
+        planLine: {
+          include: {
+            customerOrder: { include: { customer: { select: { name: true } } } },
+          },
+        },
+      },
+      orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
+    });
+    const materialIds = [...new Set(orders.map((order: any) => order.part.materialId).filter(Boolean))];
+    const rawParts = materialIds.length
+      ? await prisma.part.findMany({
+          where: { materialId: { in: materialIds }, category: 'RAW_MATERIAL', active: true },
+          select: { id: true, materialId: true },
+        })
+      : [];
+    const rawPartIds = rawParts.map((part: any) => part.id);
+    const rawBalances = rawPartIds.length
+      ? await prisma.stockBalance.findMany({
+          where: { partId: { in: rawPartIds }, qualityStatus: 'AVAILABLE' },
+          select: { partId: true, weightKgAvailable: true },
+        })
+      : [];
+    const availableByMaterial = new Map<string, number>();
+    for (const rawPart of rawParts) {
+      const available = rawBalances.filter((balance: any) => balance.partId === rawPart.id)
+        .reduce((sum: number, balance: any) => sum + Number(balance.weightKgAvailable), 0);
+      availableByMaterial.set(rawPart.materialId, (availableByMaterial.get(rawPart.materialId) || 0) + available);
+    }
+
+    const now = Date.now();
+    const data = orders.map((order: any) => {
+      const backlogQuantity = Math.max(0, Number(order.targetQty) - Number(order.completedQty));
+      const dueDate = order.scheduledEndDate;
+      const daysOverdue = now > dueDate.getTime() && backlogQuantity > 0
+        ? Math.floor((now - dueDate.getTime()) / (24 * 3600 * 1000))
+        : 0;
+      const requiredRawMaterialKg = Number((backlogQuantity * Number(order.part.weightGrossKg || 0)).toFixed(3));
+      const availableRawMaterialKg = order.part.materialId ? (availableByMaterial.get(order.part.materialId) || 0) : 0;
+      const materialAvailabilityStatus = requiredRawMaterialKg <= 0
+        ? 'SHORTAGE'
+        : availableRawMaterialKg >= requiredRawMaterialKg
+          ? 'AVAILABLE'
+          : availableRawMaterialKg > 0 ? 'PARTIAL' : 'SHORTAGE';
+      const urgencyLevel = order.priority >= 3 || daysOverdue > 5
+        ? 'CRITICAL'
+        : order.priority >= 2 || daysOverdue > 0 || backlogQuantity > 1000
+          ? 'HIGH'
+          : 'MEDIUM';
+      return {
+        orderNumber: order.moNumber,
+        customerName: order.planLine?.customerOrder?.customer?.name || '—',
+        contractNumber: order.planLine?.customerOrder?.customerContractNumber || '—',
+        partId: order.part.id,
+        partCode: order.part.partNumber,
+        partName: order.part.name,
+        carModel: order.part.carModel || undefined,
+        backlogQuantity,
+        dueDate: dueDate.toISOString(),
+        daysOverdue,
+        urgencyLevel,
+        requiredRawMaterialKg,
+        materialAvailabilityStatus,
+        availableRawMaterialKg: Number(availableRawMaterialKg.toFixed(3)),
+        materialAvailabilityNote: !order.part.materialId || requiredRawMaterialKg <= 0
+          ? 'برای این قطعه گرید ماده یا وزن ناخالص استاندارد ثبت نشده است.'
+          : undefined,
+      };
+    }).filter((row: any) => row.backlogQuantity > 0);
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_MANUFACTURING_ORDERS_PART_MASTER_AND_RAW_MATERIAL_STOCK',
+      meta: {
+        reportTitle: 'گزارش معوقات دستورات ساخت و کفایت موجودی ماده اولیه',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'برآورد ماده اولیه بر اساس وزن ناخالص قطعه و موجودی قابل‌استفاده اقلام خام هم‌گرید است؛ جایگزین انفجار BOM چندماده‌ای نیست.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش معوقات تولید' });
   }
