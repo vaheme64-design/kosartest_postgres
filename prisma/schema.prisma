@@ -282,7 +282,8 @@ model Part {
   thicknessMm          Decimal? // ضخامت ورق (میلیمتر)
   weightNetKg          Decimal       @default(0) // وزن خالص قطعه (کیلوگرم)
   weightGrossKg        Decimal       @default(0) // وزن ناخالص/بلنک مصرفی (کیلوگرم)
-  customerPartNumber   String?       // کد عظام یا ساپکو قطعه
+  customerPartNumber   String?       // کد قطعه مشتری (خودروساز)
+  supplierPartNumber   String?       // کد کالا نزد تامین‌کننده مانند ساپکو
   carModel             String?       // پژو ۲۰۶، ۲۰۷، تارا، دنا پلاس، شاهین، کوییک
   minSafetyStock       Decimal       @default(0) // حداقل موجودی اطمینان
   maxStock             Decimal?
@@ -881,6 +882,10 @@ model InventoryDocumentLine {
   unitId             String
   unit               UnitOfMeasure      @relation(fields: [unitId], references: [id])
   weightKg           Decimal // وزن متناظر به کیلوگرم
+  ownership          String   @default("COMPANY_OWNED")
+  contractId         String?
+  contractNumber     String?
+  qualityStatus      String   @default("AVAILABLE")
   unitCost           Decimal?
   notes              String?
 
@@ -911,6 +916,10 @@ model InventoryTransaction {
   unit                    UnitOfMeasure      @relation(fields: [unitId], references: [id])
   weightKg                Decimal // وزن مطلق به کیلوگرم
   weightKgSigned          Decimal // وزن با علامت (کیلوگرم)
+  ownership               String   @default("COMPANY_OWNED")
+  contractId              String?
+  contractNumber          String?
+  qualityStatus           String   @default("AVAILABLE")
   balanceAfter            Decimal? // مانده مقداری پس از تراکنش
   balanceKgAfter          Decimal? // مانده وزنی پس از تراکنش
   transactionDate         DateTime           // زمان وقوع به UTC
@@ -975,10 +984,14 @@ model StockBalance {
   weightKgOnHand       Decimal            @default(0) // وزن فیزیکی (کیلوگرم)
   weightKgReserved     Decimal            @default(0) // وزن رزرو شده (کیلوگرم)
   weightKgAvailable    Decimal            @default(0) // وزن آزاد (کیلوگرم)
+  ownership            String             @default("COMPANY_OWNED")
+  contractId           String?
+  contractNumber       String?
+  qualityStatus        String             @default("AVAILABLE")
   lastTransactionAt    DateTime?
   updatedAt            DateTime           @updatedAt
 
-  @@unique([partId, warehouseId, locationId, materialLotId])
+  @@unique([partId, warehouseId, locationId, materialLotId, ownership, contractId, qualityStatus])
   @@index([partId, warehouseId])
   @@map("stock_balances")
 }
@@ -1643,3 +1656,26 @@ model DowntimeLog {
   @@map("downtime_logs")
 }
 
+
+
+// Persistent snapshot for stage-level WIP execution.
+// The snapshot preserves the application's complete operation-level quantities and transfer states
+// until the relational routing/operation migration is completed.
+model WipStateSnapshot {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+
+  @@map("wip_state_snapshots")
+}
+
+
+// Transitional durable store for contract/physical-coil allocations and issue-return state.
+// The transactional inventory ledger remains normalized in InventoryDocument/InventoryTransaction.
+model InventoryAppStateSnapshot {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+
+  @@map("inventory_app_state_snapshots")
+}
