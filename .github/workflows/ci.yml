@@ -76,3 +76,6 @@ jobs:
 
       - name: Management reports tests
         run: bunx tsx scripts/test-management-reports.ts
+
+      - name: Physical coil persistence integration test
+        run: bunx tsx scripts/test-physical-coil-persistence.ts
