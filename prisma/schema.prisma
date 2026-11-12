@@ -304,6 +304,7 @@ model Part {
   materialLots         MaterialLot[]
   productionTransfers  ProductionTransfer[]
   physicalCoils        PhysicalCoil[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
   attributeValues      ItemAttributeValue[]
   trackingProfile      ItemTrackingProfile?
 
@@ -714,6 +715,7 @@ model ProductionOperation {
   reports              ProductionReport[]
   assignments          MachineAssignment[]
   scraps               ProductionScrap[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
 
   @@unique([manufacturingOrderId, stepNumber])
   @@index([status])
@@ -858,6 +860,7 @@ model InventoryDocument {
 
   lines              InventoryDocumentLine[]
   transactions       InventoryTransaction[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
 
   @@index([documentType, documentDate])
   @@index([warehouseId, postingStatus])
@@ -874,6 +877,8 @@ model InventoryDocumentLine {
   part               Part               @relation(fields: [partId], references: [id])
   materialLotId      String?
   materialLot        MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  physicalCoilId     String?
+  physicalCoil       PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
   locationId         String?
   location           WarehouseLocation? @relation("Location", fields: [locationId], references: [id])
   targetLocationId   String?
@@ -905,6 +910,8 @@ model InventoryTransaction {
   part                    Part               @relation(fields: [partId], references: [id])
   materialLotId           String?
   materialLot             MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  physicalCoilId          String?
+  physicalCoil            PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
   warehouseId             String
   warehouse               Warehouse          @relation(fields: [warehouseId], references: [id])
   locationId              String?
@@ -1053,6 +1060,7 @@ model MaterialContract {
   materialLots            MaterialLot[]
   transactions            MaterialContractTransaction[]
   contractCoilAllocations ContractCoilAllocation[]
+  coilIssueReturnRecords  CoilIssueReturnRecord[]
   commercialLines         ContractCommercialLine[]
 
   @@index([supplierCustomerId, status])
@@ -1231,6 +1239,8 @@ model PhysicalCoil {
 
   contractAllocations    ContractCoilAllocation[]
   issueReturnRecords     CoilIssueReturnRecord[]
+  inventoryTransactions  InventoryTransaction[]
+  inventoryDocumentLines InventoryDocumentLine[]
 
   @@index([coilPackNumber])
   @@index([warehouseId, physicalStatus])
@@ -1263,6 +1273,14 @@ model CoilIssueReturnRecord {
   id                   String        @id @default(uuid())
   coilId               String
   coil                 PhysicalCoil  @relation(fields: [coilId], references: [id], onDelete: Cascade)
+  inventoryDocumentId  String?
+  inventoryDocument    InventoryDocument? @relation(fields: [inventoryDocumentId], references: [id])
+  contractId           String?
+  contract             MaterialContract? @relation(fields: [contractId], references: [id])
+  partId               String?
+  part                 Part?          @relation(fields: [partId], references: [id])
+  productionOperationId String?
+  productionOperation ProductionOperation? @relation(fields: [productionOperationId], references: [id])
   manufacturingOrderId String?       // شماره دستور ساخت مصرف‌کننده
   documentNumber       String        // شماره حواله خروج یا رسید برگشتی
   issuedWeightKg       Decimal // وزن ارسالی به پای خط
