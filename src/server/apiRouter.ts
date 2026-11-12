@@ -4061,16 +4061,10 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     coil.physicalStatus = persisted.coil.physicalStatus;
     coil.updatedAt = new Date().toISOString();
     if (persisted.wipInput) {
-      advanceProductionWipSnapshotVersion(persisted.wipInput.expectedSnapshotVersion);
-      const wipOrder = manufacturingOrdersStore.find(row => row.id === persisted.wipInput.wipManufacturingOrderId);
-      const linkedOperation = wipOrder?.operations.find(row => row.id === persisted.wipInput.wipOperationId);
-      if (wipOrder && linkedOperation) {
-        linkedOperation.waitingInputQty += persisted.wipInput.quantityPcs;
-        if (linkedOperation.status === 'PENDING') linkedOperation.status = 'READY';
-        linkedOperation.lastActivityAt = new Date().toISOString();
-        wipOrder.initialInputQuantity += persisted.wipInput.quantityPcs;
-        wipOrder.updatedAt = new Date().toISOString();
-      }
+      // Reload the committed snapshot instead of incrementing the local cache.
+      // This also reconciles any same-process WIP mutation that committed immediately
+      // after this transaction and before the HTTP handler resumed.
+      await loadProductionWipState();
     }
     const issueRecords: CoilIssueReturnRecord[] = persisted.records.map((row: any) => ({
       ...row,
