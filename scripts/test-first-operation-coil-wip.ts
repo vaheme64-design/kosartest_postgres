@@ -198,6 +198,8 @@ async function run() {
     const operation10 = relationalOrder.operations[0];
     // This seeded order's first operation is already closed; temporarily reopen it in the disposable CI DB.
     await prisma.productionOperation.update({ where: { id: operation10.id }, data: { status: 'IN_PROGRESS' } });
+    const snapshotBeforeIssue = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+    if (!snapshotBeforeIssue) throw new Error('WIP snapshot fixture was not persisted before coil issue.');
     const issuePayload = {
       issueRequestKey: `${nonce}-ISSUE-REQUEST-1`,
       issuedWeightKg: 70,
@@ -248,6 +250,7 @@ async function run() {
     const snapshotOrder = (snapshotAfterIssue?.payload as any)?.manufacturingOrders?.find((row: any) => row.id === wipMoId);
     const snapshotOperation = snapshotOrder?.operations?.find((row: any) => row.id === wipOperationIds[0]);
     assert('WIP snapshot increments initial input and first-operation waiting quantity by 15', Number(snapshotOrder?.initialInputQuantity) === 15 && Number(snapshotOperation?.waitingInputQty) === 15 && snapshotOperation?.status === 'READY');
+    assert('First-operation coil issue atomically increments the WIP snapshot version', Number(snapshotAfterIssue?.version) === Number(snapshotBeforeIssue.version) + 1);
 
     const returnResult = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/return`, 'POST', {
       returnedRemnantWeightKg: 5,
