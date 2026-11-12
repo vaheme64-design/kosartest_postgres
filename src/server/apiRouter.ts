@@ -9597,7 +9597,7 @@ apiRouter.get('/wip/production-posting-context', async (req: Request, res: Respo
     if (!wipOrder) return res.status(404).json({ success: false, error: 'دستور WIP یافت نشد.' });
 
     const prisma = getPrismaClient();
-    const [manufacturingOrders, shifts, users, machines] = await Promise.all([
+    const [manufacturingOrders, shifts, users, machines, identityLink] = await Promise.all([
       prisma.manufacturingOrder.findMany({
         where: { part: { partNumber: wipOrder.partCode } },
         include: {
@@ -9613,8 +9613,12 @@ apiRouter.get('/wip/production-posting-context', async (req: Request, res: Respo
       prisma.shift.findMany({ where: { active: true }, select: { id: true, code: true, name: true, startTime: true, endTime: true }, orderBy: { startTime: 'asc' } }),
       prisma.user.findMany({ where: { active: true }, select: { id: true, username: true, fullName: true, personnelCode: true }, orderBy: { fullName: 'asc' } }),
       prisma.machine.findMany({ where: { active: true, status: 'ACTIVE' }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } }),
+      prisma.wipManufacturingOrderLink.findUnique({
+        where: { wipManufacturingOrderId: wipMoId },
+        select: { manufacturingOrderId: true },
+      }),
     ]);
-    return res.json({ success: true, data: { manufacturingOrders, shifts, users, machines } });
+    return res.json({ success: true, data: { manufacturingOrders, shifts, users, machines, identityLink } });
   } catch (error) {
     return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت اطلاعات ثبت تولید' });
   }
