@@ -3569,14 +3569,22 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
     if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
     const requested = Array.isArray(multiParts) && multiParts.length > 0
-      ? multiParts.map((p: any) => ({
-          manufacturingOrderRef: p.moId || moId || null,
-          operationRef: p.moOperationId || moOperationId || null,
-          partRef: p.partId || p.partCode || null,
-          issuedWeightKg: Number(p.issuedWeightKg) || 0,
-          varianceWeightKg: Number(p.scrappedKg) || 0,
-          notes: String(p.notes || ''),
-        }))
+      ? (() => {
+          const totalGoodWeight = multiParts.reduce((sum: number, row: any) => sum + (Number(row.issuedWeightKg) || 0), 0);
+          const totalMultiScrap = Number(scrappedKg) || 0;
+          return multiParts.map((p: any) => {
+            const goodWeight = Number(p.issuedWeightKg) || 0;
+            const scrapShare = totalGoodWeight > 0 ? totalMultiScrap * (goodWeight / totalGoodWeight) : 0;
+            return {
+              manufacturingOrderRef: p.moId || moId || null,
+              operationRef: p.moOperationId || moOperationId || null,
+              partRef: p.partId || p.partCode || null,
+              issuedWeightKg: goodWeight + scrapShare,
+              varianceWeightKg: scrapShare,
+              notes: String(p.notes || p.partName || ''),
+            };
+          });
+        })()
       : [{
           manufacturingOrderRef: moId || null,
           operationRef: moOperationId || null,
@@ -3637,15 +3645,21 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
       const createdRecords: any[] = [];
       for (const request of requested) {
         let requestRemaining = request.issuedWeightKg;
-        const mo = request.manufacturingOrderRef
-          ? await tx.manufacturingOrder.findFirst({ where: { OR: [{ id: request.manufacturingOrderRef }, { moNumber: request.manufacturingOrderRef }] } })
-          : null;
+        if (!request.manufacturingOrderRef) throw new Error('برای صدور کلاف، شماره دستور ساخت (MO) الزامی است.');
+        const mo = await tx.manufacturingOrder.findFirst({
+          where: { OR: [{ id: request.manufacturingOrderRef }, { moNumber: request.manufacturingOrderRef }] },
+        });
+        if (!mo) throw new Error(`دستور ساخت «${request.manufacturingOrderRef}» در PostgreSQL یافت نشد؛ حواله بدون اتصال به دستور ساخت مجاز نیست.`);
         const targetPart = request.partRef
           ? await tx.part.findFirst({ where: { OR: [{ id: request.partRef }, { partNumber: request.partRef }] } })
-          : null;
+          : await tx.part.findUnique({ where: { id: mo.partId } });
+        if (!targetPart) throw new Error(`قطعه مقصد دستور ساخت ${mo.moNumber} در اطلاعات پایه یافت نشد.`);
         const operation = request.operationRef
           ? await tx.productionOperation.findUnique({ where: { id: request.operationRef } })
           : null;
+        if (request.operationRef && (!operation || operation.manufacturingOrderId !== mo.id)) {
+          throw new Error(`عملیات «${request.operationRef}» به دستور ساخت ${mo.moNumber} تعلق ندارد یا یافت نشد.`);
+        }
 
         for (const source of balanceRemainders) {
           if (requestRemaining <= 0) break;
@@ -3720,7 +3734,7 @@ apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response)
               coilId: dbCoil.id,
               inventoryDocumentId: doc.id,
               contractId: balance.contractId,
-              partId: targetPart?.id || dbPart.id,
+              partId: targetPart.id,
               productionOperationId: operation?.id || null,
               manufacturingOrderId: mo?.id || null,
               documentNumber: docNumber,
