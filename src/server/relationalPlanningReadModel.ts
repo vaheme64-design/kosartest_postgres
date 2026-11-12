@@ -10,6 +10,18 @@ export interface RelationalNetRequirement {
   dueDate: string;
   customerOrderIds: string[];
   customerOrderNumbers: string[];
+  demandLines: Array<{
+    customerOrderLineId: string;
+    customerOrderId: string;
+    customerOrderNumber: string;
+    lineNumber: number;
+    priority: number;
+    requestedQty: number;
+    deliveredQty: number;
+    remainingQty: number;
+    plannedQty: number;
+    dueDate: string;
+  }>;
   grossDemandQty: number;
   physicalFinishedGoodsQty: number;
   reservedFinishedGoodsQty: number;
@@ -152,6 +164,18 @@ export async function getRelationalPlanningReadModel() {
     dueDate: Date;
     orderIds: Set<string>;
     orderNumbers: Set<string>;
+    demandLines: Array<{
+      customerOrderLineId: string;
+      customerOrderId: string;
+      customerOrderNumber: string;
+      lineNumber: number;
+      priority: number;
+      requestedQty: number;
+      deliveredQty: number;
+      remainingQty: number;
+      plannedQty: number;
+      dueDate: Date;
+    }>;
   }>();
 
   for (const order of orders) {
@@ -163,11 +187,24 @@ export async function getRelationalPlanningReadModel() {
         dueDate: line.requestedDate,
         orderIds: new Set<string>(),
         orderNumbers: new Set<string>(),
+        demandLines: [],
       };
       current.gross += remaining;
       if (line.requestedDate < current.dueDate) current.dueDate = line.requestedDate;
       current.orderIds.add(order.id);
       current.orderNumbers.add(order.orderNumber);
+      current.demandLines.push({
+        customerOrderLineId: line.id,
+        customerOrderId: order.id,
+        customerOrderNumber: order.orderNumber,
+        lineNumber: line.lineNumber,
+        priority: order.priority,
+        requestedQty: n(line.orderedQty),
+        deliveredQty: n(line.deliveredQty),
+        remainingQty: remaining,
+        plannedQty: 0,
+        dueDate: line.requestedDate,
+      });
       demand.set(line.partId, current);
     }
   }
@@ -180,6 +217,14 @@ export async function getRelationalPlanningReadModel() {
     const availableFg = Math.max(0, physicalFg - reservedFg);
     const wipQty = wipByPart.get(partId) || 0;
     const netQty = Math.max(0, info.gross - availableFg - wipQty);
+    let stockCoverRemaining = availableFg + wipQty;
+    const allocatedDemandLines = [...info.demandLines]
+      .sort((a, b) => a.priority - b.priority || a.dueDate.getTime() - b.dueDate.getTime() || a.lineNumber - b.lineNumber);
+    for (const line of allocatedDemandLines) {
+      const covered = Math.min(line.remainingQty, stockCoverRemaining);
+      stockCoverRemaining = Math.max(0, stockCoverRemaining - covered);
+      line.plannedQty = round1(Math.max(0, line.remainingQty - covered));
+    }
     const routeRow = part.routes?.[0];
     const route = (routeRow?.operations || []).map((step: any) => ({
       stepNumber: step.stepNumber,
@@ -247,6 +292,18 @@ export async function getRelationalPlanningReadModel() {
       dueDate: info.dueDate.toISOString().slice(0, 10),
       customerOrderIds: [...info.orderIds],
       customerOrderNumbers: [...info.orderNumbers],
+      demandLines: allocatedDemandLines.map(line => ({
+        customerOrderLineId: line.customerOrderLineId,
+        customerOrderId: line.customerOrderId,
+        customerOrderNumber: line.customerOrderNumber,
+        lineNumber: line.lineNumber,
+        priority: line.priority,
+        requestedQty: round1(line.requestedQty),
+        deliveredQty: round1(line.deliveredQty),
+        remainingQty: round1(line.remainingQty),
+        plannedQty: round1(line.plannedQty),
+        dueDate: line.dueDate.toISOString().slice(0, 10),
+      })),
       grossDemandQty: round1(info.gross),
       physicalFinishedGoodsQty: round1(physicalFg),
       reservedFinishedGoodsQty: round1(reservedFg),
