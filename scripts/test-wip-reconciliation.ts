@@ -8,8 +8,14 @@ import {
   calculateMoReconciliation,
   getWipDashboardMetrics,
   getManufacturingOrderById,
+  manufacturingOrdersStore,
+  wipTransfersStore,
+  productionLogsStore,
+  loadProductionWipState,
+  persistProductionWipState,
 } from '../src/server/productionWipEngine';
 import { INITIAL_PARTS, INITIAL_ROUTINGS } from '../src/server/sampleData';
+import { isDatabaseUrlConfigured } from '../src/server/db/prisma';
 
 function runAssertion(desc: string, condition: boolean) {
   if (!condition) {
@@ -23,9 +29,11 @@ function runAssertion(desc: string, condition: boolean) {
 async function runWipReconciliationTests() {
   console.log('🧪 Starting KPIMS Production Execution & WIP Module Reconciliation Test Suite...\n');
 
-  // Find part with multi-operation route (SAPCO-ASSY-206-001 has 8 operations)
-  const part = INITIAL_PARTS.find(p => p.code === 'SAPCO-ASSY-206-001') || INITIAL_PARTS[33];
-  const routing = INITIAL_ROUTINGS.find(r => r.partId === part.id || r.partCode === part.code) || INITIAL_ROUTINGS[0];
+  // Use the canonical application part catalog instead of a stale array index.
+  const part = INITIAL_PARTS.find(p => p.code === 'WIP-ECU-MAIN-BRK');
+  if (!part) throw new Error('Canonical WIP test part WIP-ECU-MAIN-BRK is missing.');
+  const routing = INITIAL_ROUTINGS.find(r => r.partId === part.id || r.partCode === part.code);
+  if (!routing) throw new Error(`No routing found for canonical WIP test part ${part.code}.`);
 
   console.log(`📋 Route under test: ${routing.partName} (${routing.partCode})`);
   console.log(`   Route Version: ${routing.version}, Operations count: ${routing.operations.length}\n`);
@@ -222,6 +230,30 @@ async function runWipReconciliationTests() {
   runAssertion('Total active MOs counted correctly', metrics.activeMoCount >= 2);
   runAssertion('WIP Dashboard reports overall conservation integrity is TRUE', metrics.overallConservationIntegrity === true);
   runAssertion('Bottleneck operations identified and sorted by queue depth', metrics.bottleneckOperations.length > 0);
+
+  // Verify the WIP snapshot survives clearing all process-local stores and reloading from PostgreSQL.
+  if (isDatabaseUrlConfigured()) {
+    const expectedState = JSON.stringify({
+      moIds: manufacturingOrdersStore.map(item => item.id).sort(),
+      transferIds: wipTransfersStore.map(item => item.id).sort(),
+      logIds: productionLogsStore.map(item => item.id).sort(),
+    });
+
+    await persistProductionWipState();
+    manufacturingOrdersStore.splice(0);
+    wipTransfersStore.splice(0);
+    productionLogsStore.splice(0);
+    await loadProductionWipState();
+
+    const reloadedState = JSON.stringify({
+      moIds: manufacturingOrdersStore.map(item => item.id).sort(),
+      transferIds: wipTransfersStore.map(item => item.id).sort(),
+      logIds: productionLogsStore.map(item => item.id).sort(),
+    });
+    runAssertion('WIP manufacturing orders, transfers and activity logs survive PostgreSQL reload', reloadedState === expectedState);
+  } else {
+    console.log('   (PostgreSQL not configured; WIP snapshot persistence assertion skipped)');
+  }
 
   console.log('\n=============================================================');
   console.log('📊 ALL WIP & RECONCILIATION TESTS PASSED: 25/25 ASSERTS OK');

@@ -30,7 +30,8 @@ async function runProductionPlanningTests() {
   // TEST GROUP 1: Demand & Netting Logic (FG, Blocked Stock, Reservations)
   // =========================================================================
   console.log('📋 Test Group 1: Demand & Netting Logic (FG, Blocked Stock, Reservations)');
-  const testPart = INITIAL_PARTS.find(p => p.code === 'SAPCO-ASSY-206-001') || INITIAL_PARTS[33];
+  const testPart = INITIAL_PARTS.find(p => p.category === 'FINISHED_GOOD');
+  if (!testPart) throw new Error('Canonical finished-good test part is missing from INITIAL_PARTS.');
 
   const testOrders: CustomerOrder[] = [
     {
@@ -58,6 +59,15 @@ async function runProductionPlanningTests() {
       ],
     },
   ];
+
+  // Use the same canonical order fixture for the dashboard and suggestion engine.
+  customerOrdersStore.splice(0, customerOrdersStore.length, ...testOrders);
+
+  const preReleaseDashboard = getPlanningDashboardMetrics();
+  runAssertion(
+    'Dashboard flags uncovered finished-good demand before MO release',
+    preReleaseDashboard.criticalPartsRequiringImmediateAction.some(item => item.partCode === testPart.code && item.netShortage > 0)
+  );
 
   // Stock scenario: 300 Physical in WH-FINISHED, 50 Blocked (quarantine), 50 Reserved
   // Available FG must be exactly 300 - 50 - 50 = 200 PCS
@@ -91,13 +101,13 @@ async function runProductionPlanningTests() {
     {
       id: 'BAL-RAW-01',
       partId: 'PRT-RAW-001',
-      partCode: 'SAPCO-COIL-DC04-0.8',
+      partCode: 'RM-COIL-DC01A-2.0-1140',
       partName: 'کویل ورق DC04',
       category: 'RAW_MATERIAL',
       warehouseId: 'WH-RAW',
       warehouseName: 'انبار رول و ورق',
       locationCode: 'LOC-RAW-A1',
-      materialGrade: 'ST14+ST37',
+      materialGrade: testPart.materialGrade || 'ST14',
       ownership: 'SAPCO_SUPPLIER_OWNED',
       unit: 'KG',
       physicalQty: 1500,
@@ -274,7 +284,17 @@ async function runProductionPlanningTests() {
     requiredTonnage: 800,
     plannedQuantity: 500,
     standardCycleTimeSec: 25,
-    assignedDieCode: 'DIE-TAR-BUM-DRAW', // only compatible with PRS-800-01
+    assignedDieCode: 'DIE-TAR-BUM-DRAW', // test fixture: only compatible with PRS-800-01
+    dies: [
+      ...INITIAL_DIES_MOLDS,
+      {
+        ...INITIAL_DIES_MOLDS[0],
+        id: 'DIE-TAR-BUM-DRAW',
+        code: 'DIE-TAR-BUM-DRAW',
+        processType: 'DRAWING',
+        compatibleMachineCodes: ['PRS-800-01'],
+      },
+    ],
   });
 
   const heavyPress800 = drawingOpCandidates.find(m => m.machineCode === 'PRS-800-01')!;
@@ -312,10 +332,32 @@ async function runProductionPlanningTests() {
     requiredTonnage: 200,
     plannedQuantity: 400,
     standardCycleTimeSec: 10,
-    assignedDieCode: 'DIE-TAR-BUM-DRAW', // die requires PRS-800-01 bolster
+    assignedDieCode: 'DIE-TAR-BUM-DRAW',
+    dies: [
+      ...INITIAL_DIES_MOLDS,
+      {
+        ...INITIAL_DIES_MOLDS[0],
+        id: 'DIE-TAR-BUM-DRAW',
+        code: 'DIE-TAR-BUM-DRAW',
+        processType: 'BLANKING',
+        compatibleMachineCodes: ['PRS-800-01'],
+      },
+    ],
   });
   const aydinPress250 = dieIncompatibleCandidates.find(m => m.machineCode === 'PRS-250-01')!;
   runAssertion('Machine rejected when die bolster/clamps are incompatible', !aydinPress250.dieCompatible && !aydinPress250.isEligible);
+
+  const unknownDieCandidates = evaluateMachineEligibility({
+    processType: 'DRAWING',
+    requiredTonnage: 100,
+    plannedQuantity: 100,
+    standardCycleTimeSec: 10,
+    assignedDieCode: 'DIE-NOT-IN-MASTER-DATA',
+  });
+  runAssertion(
+    'Unknown assigned die fails closed and no machine is considered compatible',
+    unknownDieCandidates.every(m => !m.dieCompatible && !m.isEligible)
+  );
 
   // =========================================================================
   // TEST GROUP 5: Capacity Load, Runtime & Due Date Estimation
@@ -327,7 +369,7 @@ async function runProductionPlanningTests() {
     plannedQuantity: 1800,
     standardCycleTimeSec: 8, // 1800 * 8 = 14400 sec = 4.0 hours + 0.5h setup = 4.5h
     setupTimeMin: 30,
-    assignedDieCode: 'DIE-206-BRK-BLNK',
+    assignedDieCode: 'DIE-ECU-BLK-01' // canonical blanking die in INITIAL_DIES_MOLDS,
   });
   const topBlankingMachine = blankingCandidates.find(m => m.isEligible)!;
   runAssertion('Estimated run time calculated accurately (~4.5 hours)', topBlankingMachine.estimatedRunTimeHours >= 4.4 && topBlankingMachine.estimatedRunTimeHours <= 4.6);
@@ -370,11 +412,15 @@ async function runProductionPlanningTests() {
   // TEST GROUP 7: Planning Dashboard Metrics
   // =========================================================================
   console.log('\n📋 Test Group 7: Planning Dashboard Metrics');
+  // The released MO should cover the net production requirement calculated before release.
   const metrics = getPlanningDashboardMetrics();
   runAssertion('Total open orders counted', metrics.totalOpenOrdersCount >= 1);
   runAssertion('Gross demand pieces aggregated', metrics.totalGrossDemandPieces > 0);
   runAssertion('Average machine capacity utilization calculated (%)', metrics.averageMachineCapacityUtilizationPercent > 0 && metrics.averageMachineCapacityUtilizationPercent <= 100);
-  runAssertion('Critical parts list populated', metrics.criticalPartsRequiringImmediateAction.length >= 1);
+  runAssertion(
+    'Critical-parts panel no longer flags the order after its net requirement is covered by a released MO',
+    !metrics.criticalPartsRequiringImmediateAction.some(item => item.partCode === testPart.code)
+  );
 
   console.log('\n=============================================================');
   console.log('📊 ALL PRODUCTION PLANNING TESTS PASSED: 30/30 ASSERTS OK');
