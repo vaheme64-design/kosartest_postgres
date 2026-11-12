@@ -121,6 +121,7 @@ async function main() {
     assert(invalidIssue.response.status === 400, 'Issue endpoint must reject zero issue weight with HTTP 400.');
 
     const issue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', {
+      issueRequestKey: `${nonce}-ISSUE-HTTP-1`,
       issuedWeightKg: 20,
       moId: mo.moNumber,
       moOperationId: mo.operations[0].id,
