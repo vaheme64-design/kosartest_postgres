@@ -262,7 +262,7 @@ async function run() {
       prisma.physicalCoil.findUnique({ where: { id: coilId } }),
       prisma.stockBalance.aggregate({ where: { physicalCoilId: coilId, partId: relationalOrder.partId }, _sum: { quantityOnHand: true } }),
       prisma.stockBalance.aggregate({ where: { physicalCoilId: coilId, partId: rawPart.id }, _sum: { weightKgOnHand: true } }),
-      prisma.inventoryDocument.count({ where: { referenceNumber: relationalOrder.moNumber, documentType: 'ISSUE', lines: { some: { physicalCoilId: coilId } } } }),
+      prisma.inventoryDocument.count({ where: { referenceNumber: relationalOrder.moNumber, documentType: 'ISSUE' } }),
     ]);
     assert('Failed issue leaves coil balance unchanged', Number(afterRollbackCoil?.remainingWeightKg) === Number(beforeRollback?.remainingWeightKg));
     assert('Failed issue leaves WIP quantity unchanged', Number(afterRollbackWip._sum.quantityOnHand) === beforeWipQty);
