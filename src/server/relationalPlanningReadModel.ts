@@ -135,15 +135,13 @@ export async function getRelationalPlanningReadModel() {
   }
 
   const rawByMaterial = new Map<string, number>();
-  const rawMaterialDetails = new Map<string, { code: string; grade: string }>();
   for (const row of rawBalances) {
     const materialId = row.part.materialId;
     if (!materialId) continue;
     rawByMaterial.set(materialId, (rawByMaterial.get(materialId) || 0) + n(row.weightKgAvailable));
-    if (row.part.material) rawMaterialDetails.set(materialId, { code: row.part.material.code, grade: row.part.material.grade });
   }
 
-  const partById = new Map(parts.map((part: any) => [part.id, part]));
+  const partById = new Map<string, any>(parts.map((part: any) => [part.id, part] as [string, any]));
   const demand = new Map<string, {
     gross: number;
     dueDate: Date;
@@ -202,9 +200,6 @@ export async function getRelationalPlanningReadModel() {
     if (!route.length) warnings.push('برای این قطعه مسیر تولید فعال و پیش‌فرض تعریف نشده است.');
     if (!part.materialId) warnings.push('متریال اصلی قطعه در اطلاعات پایه مشخص نشده است.');
     if (n(part.weightGrossKg) <= 0 && netQty > 0) warnings.push('وزن ناخالص مهندسی قطعه صفر است؛ محاسبه نیاز ورق معتبر نیست.');
-    if (!part.materialId || n(part.weightGrossKg) <= 0) {
-      // Never present an invented zero shortage as a valid material calculation.
-    }
     requirements.push({
       partId,
       partCode: part.partNumber,
