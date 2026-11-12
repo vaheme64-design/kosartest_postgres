@@ -3490,47 +3490,125 @@ apiRouter.get('/inventory/coils/:id/genealogy', (req: Request, res: Response) =>
 
 apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'برگشت ته‌کلاف بدون اتصال PostgreSQL مجاز نیست.' });
+    }
     const { id } = req.params;
-    const { returnedRemnantWeightKg, warehouseId, locationCode, notes, user } = req.body;
-
+    const returnedKg = Number(req.body.returnedRemnantWeightKg);
+    const { warehouseId, locationCode, notes } = req.body;
+    if (!Number.isFinite(returnedKg) || returnedKg <= 0) {
+      return res.status(400).json({ success: false, error: 'وزن برگشتی باید عددی مثبت باشد.' });
+    }
     const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
-    }
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
-    const returnUser = {
-      uid: user?.uid || 'USR-OP',
-      displayName: user?.displayName || 'انباردار مواد اولیه',
+    const prisma = getPrismaClient();
+    const returnedAt = new Date();
+    const returnId = `CRR-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const returnDocNo = String(req.body.documentNumber || `RET-${coil.coilId}-${Date.now()}`);
+
+    const persisted = await prisma.$transaction(async (tx: any) => {
+      const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد.');
+      const openIssues = await tx.coilIssueReturnRecord.findMany({
+        where: { coilId: dbCoil.id, issuedWeightKg: { gt: 0 }, outstandingWeightKg: { gt: 0 } },
+        orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
+      });
+      const outstandingTotal = openIssues.reduce((sum: number, row: any) => sum + Number(row.outstandingWeightKg), 0);
+      if (returnedKg > outstandingTotal) {
+        throw new Error(`وزن برگشتی (${returnedKg} kg) از مانده حواله‌های باز پای خط (${outstandingTotal} kg) بیشتر است.`);
+      }
+
+      let remainingToApply = returnedKg;
+      for (const issue of openIssues) {
+        if (remainingToApply <= 0) break;
+        const outstanding = Number(issue.outstandingWeightKg);
+        const applied = Math.min(outstanding, remainingToApply);
+        const nextOutstanding = Math.max(0, outstanding - applied);
+        await tx.coilIssueReturnRecord.update({
+          where: { id: issue.id },
+          data: {
+            returnedWeightKg: { increment: applied },
+            outstandingWeightKg: nextOutstanding,
+            status: nextOutstanding === 0 ? 'FULLY_RETURNED' : 'PARTIALLY_RETURNED',
+            returnedAt,
+          },
+        });
+        remainingToApply = Math.round((remainingToApply - applied) * 1000) / 1000;
+      }
+
+      let targetWarehouseId = dbCoil.warehouseId;
+      if (warehouseId) {
+        const targetWarehouse = await tx.warehouse.findFirst({ where: { OR: [{ id: warehouseId }, { code: warehouseId }] } });
+        if (!targetWarehouse) throw new Error('انبار مقصد برگشت در اطلاعات پایه PostgreSQL یافت نشد.');
+        targetWarehouseId = targetWarehouse.id;
+      }
+      let targetLocationId: string | null = null;
+      if (locationCode) {
+        const targetLocation = await tx.warehouseLocation.findFirst({ where: { warehouseId: targetWarehouseId, code: locationCode } });
+        if (!targetLocation) throw new Error('موقعیت مقصد برگشت در انبار انتخاب‌شده یافت نشد.');
+        targetLocationId = targetLocation.id;
+      }
+
+      await tx.physicalCoil.update({
+        where: { id: dbCoil.id },
+        data: {
+          remainingWeightKg: { increment: returnedKg },
+          warehouseId: targetWarehouseId,
+          warehouseLocationId: targetLocationId ?? dbCoil.warehouseLocationId,
+          physicalStatus: 'AVAILABLE',
+        },
+      });
+      const returnRecord = await tx.coilIssueReturnRecord.create({
+        data: {
+          id: returnId,
+          coilId: dbCoil.id,
+          manufacturingOrderId: null,
+          documentNumber: returnDocNo,
+          issuedWeightKg: 0,
+          consumedWeightKg: 0,
+          returnedWeightKg: returnedKg,
+          outstandingWeightKg: 0,
+          varianceWeightKg: 0,
+          status: 'FULLY_RETURNED',
+          issuedAt: returnedAt,
+          returnedAt,
+          notes: notes || 'برگشت ته‌کلاف از خط تولید به انبار',
+        },
+      });
+      const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
+      return { coil: updatedCoil, returnRecord };
+    });
+
+    coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
+    coil.warehouseId = persisted.coil.warehouseId;
+    coil.warehouseLocationCode = locationCode || coil.warehouseLocationCode;
+    coil.physicalStatus = persisted.coil.physicalStatus;
+    coil.updatedAt = new Date().toISOString();
+    const returnRecord: CoilIssueReturnRecord = {
+      ...persisted.returnRecord,
+      issuedWeightKg: 0,
+      consumedWeightKg: 0,
+      returnedWeightKg: Number(persisted.returnRecord.returnedWeightKg),
+      outstandingWeightKg: 0,
+      varianceWeightKg: 0,
+      scrappedKg: 0,
+      issuedAt: persisted.returnRecord.issuedAt.toISOString(),
+      returnedAt: persisted.returnRecord.returnedAt?.toISOString(),
     };
+    coilIssueRecordsStore.unshift(returnRecord);
 
-    const result = returnPhysicalCoilPartial(
-      coil,
-      Number(returnedRemnantWeightKg),
-      warehouseId || coil.warehouseId,
-      locationCode || coil.warehouseLocationCode,
-      notes || 'برگشت مازاد یا ته کلاف از خط تولید به انبار',
-      returnUser
-    );
-
-    if (!result.success) {
-      return res.status(400).json({ success: false, error: result.error });
-    }
-
-    if (result.returnRecord) {
-      coilIssueRecordsStore.unshift(result.returnRecord);
-    }
-
-    await persistInventoryAppState();
     res.json({
       success: true,
-      message: `ته‌کلاف / مازاد به وزن ${returnedRemnantWeightKg} کیلوگرم با حفظ پکینگ اصلی (${coil.coilPackNumber}) به انبار برگشت داده شد. مانده جدید کلاف: ${coil.remainingWeightKg} کیلوگرم.`,
+      message: `ته‌کلاف ${returnedKg} کیلوگرمی با ثبت برگشت در PostgreSQL به انبار بازگشت. مانده جدید: ${coil.remainingWeightKg} کیلوگرم.`,
       coil,
-      returnRecord: result.returnRecord,
+      returnRecord,
+      persistence: 'POSTGRESQL_TRANSACTIONAL',
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(409).json({
       success: false,
-      error: error instanceof Error ? error.message : 'خطا در برگشت ته‌کلاف به انبار',
+      error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک برگشت ته‌کلاف',
     });
   }
 });
