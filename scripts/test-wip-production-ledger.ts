@@ -16,6 +16,7 @@ async function run() {
 
   let originalSnapshot: any = null;
   let hadSnapshot = false;
+  let snapshotCaptured = false;
   let relationalOrder: any;
   let operation20: any;
   let operation30: any;
