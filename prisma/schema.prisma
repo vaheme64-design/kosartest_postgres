@@ -145,6 +145,14 @@ enum PlanLineStatus {
   CANCELLED    // لغو شده
 }
 
+enum PlanProposalStatus {
+  DRAFT
+  APPROVED
+  SUPERSEDED
+  RELEASED
+  CANCELLED
+}
+
 enum MOStatus {
   PLANNED      // صادر شده
   RELEASED     // ابلاغ به سالن و تخصیص متریال
@@ -297,6 +305,7 @@ model Part {
   dies                 Die[]
   customerOrderLines   CustomerOrderLine[]
   productionPlanLines  ProductionPlanLine[]
+  planProposalLines    ProductionPlanProposalLine[]
   manufacturingOrders  ManufacturingOrder[]
   inventoryDocLines    InventoryDocumentLine[]
   transactions         InventoryTransaction[]
@@ -634,6 +643,50 @@ model ProductionPlan {
   @@map("production_plans")
 }
 
+// Versioned, persisted planning proposal and its demand-linked lines.
+model ProductionPlanProposal {
+  id                 String             @id @default(uuid())
+  proposalNumber     String             @unique
+  revisionGroupId    String
+  version            Int                @default(1)
+  status             PlanProposalStatus @default(DRAFT)
+  generatedAt        DateTime           @default(now())
+  inputSnapshot      Json
+  notes              String?
+  approvedByUserId   String?
+  approvedAt         DateTime?
+  releasedAt         DateTime?
+  lines              ProductionPlanProposalLine[]
+  productionPlan     ProductionPlan?
+
+  @@unique([revisionGroupId, version])
+  @@index([status, generatedAt])
+  @@map("production_plan_proposals")
+}
+
+model ProductionPlanProposalLine {
+  id                    String                @id @default(uuid())
+  proposalId            String
+  proposal              ProductionPlanProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  customerOrderLineId   String
+  customerOrderLine     CustomerOrderLine     @relation(fields: [customerOrderLineId], references: [id])
+  partId                String
+  part                  Part                  @relation(fields: [partId], references: [id])
+  routeId               String
+  route                 PartRoute             @relation(fields: [routeId], references: [id])
+  requestedQty          Decimal
+  plannedQty            Decimal
+  plannedStartDate      DateTime
+  plannedEndDate        DateTime
+  priority              Int                   @default(2)
+  operationAssignments Json
+  warnings              Json?
+
+  @@unique([proposalId, customerOrderLineId])
+  @@index([partId, plannedStartDate])
+  @@map("production_plan_proposal_lines")
+}
+
 // ردیف‌های برنامه تولید
 model ProductionPlanLine {
   id                 String             @id @default(uuid())
@@ -643,6 +696,8 @@ model ProductionPlanLine {
   part               Part               @relation(fields: [partId], references: [id])
   customerOrderId    String?
   customerOrder      CustomerOrder?     @relation(fields: [customerOrderId], references: [id])
+  customerOrderLineId String?
+  customerOrderLine   CustomerOrderLine? @relation(fields: [customerOrderLineId], references: [id])
   plannedQty         Decimal
   producedQty        Decimal            @default(0)
   plannedStartDate   DateTime
@@ -653,6 +708,7 @@ model ProductionPlanLine {
   manufacturingOrders ManufacturingOrder[]
 
   @@index([partId, status])
+  @@index([customerOrderLineId])
   @@map("production_plan_lines")
 }
 
