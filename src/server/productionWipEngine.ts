@@ -40,8 +40,16 @@ export async function loadProductionWipState(): Promise<boolean> {
     wipTransfersStore.splice(0);
     productionLogsStore.splice(0);
     productionWipSnapshotVersion = 0;
-    await persistProductionWipState();
-    return false;
+    try {
+      await persistProductionWipState();
+      return false;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('WIP_SNAPSHOT_VERSION_CONFLICT')) {
+        // Another instance initialized the snapshot first; load its committed state.
+        return loadProductionWipState();
+      }
+      throw error;
+    }
   }
 
   productionWipSnapshotVersion = snapshot.version ?? 1;
