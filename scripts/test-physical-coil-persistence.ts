@@ -200,6 +200,104 @@ async function main() {
         });
       }
 
+      const reallocationDoc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: `TEST-ALLOC-${nonce}`,
+          documentType: 'COUNT_ADJUSTMENT',
+          documentDate: now,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: warehouse.id,
+          referenceType: 'SAPCO_COIL',
+          referenceNumber: ids.coil,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: now,
+          notes: 'CI test contract reallocation',
+        },
+      });
+      documentIds.push(reallocationDoc.id);
+      const oldSegments = [
+        { contract: contractA, weight: 60 },
+        { contract: contractB, weight: 40 },
+      ];
+      for (let index = 0; index < oldSegments.length; index += 1) {
+        const segment = oldSegments[index];
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: reallocationDoc.id, lineNumber: index + 1,
+            partId: part.id, materialLotId: lot.id, physicalCoilId: coil.id,
+            locationId: location.id, quantity: segment.weight, unitId: part.unitId,
+            weightKg: segment.weight, ownership: 'SAPCO_SUPPLIER_OWNED',
+            contractId: segment.contract.id, contractNumber: segment.contract.contractNumber,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TEST-TRX-ALLOC-OUT-${nonce}-${index}`,
+            documentId: reallocationDoc.id, documentLineId: line.id,
+            partId: part.id, materialLotId: lot.id, physicalCoilId: coil.id,
+            warehouseId: warehouse.id, locationId: location.id,
+            transactionType: 'ADJUSTMENT_NEG', quantity: segment.weight,
+            quantitySigned: -segment.weight, unitId: part.unitId,
+            weightKg: segment.weight, weightKgSigned: -segment.weight,
+            ownership: 'SAPCO_SUPPLIER_OWNED', contractId: segment.contract.id,
+            contractNumber: segment.contract.contractNumber,
+            transactionDate: now, createdByUserId: user.id,
+          },
+        });
+      }
+      await tx.stockBalance.deleteMany({ where: { physicalCoilId: coil.id } });
+      await tx.contractCoilAllocation.deleteMany({ where: { coilId: coil.id } });
+      const newSegments = [
+        { contract: contractA, weight: 40 },
+        { contract: contractB, weight: 60 },
+      ];
+      for (let index = 0; index < newSegments.length; index += 1) {
+        const segment = newSegments[index];
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: reallocationDoc.id, lineNumber: index + 3,
+            partId: part.id, materialLotId: lot.id, physicalCoilId: coil.id,
+            locationId: location.id, quantity: segment.weight, unitId: part.unitId,
+            weightKg: segment.weight, ownership: 'SAPCO_SUPPLIER_OWNED',
+            contractId: segment.contract.id, contractNumber: segment.contract.contractNumber,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TEST-TRX-ALLOC-IN-${nonce}-${index}`,
+            documentId: reallocationDoc.id, documentLineId: line.id,
+            partId: part.id, materialLotId: lot.id, physicalCoilId: coil.id,
+            warehouseId: warehouse.id, locationId: location.id,
+            transactionType: 'ADJUSTMENT_POS', quantity: segment.weight,
+            quantitySigned: segment.weight, unitId: part.unitId,
+            weightKg: segment.weight, weightKgSigned: segment.weight,
+            ownership: 'SAPCO_SUPPLIER_OWNED', contractId: segment.contract.id,
+            contractNumber: segment.contract.contractNumber,
+            transactionDate: now, createdByUserId: user.id,
+          },
+        });
+        await tx.stockBalance.create({
+          data: {
+            partId: part.id, warehouseId: warehouse.id, locationId: location.id,
+            materialLotId: lot.id, physicalCoilId: coil.id,
+            quantityOnHand: segment.weight, quantityAvailable: segment.weight,
+            weightKgOnHand: segment.weight, weightKgAvailable: segment.weight,
+            ownership: 'SAPCO_SUPPLIER_OWNED', contractId: segment.contract.id,
+            contractNumber: segment.contract.contractNumber, qualityStatus: 'AVAILABLE',
+            lastTransactionAt: now,
+          },
+        });
+        await tx.contractCoilAllocation.create({
+          data: {
+            contractId: segment.contract.id, coilId: coil.id,
+            allocatedWeightKg: segment.weight, ownership: 'SAPCO_SUPPLIER_OWNED',
+            sourceDocumentId: reallocationDoc.id,
+          },
+        });
+      }
+
       const issueDoc = await tx.inventoryDocument.create({
         data: {
           documentNumber: ids.issue,
@@ -402,7 +500,7 @@ async function main() {
       if (Number(freshLot.remainingWeightKg) !== 82) throw new Error(`Expected material lot balance 82, got ${freshLot.remainingWeightKg}.`);
       if (balanceWeight !== 82) throw new Error(`Expected stock ledger balance 82, got ${balanceWeight}.`);
       if (outstanding !== 18) throw new Error(`Expected line-side outstanding 18, got ${outstanding}.`);
-      if (linkedTransactions.length !== 5 || linkedLines.length !== 5) throw new Error('Expected five coil-linked receipt, issue and return ledger rows.');
+      if (linkedTransactions.length !== 9 || linkedLines.length !== 9) throw new Error('Expected nine coil-linked receipt, reallocation, issue and return ledger rows.');
       if (contractLedger.length !== 2 || contractLedger.reduce((sum: number, row: any) => sum + Number(row.weightKg), 0) !== 100) throw new Error('Expected 100 kg in the supplier contract receipt ledger.');
       console.log('PASS: physical coil, material lot, contract allocations, inventory documents, transactions, stock balances and issue/return genealogy reconcile to 82 kg.');
     });
