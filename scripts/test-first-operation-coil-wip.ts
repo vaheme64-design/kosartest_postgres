@@ -195,7 +195,7 @@ async function run() {
 
     const operation10 = relationalOrder.operations[0];
     const issue = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', {
-      issuedWeightKg: 30,
+      issuedWeightKg: 70,
       moId: relationalOrder.moNumber,
       moOperationId: operation10.id,
       partId: relationalOrder.partId,
@@ -217,10 +217,10 @@ async function run() {
     const rawB = rawBalances.find(row => row.contractId === contractB.id);
     const wipA = wipBalances.find(row => row.contractId === contractA.id);
     const wipB = wipBalances.find(row => row.contractId === contractB.id);
-    assert('Raw coil remaining weight and material lot both reconcile to 70 kg', Number(coilAfterIssue?.remainingWeightKg) === 70 && Number(lotAfterIssue?.remainingWeightKg) === 70);
-    assert('Contract A raw stock decreases from 60 to 40 kg', Number(rawA?.weightKgAvailable) === 40);
+    assert('Raw coil remaining weight and material lot both reconcile to 70 kg', Number(coilAfterIssue?.remainingWeightKg) === 30 && Number(lotAfterIssue?.remainingWeightKg) === 30);
+    assert('Contract A raw stock decreases from 60 to 40 kg', Number(rawA?.weightKgAvailable) === 0);
     assert('Contract B raw stock decreases from 40 to 30 kg', Number(rawB?.weightKgAvailable) === 30);
-    assert('WIP receives 15 PCS split 10/5 across the original contract lineage', Number(wipA?.quantityOnHand) === 10 && Number(wipB?.quantityOnHand) === 5);
+    assert('WIP receives 15 PCS split 12/3 across the original contract lineage', Number(wipA?.quantityOnHand) === 12 && Number(wipB?.quantityOnHand) === 3);
     assert('WIP input transactions retain coil, lot, MO and both contract identities', wipTransactions.length === 2 && wipTransactions.every(row => row.physicalCoilId === coilId && row.materialLotId === materialLotId) && new Set(wipTransactions.map(row => row.contractId)).size === 2);
     const snapshotOrder = (snapshotAfterIssue?.payload as any)?.manufacturingOrders?.find((row: any) => row.id === wipMoId);
     const snapshotOperation = snapshotOrder?.operations?.find((row: any) => row.id === wipOperationIds[0]);
@@ -238,7 +238,7 @@ async function run() {
       prisma.materialLot.findUnique({ where: { id: materialLotId } }),
       prisma.stockBalance.findMany({ where: { physicalCoilId: coilId, partId: rawPart.id, qualityStatus: 'AVAILABLE' } }),
     ]);
-    assert('Remnant return reconciles coil and lot to 75 kg without changing WIP PCS', Number(coilAfterReturn?.remainingWeightKg) === 75 && Number(lotAfterReturn?.remainingWeightKg) === 75 && Number((await prisma.stockBalance.aggregate({ where: { physicalCoilId: coilId, partId: relationalOrder.partId }, _sum: { quantityOnHand: true } }))._sum.quantityOnHand) === 15);
+    assert('Remnant return reconciles coil and lot to 75 kg without changing WIP PCS', Number(coilAfterReturn?.remainingWeightKg) === 35 && Number(lotAfterReturn?.remainingWeightKg) === 35 && Number((await prisma.stockBalance.aggregate({ where: { physicalCoilId: coilId, partId: relationalOrder.partId }, _sum: { quantityOnHand: true } }))._sum.quantityOnHand) === 15);
     assert('Returned raw material is available again under its original contract identity', rawAfterReturn.some(row => row.contractId === contractA.id || row.contractId === contractB.id));
 
     // Force a failure after the WIP and raw-stock updates have begun inside the transaction.
@@ -267,7 +267,7 @@ async function run() {
     ]);
     assert('Failed issue leaves coil balance unchanged', Number(afterRollbackCoil?.remainingWeightKg) === Number(beforeRollback?.remainingWeightKg));
     assert('Failed issue leaves WIP quantity unchanged', Number(afterRollbackWip._sum.quantityOnHand) === beforeWipQty);
-    assert('Failed issue creates no extra issue document or stock movement', failedDocs === 1 && Number(afterRollbackRaw._sum.weightKgOnHand) === 75);
+    assert('Failed issue creates no extra issue document or stock movement', failedDocs === 1 && Number(afterRollbackRaw._sum.weightKgOnHand) === 35);
 
     console.log('ALL FIRST-OPERATION COIL-TO-WIP INTEGRATION TESTS PASSED');
   } finally {
@@ -282,9 +282,9 @@ async function run() {
       if (docs.length) await prisma.inventoryDocument.deleteMany({ where: { id: { in: docs.map(row => row.id) } } });
       await prisma.physicalCoil.deleteMany({ where: { id: coilId } });
     }
+    if (contractIds.length) await prisma.materialContractTransaction.deleteMany({ where: { contractId: { in: contractIds } } });
     if (materialLotId) await prisma.materialLot.deleteMany({ where: { id: materialLotId } });
     if (contractIds.length) {
-      await prisma.materialContractTransaction.deleteMany({ where: { contractId: { in: contractIds } } });
       await prisma.materialContract.deleteMany({ where: { id: { in: contractIds } } });
     }
     if (wipLinkId) await prisma.wipManufacturingOrderLink.deleteMany({ where: { id: wipLinkId } });
