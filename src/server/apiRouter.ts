@@ -6680,12 +6680,6 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
               contractId: { in: contractIds },
               postingStatus: 'POSTED',
               transactionType: 'OUTBOUND',
-              ...(filters.startDate || filters.endDate ? {
-                transactionDate: {
-                  ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
-                  ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
-                },
-              } : {}),
             },
             select: { contractId: true, weightKg: true, transactionDate: true },
           }),
@@ -6705,12 +6699,17 @@ apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Respo
         return (!filters.startDate || time >= new Date(filters.startDate).getTime()) &&
           (!filters.endDate || time <= new Date(filters.endDate + 'T23:59:59.999Z').getTime());
       };
+      const beforeStart = (date: Date) => Boolean(filters.startDate && date < new Date(filters.startDate));
+      const issuedRows = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id);
+      const openingReceipts = contractTx.filter((tx: any) => isReceipt(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const openingSupplierReturns = contractTx.filter((tx: any) => isReturn(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const openingIssued = issuedRows.filter((tx: any) => beforeStart(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const openingBalanceKg = contractTx.length
-        ? (filters.startDate ? contractTx.filter((tx: any) => isReceipt(tx) && tx.receiptDate < new Date(filters.startDate!)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0) : 0)
-        : (filters.startDate ? Number(contract.receivedWeightKg) : 0);
+        ? openingReceipts - openingSupplierReturns - openingIssued
+        : (filters.startDate ? Number(contract.receivedWeightKg) - openingIssued : 0);
       const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
-      const issued = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const issued = issuedRows.filter((tx: any) => inRange(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
       const totalReceivedKg = contractTx.length
         ? receivedInRange
         : filters.startDate || filters.endDate ? 0 : Number(contract.receivedWeightKg);
