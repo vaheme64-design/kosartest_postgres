@@ -325,6 +325,7 @@ let shiftsStore: ShiftDefinition[] = [
 // Saved report configurations are persisted in PostgreSQL, not in process memory.
 let importBatchesStore: ImportBatchSummary[] = [];
 
+// Legacy snapshot for non-relational inventory UI state; physical coil and issue/return records are rehydrated from normalized PostgreSQL tables.
 const INVENTORY_APP_SNAPSHOT_ID = 'inventory-app-state';
 let inventoryStateQueue: Promise<unknown> = Promise.resolve();
 
@@ -462,7 +463,7 @@ export async function loadInventoryAppState(): Promise<void> {
     }),
   ]);
 
-  if (dbPhysicalCoils.length || process.env.NODE_ENV === 'production') {
+  if (isDatabaseUrlConfigured()) {
     physicalCoilsStore.splice(0, physicalCoilsStore.length, ...dbPhysicalCoils.map((row: any) => {
       const appPart = partsStore.find(part => part.code === row.part?.partNumber);
       return {
@@ -498,7 +499,7 @@ export async function loadInventoryAppState(): Promise<void> {
     }));
   }
 
-  if (dbCoilIssueRecords.length || process.env.NODE_ENV === 'production') {
+  if (isDatabaseUrlConfigured()) {
     coilIssueRecordsStore.splice(0, coilIssueRecordsStore.length, ...dbCoilIssueRecords.map((row: any) => ({
       id: row.id,
       coilId: row.coilId,
