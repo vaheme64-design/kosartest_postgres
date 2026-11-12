@@ -7059,23 +7059,159 @@ apiRouter.get('/reports/production-backlog', async (req: Request, res: Response)
   }
 });
 
+async function getDatabaseWipReportRows(filters: ReportFilterParams) {
+  const prisma = getPrismaClient();
+  const orders = await prisma.manufacturingOrder.findMany({
+    where: {
+      status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS', 'SUSPENDED'] },
+      ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
+    },
+    include: {
+      part: { select: { id: true, partNumber: true, name: true } },
+      operations: {
+        where: {
+          ...(filters.processType ? { operation: { is: { processType: filters.processType } } } : {}),
+          ...(filters.machineId ? { plannedMachineId: filters.machineId } : {}),
+        },
+        include: {
+          operation: { select: { code: true, name: true, processType: true } },
+          plannedMachine: { select: { id: true, code: true, name: true, hall: true } },
+          reports: { orderBy: { reportDate: 'desc' }, take: 1, select: { reportDate: true } },
+        },
+        orderBy: { stepNumber: 'asc' },
+      },
+    },
+    orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
+  });
+  const moIds = orders.map((order: any) => order.id);
+  const transfers = moIds.length
+    ? await prisma.productionTransfer.findMany({
+        where: { manufacturingOrderId: { in: moIds }, status: { in: ['DISPATCHED', 'RECEIVED'] } },
+        include: {
+          fromWarehouse: { select: { code: true, name: true } },
+          toWarehouse: { select: { code: true, name: true } },
+        },
+        orderBy: { dispatchedAt: 'asc' },
+      })
+    : [];
+
+  const rows: any[] = [];
+  for (const order of orders) {
+    for (const operation of order.operations) {
+      const inboundTransfers = transfers.filter((transfer: any) =>
+        transfer.toStageOperationId === operation.id && transfer.status === 'RECEIVED'
+      );
+      const outboundTransfers = transfers.filter((transfer: any) =>
+        transfer.fromStageOperationId === operation.id
+      );
+      const receivedQty = inboundTransfers.reduce((sum: number, transfer: any) => sum + Number(transfer.quantity), 0);
+      const transferredQty = outboundTransfers.reduce((sum: number, transfer: any) => sum + Number(transfer.quantity), 0);
+      const inputQty = Number(operation.inputQty);
+      const goodOutputQty = Number(operation.outputGoodQty);
+      const scrapQty = Number(operation.outputScrapQty);
+      const waitingInputQty = Math.max(0, receivedQty - inputQty);
+      const inProgressQty = Math.max(0, inputQty - goodOutputQty - scrapQty);
+      const readyForTransferQty = Math.max(0, goodOutputQty - transferredQty);
+      const totalActiveWipQty = waitingInputQty + inProgressQty + readyForTransferQty;
+      const activities = [
+        operation.startDate,
+        operation.reports[0]?.reportDate,
+        ...inboundTransfers.map((transfer: any) => transfer.receivedAt || transfer.dispatchedAt),
+        ...outboundTransfers.map((transfer: any) => transfer.receivedAt || transfer.dispatchedAt),
+      ].filter(Boolean).map((date: any) => new Date(date).getTime());
+      const lastActivityAt = new Date(activities.length ? Math.max(...activities) : order.updatedAt).toISOString();
+      const warehouseLocation = operation.plannedMachine
+        ? [operation.plannedMachine.hall, operation.plannedMachine.code, operation.plannedMachine.name].filter(Boolean).join(' / ')
+        : inboundTransfers[inboundTransfers.length - 1]?.toWarehouse?.name || 'موقعیت ثبت نشده';
+      if (totalActiveWipQty > 0 || transferredQty > 0) {
+        rows.push({
+          partId: order.part.id,
+          partCode: order.part.partNumber,
+          partName: order.part.name,
+          moId: order.id,
+          moNumber: order.moNumber,
+          stepNumber: operation.stepNumber,
+          stepCode: operation.operation.code,
+          stepName: operation.operation.name,
+          processType: operation.operation.processType,
+          machineId: operation.plannedMachineId,
+          machineName: operation.plannedMachine?.name,
+          warehouseLocation,
+          waitingInputQty,
+          inProgressQty,
+          readyForTransferQty,
+          transferredQty,
+          totalActiveWipQty,
+          lastActivityAt,
+          dataBasis: 'PRODUCTION_OPERATION_COUNTERS_AND_TRANSFER_LEDGER',
+        });
+      }
+    }
+  }
+  return rows;
+}
+
 // 19.4 WIP by Part & Operation
-apiRouter.get('/reports/wip-by-part-operation', (req: Request, res: Response) => {
+apiRouter.get('/reports/wip-by-part-operation', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش WIP فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getWipByPartAndOperationReport(filters);
-    res.json({ success: true, ...report });
+    const data = await getDatabaseWipReportRows(filters);
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_OPERATIONS_AND_TRANSFERS',
+      meta: {
+        reportTitle: 'گزارش موجودی کار در جریان ساخت به تفکیک قطعه و مرحله',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'موجودی مرحله از شمارنده‌های ورودی/خروجی عملیات و انتقال‌های دریافت‌شده محاسبه می‌شود؛ بارگذاری اولیه مرحله اول فقط در صورت ثبت inputQty قابل مشاهده است.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش WIP' });
   }
 });
 
 // 19.5 WIP Aging
-apiRouter.get('/reports/wip-aging', (req: Request, res: Response) => {
+apiRouter.get('/reports/wip-aging', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش سن‌یابی WIP فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getWipAgingReport(filters);
-    res.json({ success: true, ...report });
+    const rows = await getDatabaseWipReportRows(filters);
+    const now = Date.now();
+    const data = rows.filter((row: any) => row.totalActiveWipQty > 0).map((row: any) => {
+      const idleHours = Math.max(0, Math.round((now - new Date(row.lastActivityAt).getTime()) / (3600 * 1000)));
+      const idleDays = Math.round((idleHours / 24) * 10) / 10;
+      const ageCategory = idleDays > 7 ? 'OVER_7_DAYS_STAGNANT' : idleDays >= 3 ? '3_TO_7_DAYS' : idleDays >= 1 ? '1_TO_3_DAYS' : 'UNDER_24_HOURS';
+      const statusSeverity = idleDays > 7 ? 'CRITICAL' : idleDays >= 3 ? 'ATTENTION' : 'NORMAL';
+      return {
+        moNumber: row.moNumber,
+        partCode: row.partCode,
+        partName: row.partName,
+        stepNumber: row.stepNumber,
+        stepName: row.stepName,
+        warehouseLocation: row.warehouseLocation,
+        quantityInStation: row.totalActiveWipQty,
+        lastActivityDate: row.lastActivityAt,
+        idleHours,
+        idleDays,
+        ageCategory,
+        statusSeverity,
+      };
+    }).sort((a: any, b: any) => b.idleHours - a.idleHours);
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_OPERATIONS_AND_TRANSFERS',
+      meta: {
+        reportTitle: 'گزارش سن‌یابی و ماندگاری اقلام در جریان ساخت',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش سن‌یابی WIP' });
   }
