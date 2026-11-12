@@ -495,14 +495,19 @@ async function main() {
       ]);
       if (!freshCoil || !freshLot) throw new Error('Physical coil or material lot disappeared during the reconciliation test.');
       const balanceWeight = balances.reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      const contractABalance = balances.filter((row: any) => row.contractId === contractA.id).reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      const contractBBalance = balances.filter((row: any) => row.contractId === contractB.id).reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      const signedLedgerWeight = linkedTransactions.reduce((sum: number, row: any) => sum + Number(row.weightKgSigned), 0);
       const outstanding = issueRecords.filter((row: any) => Number(row.issuedWeightKg) > 0).reduce((sum: number, row: any) => sum + Number(row.outstandingWeightKg), 0);
       if (Number(freshCoil.remainingWeightKg) !== 82) throw new Error(`Expected physical coil balance 82, got ${freshCoil.remainingWeightKg}.`);
       if (Number(freshLot.remainingWeightKg) !== 82) throw new Error(`Expected material lot balance 82, got ${freshLot.remainingWeightKg}.`);
       if (balanceWeight !== 82) throw new Error(`Expected stock ledger balance 82, got ${balanceWeight}.`);
+      if (contractABalance !== 32 || contractBBalance !== 50) throw new Error(`Expected contract balances A=32/B=50, got A=${contractABalance}/B=${contractBBalance}.`);
+      if (signedLedgerWeight !== 82) throw new Error(`Expected signed coil ledger net 82, got ${signedLedgerWeight}.`);
       if (outstanding !== 18) throw new Error(`Expected line-side outstanding 18, got ${outstanding}.`);
       if (linkedTransactions.length !== 9 || linkedLines.length !== 9) throw new Error('Expected nine coil-linked receipt, reallocation, issue and return ledger rows.');
       if (contractLedger.length !== 2 || contractLedger.reduce((sum: number, row: any) => sum + Number(row.weightKg), 0) !== 100) throw new Error('Expected 100 kg in the supplier contract receipt ledger.');
-      console.log('PASS: physical coil, material lot, contract allocations, inventory documents, transactions, stock balances and issue/return genealogy reconcile to 82 kg.');
+      console.log('PASS: physical coil, material lot, two-contract reallocation, inventory documents, signed ledger, stock balances and issue/return genealogy reconcile to 82 kg (A=32 kg, B=50 kg).');
     });
   } finally {
     if (physicalCoilId) {
