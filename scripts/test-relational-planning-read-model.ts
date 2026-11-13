@@ -213,10 +213,13 @@ async function main() {
     const firstOperation = e2eMo.operations[0];
     const wipMoId = `WIP-${e2eMo.id}`;
     const wipOperationId = `WIPOP-${firstOperation.id}`;
-    const firstStageLocation = await prisma.warehouseLocation.findFirst({
-      where: { code: 'LOC-WIP-BLANK', active: true },
-    });
-    assert(firstStageLocation, 'E2E first operation requires the configured first-stage WIP location.');
+    const releasedSnapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+    const releasedWipOrder = ((releasedSnapshot?.payload as any)?.manufacturingOrders || []).find((row: any) => row.id === wipMoId);
+    const firstWipOperation = releasedWipOrder?.operations?.find((row: any) => row.id === wipOperationId);
+    const firstStageLocation = firstWipOperation
+      ? await prisma.warehouseLocation.findFirst({ where: { code: firstWipOperation.warehouseLocation, active: true } })
+      : null;
+    assert(firstStageLocation, 'E2E first operation requires its configured WIP warehouse location.');
     const contract = await prisma.materialContract.create({
       data: {
         contractNumber: `${nonce}-E2E-CONTRACT`,
@@ -330,14 +333,17 @@ async function main() {
       prisma.productionOperation.findUnique({ where: { id: e2eMo.operations[1].id } }),
       prisma.warehouse.findFirst({ where: { type: 'SCRAP', active: true }, include: { locations: { where: { active: true }, orderBy: { code: 'asc' }, take: 1 } } }),
       prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } }),
-      prisma.inventoryTransaction.findMany({ where: { manufacturingOrderId: e2eMo.id, productionOperationId: firstOperation.id } }),
+      prisma.inventoryTransaction.findMany({ where: { productionReportId: production.payload.report?.id } }),
     ]);
     assert(reportCount === 1, 'E2E production report must be persisted exactly once.');
     assert(Number(sourceAfter?.quantityOnHand || 0) === 0, 'E2E production posting must consume all 15 PCS from first-stage WIP.');
     assert(Number(nextOperation?.outputGoodQty) === 14 && Number(nextOperation?.inputQty) === 15 && Number(nextOperation?.outputScrapQty) === 1,
       'E2E relational operation counters must record 15 input, 14 good and 1 scrap.');
     assert(scrapWarehouse?.locations?.[0], 'E2E scrap posting requires an active scrap warehouse location.');
-    const nextLocation = await prisma.warehouseLocation.findFirst({ where: { code: 'LOC-WIP-DRAWN', active: true } });
+    const nextWipOperation = releasedWipOrder.operations.find((row: any) => row.sequence === firstWipOperation.sequence + 1);
+    const nextLocation = nextWipOperation
+      ? await prisma.warehouseLocation.findFirst({ where: { code: nextWipOperation.warehouseLocation, active: true } })
+      : null;
     assert(nextLocation, 'E2E next operation requires the configured downstream WIP location.');
     const nextBalance = await prisma.stockBalance.findFirst({
       where: { partId: e2eMo.partId, locationId: nextLocation.id, qualityStatus: 'AVAILABLE', physicalCoilId: coilId },
@@ -347,7 +353,7 @@ async function main() {
     });
     assert(Number(nextBalance?.quantityOnHand) === 14 && Number(scrapBalance?.quantityOnHand) === 1,
       'E2E 14 good PCS must move automatically to the next operation and 1 scrap PCS to the scrap location.');
-    assert(postedTransactions.length === 4, 'E2E first production report must create balanced source, good-output and scrap ledger transactions.');
+    assert(postedTransactions.length === 3, 'E2E first production report must create one source, one good-output and one scrap ledger transaction.');
     const snapshotOrderAfterProduction = ((wipAfterProduction?.payload as any)?.manufacturingOrders || []).find((row: any) => row.id === wipMoId);
     assert(snapshotOrderAfterProduction?.operations[0]?.status === 'COMPLETED' &&
       snapshotOrderAfterProduction?.operations[1]?.status === 'READY' &&
@@ -369,7 +375,7 @@ async function main() {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
     if (coilId) {
       const coilDocs = await prisma.inventoryDocument.findMany({ where: { lines: { some: { physicalCoilId: coilId } } }, select: { id: true } });
-      await prisma.inventoryTransaction.deleteMany({ where: { OR: [{ physicalCoilId: coilId }, ...(planId ? [{ manufacturingOrder: { planId } }] : [])] } });
+      await prisma.inventoryTransaction.deleteMany({ where: { physicalCoilId: coilId } });
       await prisma.inventoryDocumentLine.deleteMany({ where: { physicalCoilId: coilId } });
       await prisma.coilIssueReturnRecord.deleteMany({ where: { coilId } });
       await prisma.stockBalance.deleteMany({ where: { physicalCoilId: coilId } });
