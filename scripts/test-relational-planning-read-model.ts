@@ -12,6 +12,11 @@ let planId: string | undefined;
 let coilId: string | undefined;
 let materialLotId: string | undefined;
 let contractId: string | undefined;
+let materialIssueDocumentId: string | undefined;
+let materialIssuePartId: string | undefined;
+let materialIssueLocationId: string | undefined;
+let materialIssueWarehouseId: string | undefined;
+let createdMaterialIssueWarehouse = false;
 let server: import('node:http').Server | undefined;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -210,6 +215,87 @@ async function main() {
     const rawWarehouse = await prisma.warehouse.findFirst({ where: { code: 'WH-RAW', active: true } });
     const supplier = await prisma.customer.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
     assert(rawPart?.material && appRawPart && rawWarehouse && supplier, 'E2E requires a KG raw-material item mapped to the app catalog, WH-RAW and an active supplier/customer.');
+
+    // Non-coil component issue: a bolt/consumable is transferred to the
+    // released MO operation's WIP staging location without changing produced-part WIP.
+    const pcsUnit = await prisma.unitOfMeasure.findUnique({ where: { code: 'PCS' } });
+    const activeUser = await prisma.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+    assert(pcsUnit && activeUser, 'Non-coil material issue test requires PCS UoM and an active user.');
+    let wipWarehouse = await prisma.warehouse.findFirst({ where: { active: true, type: 'WIP' } });
+    if (!wipWarehouse) {
+      wipWarehouse = await prisma.warehouse.create({
+        data: { code: `${nonce}-WIP`, name: 'CI Non-coil Material WIP', type: 'WIP' },
+      });
+      materialIssueWarehouseId = wipWarehouse.id;
+      createdMaterialIssueWarehouse = true;
+    }
+    const stagingLocation = await prisma.warehouseLocation.create({
+      data: { warehouseId: wipWarehouse.id, code: `${nonce}-STAGE`, aisle: 'CI', rack: 'MATERIAL' },
+    });
+    materialIssueLocationId = stagingLocation.id;
+    const componentPart = await prisma.part.create({
+      data: {
+        partNumber: `${nonce}-BOLT`,
+        name: 'CI Bolt Component',
+        category: 'CONSUMABLE',
+        unitId: pcsUnit.id,
+      },
+    });
+    materialIssuePartId = componentPart.id;
+    const sourceBalance = await prisma.stockBalance.create({
+      data: {
+        partId: componentPart.id,
+        warehouseId: rawWarehouse.id,
+        quantityOnHand: 50,
+        quantityReserved: 0,
+        quantityAvailable: 50,
+        weightKgOnHand: 0,
+        weightKgReserved: 0,
+        weightKgAvailable: 0,
+        ownership: 'COMPANY_OWNED',
+        qualityStatus: 'AVAILABLE',
+      },
+    });
+    const targetOperation = e2eMo!.operations[0];
+    const operationBefore = await prisma.productionOperation.findUnique({ where: { id: targetOperation.id } });
+    const issueKey = `${nonce}-MAT-ISSUE`;
+    const issueBody = {
+      sourceStockBalanceId: sourceBalance.id,
+      productionOperationId: targetOperation.id,
+      targetWarehouseId: wipWarehouse.id,
+      targetLocationId: stagingLocation.id,
+      quantity: 10,
+      weightKg: 0,
+      unitId: pcsUnit.id,
+      createdByUserId: activeUser.id,
+      issueRequestKey: issueKey,
+      notes: 'CI operation-linked component issue',
+    };
+    const materialIssue = await requestJson(baseUrl, '/api/inventory/material-issues', 'POST', issueBody);
+    assert(materialIssue.response.status === 201 && materialIssue.payload.success, `Non-coil material issue failed: ${JSON.stringify(materialIssue.payload)}`);
+    materialIssueDocumentId = materialIssue.payload.data.id;
+    assert(materialIssue.payload.data.lines[0].productionOperationId === targetOperation.id, 'Material issue document line must reference the exact production operation.');
+    assert(materialIssue.payload.data.transactions.length === 2, 'Material issue must create paired transfer-out and transfer-in ledger rows.');
+    assert(materialIssue.payload.data.transactions.reduce((sum: number, row: any) => sum + Number(row.quantitySigned), 0) === 0, 'Paired quantity movements must balance to zero.');
+    const sourceAfterIssue = await prisma.stockBalance.findUnique({ where: { id: sourceBalance.id } });
+    const targetAfterIssue = await prisma.stockBalance.findFirst({
+      where: { partId: componentPart.id, warehouseId: wipWarehouse.id, locationId: stagingLocation.id },
+    });
+    assert(Number(sourceAfterIssue?.quantityOnHand) === 40 && Number(sourceAfterIssue?.quantityAvailable) === 40, 'Source material stock must decrease by exactly 10 PCS.');
+    assert(Number(targetAfterIssue?.quantityOnHand) === 10 && Number(targetAfterIssue?.quantityAvailable) === 10, 'Operation staging stock must increase by exactly 10 PCS.');
+    assert(materialIssue.payload.producedPartWipChanged === false, 'Component issue must not create or alter produced-part WIP quantities.');
+    const replayIssue = await requestJson(baseUrl, '/api/inventory/material-issues', 'POST', issueBody);
+    assert(replayIssue.response.status === 200 && replayIssue.payload.replayed, 'Same-key material issue retry must return the original document.');
+    const changedIssue = await requestJson(baseUrl, '/api/inventory/material-issues', 'POST', { ...issueBody, quantity: 11 });
+    assert(changedIssue.response.status === 409, 'Reusing an issue key with a changed payload must be rejected.');
+    const insufficientIssue = await requestJson(baseUrl, '/api/inventory/material-issues', 'POST', { ...issueBody, issueRequestKey: `${nonce}-MAT-LOW`, quantity: 1000 });
+    assert(insufficientIssue.response.status === 409, 'Insufficient component stock must be rejected.');
+    const sourceAfterRejected = await prisma.stockBalance.findUnique({ where: { id: sourceBalance.id } });
+    assert(Number(sourceAfterRejected?.quantityOnHand) === 40, 'Rejected and duplicate requests must not change source stock.');
+    const operationAfter = await prisma.productionOperation.findUnique({ where: { id: targetOperation.id } });
+    assert(Number(operationAfter?.inputQty) === Number(operationBefore?.inputQty), 'Component staging must not alter the manufactured part operation input counter.');
+    console.log('PASS: Non-coil material issue transfers component stock to an operation WIP location, preserves ledger balance, and rejects duplicate/conflicting/insufficient requests.');
+
     assert(e2eMo.operations[0].plannedMachineId, 'E2E first operation must have an eligible machine assigned by the released plan.');
     const firstOperation = e2eMo.operations[0];
     const wipMoId = `WIP-${e2eMo.id}`;
@@ -380,6 +466,19 @@ async function main() {
     if (cleanupMoIds.length) {
       await prisma.inventoryTransaction.deleteMany({ where: { manufacturingOrderId: { in: cleanupMoIds } } });
       await prisma.productionReport.deleteMany({ where: { manufacturingOrderId: { in: cleanupMoIds } } });
+    }
+    if (materialIssueDocumentId) {
+      await prisma.inventoryTransaction.deleteMany({ where: { documentId: materialIssueDocumentId } });
+      await prisma.inventoryDocumentLine.deleteMany({ where: { documentId: materialIssueDocumentId } });
+      await prisma.inventoryDocument.deleteMany({ where: { id: materialIssueDocumentId } });
+    }
+    if (materialIssuePartId) {
+      await prisma.stockBalance.deleteMany({ where: { partId: materialIssuePartId } });
+      await prisma.part.deleteMany({ where: { id: materialIssuePartId } });
+    }
+    if (materialIssueLocationId) await prisma.warehouseLocation.deleteMany({ where: { id: materialIssueLocationId } });
+    if (createdMaterialIssueWarehouse && materialIssueWarehouseId) {
+      await prisma.warehouse.deleteMany({ where: { id: materialIssueWarehouseId } });
     }
     if (coilId) {
       const coilDocs = await prisma.inventoryDocument.findMany({ where: { lines: { some: { physicalCoilId: coilId } } }, select: { id: true } });
