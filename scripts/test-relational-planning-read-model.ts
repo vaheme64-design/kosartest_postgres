@@ -374,6 +374,13 @@ async function main() {
     console.log('PASS: Sample-backed legacy suggestions and dashboard fail closed instead of leaking sample data.');
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    const cleanupMoIds = planId
+      ? (await prisma.manufacturingOrder.findMany({ where: { planId }, select: { id: true } })).map((item: any) => item.id)
+      : [];
+    if (cleanupMoIds.length) {
+      await prisma.inventoryTransaction.deleteMany({ where: { manufacturingOrderId: { in: cleanupMoIds } } });
+      await prisma.productionReport.deleteMany({ where: { manufacturingOrderId: { in: cleanupMoIds } } });
+    }
     if (coilId) {
       const coilDocs = await prisma.inventoryDocument.findMany({ where: { lines: { some: { physicalCoilId: coilId } } }, select: { id: true } });
       await prisma.inventoryTransaction.deleteMany({ where: { physicalCoilId: coilId } });
@@ -409,6 +416,8 @@ async function main() {
               payload: {
                 ...payload,
                 manufacturingOrders: payload.manufacturingOrders.filter((item: any) => !cleanupWipOrderIds.includes(item.id)),
+                wipTransfers: (payload.wipTransfers || []).filter((item: any) => !cleanupWipOrderIds.includes(item.moId)),
+                productionLogs: (payload.productionLogs || []).filter((item: any) => !cleanupWipOrderIds.includes(item.moId)),
               },
               version: { increment: 1 },
             },
