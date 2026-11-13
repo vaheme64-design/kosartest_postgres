@@ -2,11 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { getPrismaClient } from './db/prisma';
 import { getRelationalPlanningReadModel } from './relationalPlanningReadModel';
 import {
-  advanceProductionWipSnapshotVersion,
   getLocationForProcess,
   getProductionWipSnapshotVersion,
   loadProductionWipState,
-  manufacturingOrdersStore,
 } from './productionWipEngine';
 import type { ManufacturingOrder as WipManufacturingOrder } from '../types/productionWip';
 
@@ -509,8 +507,9 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
   }, { isolationLevel: 'Serializable' });
 
   if (!result.replayed && bridgedWipOrders.length) {
-    manufacturingOrdersStore.push(...bridgedWipOrders);
-    advanceProductionWipSnapshotVersion(expectedWipSnapshotVersion);
+    // Re-read the committed snapshot instead of mutating local state blindly;
+    // this also reconciles a concurrent writer on another application instance.
+    await loadProductionWipState();
   }
   return result;
 }
