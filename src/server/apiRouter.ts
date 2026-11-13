@@ -3217,6 +3217,58 @@ apiRouter.post('/inventory/contracts/:id/allocate-coil', async (req: Request, re
  * manufacturing operation's WIP staging location. The component remains its own
  * inventory item; this does not change the manufactured part's WIP quantity.
  */
+/**
+ * GET /api/inventory/material-issue-options
+ * Lists eligible non-coil stock, released operation targets and WIP staging locations.
+ */
+apiRouter.get('/inventory/material-issue-options', async (_req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'این فهرست فقط از PostgreSQL قابل دریافت است.' });
+    const prisma = getPrismaClient();
+    const [stockBalances, operations, warehouses] = await Promise.all([
+      prisma.stockBalance.findMany({
+        where: {
+          quantityAvailable: { gt: 0 },
+          qualityStatus: 'AVAILABLE',
+          physicalCoilId: null,
+          part: { active: true, category: { in: ['RAW_MATERIAL', 'CONSUMABLE'] } },
+        },
+        include: {
+          part: { include: { unit: true } },
+          warehouse: { select: { id: true, code: true, name: true } },
+          location: { select: { id: true, code: true } },
+          materialLot: { select: { id: true, lotNumber: true } },
+        },
+        orderBy: [{ part: { partNumber: 'asc' } }, { updatedAt: 'asc' }],
+      }),
+      prisma.productionOperation.findMany({
+        where: { manufacturingOrder: { status: { in: ['RELEASED', 'IN_PROGRESS'] } } },
+        include: {
+          manufacturingOrder: { include: { part: { select: { partNumber: true, name: true } } } },
+          operation: { select: { code: true, name: true, processType: true } },
+          wipExecutionLink: { select: { id: true, wipOperationId: true } },
+        },
+        orderBy: [{ manufacturingOrder: { moNumber: 'asc' } }, { stepNumber: 'asc' }],
+      }),
+      prisma.warehouse.findMany({
+        where: { active: true, type: 'WIP' },
+        include: { locations: { where: { active: true }, select: { id: true, code: true } } },
+        orderBy: { code: 'asc' },
+      }),
+    ]);
+    return res.json({
+      success: true,
+      data: {
+        stockBalances,
+        operations: operations.filter((item: any) => item.wipExecutionLink),
+        warehouses,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت گزینه‌های حواله مواد.' });
+  }
+});
+
 apiRouter.post('/inventory/material-issues', async (req: Request, res: Response) => {
   if (!isDatabaseUrlConfigured()) {
     return res.status(503).json({ success: false, error: 'حواله مواد به عملیات تولید فقط با اتصال PostgreSQL مجاز است.' });
