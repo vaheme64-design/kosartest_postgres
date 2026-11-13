@@ -7,14 +7,111 @@ import {
   MoReconciliationReport,
 } from '../types/productionWip';
 import { INITIAL_ROUTINGS, INITIAL_PARTS } from './sampleData';
+import { getPrismaClient, isDatabaseUrlConfigured } from './db/prisma';
 
 // In-Memory Data Store for Production & WIP Execution
 export const manufacturingOrdersStore: ManufacturingOrder[] = [];
 export const wipTransfersStore: WipTransfer[] = [];
 export const productionLogsStore: ProductionActivityLog[] = [];
 
+const WIP_SNAPSHOT_ID = 'production-wip-state';
+let productionWipSnapshotVersion = 0;
+
+export function getProductionWipSnapshotVersion(): number {
+  return productionWipSnapshotVersion;
+}
+
+export function advanceProductionWipSnapshotVersion(expectedVersion: number): void {
+  if (productionWipSnapshotVersion !== expectedVersion) {
+    throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: local snapshot version changed during commit.');
+  }
+  productionWipSnapshotVersion = expectedVersion + 1;
+}
+
+export async function loadProductionWipState(): Promise<boolean> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required before loading production WIP state.');
+  }
+
+  const prisma = getPrismaClient();
+  const snapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: WIP_SNAPSHOT_ID } });
+  if (!snapshot) {
+    manufacturingOrdersStore.splice(0);
+    wipTransfersStore.splice(0);
+    productionLogsStore.splice(0);
+    productionWipSnapshotVersion = 0;
+    try {
+      await persistProductionWipState();
+      return false;
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('WIP_SNAPSHOT_VERSION_CONFLICT')) {
+        // Another instance initialized the snapshot first; load its committed state.
+        return loadProductionWipState();
+      }
+      throw error;
+    }
+  }
+
+  productionWipSnapshotVersion = snapshot.version ?? 1;
+  const payload = snapshot.payload as {
+    manufacturingOrders?: ManufacturingOrder[];
+    wipTransfers?: WipTransfer[];
+    productionLogs?: ProductionActivityLog[];
+  };
+
+  if (
+    !payload ||
+    !Array.isArray(payload.manufacturingOrders) ||
+    !Array.isArray(payload.wipTransfers) ||
+    !Array.isArray(payload.productionLogs)
+  ) {
+    throw new Error('Persistent WIP snapshot is malformed. Refusing to overwrite it.');
+  }
+
+  manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...payload.manufacturingOrders);
+  wipTransfersStore.splice(0, wipTransfersStore.length, ...payload.wipTransfers);
+  productionLogsStore.splice(0, productionLogsStore.length, ...payload.productionLogs);
+  return true;
+}
+
+export async function persistProductionWipState(): Promise<void> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required; WIP changes cannot be stored in memory only.');
+  }
+
+  const prisma = getPrismaClient();
+  const payload = JSON.parse(JSON.stringify({
+    manufacturingOrders: manufacturingOrdersStore,
+    wipTransfers: wipTransfersStore,
+    productionLogs: productionLogsStore,
+  }));
+
+  if (productionWipSnapshotVersion === 0) {
+    try {
+      const created = await prisma.wipStateSnapshot.create({
+        data: { id: WIP_SNAPSHOT_ID, payload, version: 1 },
+      });
+      productionWipSnapshotVersion = created.version;
+      return;
+    } catch (error: any) {
+      if (error?.code !== 'P2002') throw error;
+      throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: another server initialized the WIP snapshot; reload state and retry.');
+    }
+  }
+
+  const expectedVersion = productionWipSnapshotVersion;
+  const updated = await prisma.wipStateSnapshot.updateMany({
+    where: { id: WIP_SNAPSHOT_ID, version: expectedVersion },
+    data: { payload, version: { increment: 1 } },
+  });
+  if (updated.count !== 1) {
+    throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: WIP data changed on another server. The stale update was rejected.');
+  }
+  productionWipSnapshotVersion = expectedVersion + 1;
+}
+
 // Helper to determine warehouse location based on operation process
-function getLocationForProcess(processType: string, stepNumber: number): string {
+export function getLocationForProcess(processType: string, stepNumber: number): string {
   switch (processType) {
     case 'SHEARING':
       return 'LOC-RAW-B1';
@@ -305,8 +402,6 @@ export function initializeProductionWipSeed() {
   );
 }
 
-// Initialize seed on module load
-initializeProductionWipSeed();
 
 export function clearProductionWipData() {
   manufacturingOrdersStore.length = 0;
@@ -530,38 +625,85 @@ export function registerOperationProduction(params: {
     return { success: false, error: 'در صورت وجود ضایعات، انتخاب علت ضایعات الزامی است.' };
   }
 
-  // Atomically update operation quantities:
+  // Post production and automatically transfer good output to the next operation.
+  const postedAt = new Date().toISOString();
   op.inProgressQty -= totalReported;
   op.goodOutputQty += good;
-  op.readyForTransferQty += good; // IMPORTANT: Good output is NOT transferred automatically! It is ready for explicit transfer
   op.scrapQty += scrap;
   op.reworkQty += rework;
   op.rejectedQty += rejected;
-  op.lastActivityAt = new Date().toISOString();
+  op.lastActivityAt = postedAt;
 
-  // If all in-progress and waiting is processed, status becomes ready or completed
+  const nextOp = mo.operations.find(candidate => candidate.sequence === op.sequence + 1);
+  op.transferredQty += good;
   if (op.inProgressQty === 0 && op.waitingInputQty === 0) {
     op.status = op.readyForTransferQty > 0 ? 'READY' : 'COMPLETED';
   }
 
-  // Update MO Cumulative Totals:
+  // Good output is posted directly into the next operation's waiting queue.
+  // The transfer record is retained for traceability; no receiving approval is needed.
+  if (good > 0) {
+    if (nextOp) {
+      nextOp.waitingInputQty += good;
+      if (nextOp.status === 'PENDING') nextOp.status = 'READY';
+      nextOp.lastActivityAt = postedAt;
+    } else {
+      mo.completedQuantity += good;
+    }
+
+    const transferNumber = `AUTO-${mo.moNumber}-${op.stepNumber}-${Date.now()}`;
+    wipTransfersStore.unshift({
+      id: transferNumber,
+      transferNumber,
+      moId: mo.id,
+      moNumber: mo.moNumber,
+      partId: mo.partId,
+      partCode: mo.partCode,
+      partName: mo.partName,
+      fromOperationId: op.id,
+      fromStepNumber: op.stepNumber,
+      fromStepName: op.stepName,
+      fromLocation: op.warehouseLocation,
+      toOperationId: nextOp?.id || 'STORE-FINISHED',
+      toStepNumber: nextOp?.stepNumber || 999,
+      toStepName: nextOp?.stepName || 'انبار محصول نهایی',
+      toLocation: nextOp?.warehouseLocation || 'LOC-FIN-P1',
+      quantity: good,
+      status: 'AUTO_TRANSFERRED',
+      dispatchedBy: params.operatorName,
+      dispatchedAt: postedAt,
+      receivedAt: postedAt,
+      notes: nextOp
+        ? 'انتقال خودکار خروجی سالم به صف انتظار عملیات بعد؛ بدون تأیید دریافت'
+        : 'انتقال خودکار خروجی سالم به انبار محصول نهایی؛ بدون تأیید دریافت',
+    });
+    productionLogsStore.unshift({
+      id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      moId: mo.id,
+      moNumber: mo.moNumber,
+      operationId: op.id,
+      stepNumber: op.stepNumber,
+      stepName: op.stepName,
+      activityType: 'AUTO_TRANSFER',
+      quantity: good,
+      operatorName: params.operatorName,
+      machineId: params.machineId,
+      timestamp: postedAt,
+      notes: nextOp
+        ? `انتقال خودکار ${good} عدد به صف انتظار ${nextOp.stepName}`
+        : `انتقال خودکار ${good} عدد به انبار محصول نهایی`,
+    });
+  }
+
   mo.totalScrapQuantity += scrap;
   mo.totalReworkQuantity += rework;
   mo.totalRejectedQuantity += rejected;
-
-  // Check if this is the final operation in the route:
-  const isFinalOperation = op.sequence === mo.operations.length;
-  if (isFinalOperation) {
-    mo.completedQuantity += good;
-    if (mo.completedQuantity >= mo.targetQuantity) {
-      mo.status = 'COMPLETED';
-      mo.closedAt = new Date().toISOString();
-    }
+  if (mo.completedQuantity >= mo.targetQuantity && mo.operations.every(candidate => candidate.inProgressQty === 0 && candidate.waitingInputQty === 0)) {
+    mo.status = 'COMPLETED';
+    mo.closedAt = postedAt;
   }
+  mo.updatedAt = postedAt;
 
-  mo.updatedAt = new Date().toISOString();
-
-  // Log activity
   productionLogsStore.unshift({
     id: `LOG-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
     moId: mo.id,
@@ -578,10 +720,9 @@ export function registerOperationProduction(params: {
     scrapReason: params.scrapReason,
     operatorName: params.operatorName,
     machineId: params.machineId,
-    timestamp: new Date().toISOString(),
+    timestamp: postedAt,
     notes: params.notes,
   });
-
   return { success: true, data: mo };
 }
 

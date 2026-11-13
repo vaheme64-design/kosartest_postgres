@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
   X,
@@ -34,6 +34,52 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
   const [notes, setNotes] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [postingContext, setPostingContext] = useState<any>(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [relationalManufacturingOrderId, setRelationalManufacturingOrderId] = useState('');
+  const [shiftId, setShiftId] = useState('');
+  const [createdByUserId, setCreatedByUserId] = useState('');
+  const [relationalMachineId, setRelationalMachineId] = useState('');
+  const [idempotencyKey, setIdempotencyKey] = useState('');
+
+  useEffect(() => {
+    if (!isOpen || !operation) return;
+    let cancelled = false;
+    setContextLoading(true);
+    fetch(`/api/wip/production-posting-context?wipMoId=${encodeURIComponent(operation.moId)}`)
+      .then(response => response.json())
+      .then(result => {
+        if (cancelled) return;
+        if (!result.success) throw new Error(result.error || 'خطا در دریافت اطلاعات ثبت تولید');
+        setPostingContext(result.data);
+        setRelationalManufacturingOrderId(result.data.identityLink?.manufacturingOrderId || '');
+        setShiftId(result.data.shifts?.length === 1 ? result.data.shifts[0].id : '');
+        setCreatedByUserId(result.data.users?.length === 1 ? result.data.users[0].id : '');
+      })
+      .catch(error => {
+        if (!cancelled) setErrorMsg(error.message || 'خطا در دریافت اطلاعات ثبت تولید');
+      })
+      .finally(() => {
+        if (!cancelled) setContextLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, operation?.moId]);
+
+  useEffect(() => {
+    if (!isOpen) setIdempotencyKey('');
+  }, [isOpen]);
+
+  const selectedRelationalOrder = useMemo(
+    () => postingContext?.manufacturingOrders?.find((row: any) => row.id === relationalManufacturingOrderId),
+    [postingContext, relationalManufacturingOrderId],
+  );
+  const selectedRelationalOperation = useMemo(
+    () => selectedRelationalOrder?.operations?.find((row: any) =>
+      row.stepNumber === operation?.stepNumber && row.operation?.processType === operation?.processType
+    ),
+    [selectedRelationalOrder, operation?.stepNumber, operation?.processType],
+  );
+
 
   if (!isOpen || !operation) return null;
 
@@ -65,11 +111,27 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
       setErrorMsg('با توجه به وجود ضایعات، انتخاب علت فنی ضایعات الزامی است.');
       return;
     }
+    if (!relationalManufacturingOrderId || !shiftId || !createdByUserId) {
+      setErrorMsg('انتخاب دستور ساخت دیتابیس، شیفت و کاربر ثبت‌کننده الزامی است.');
+      return;
+    }
+    if (selectedRelationalOrder && !selectedRelationalOperation) {
+      setErrorMsg('برای این مرحله، عملیات متناظر با شماره مرحله و نوع فرایند در دستور ساخت انتخابی پیدا نشد.');
+      return;
+    }
+    if (selectedRelationalOperation && !selectedRelationalOperation.plannedMachineId && !relationalMachineId) {
+      setErrorMsg('برای عملیات بدون ماشین برنامه‌ریزی‌شده، انتخاب ماشین واقعی الزامی است.');
+      return;
+    }
 
     setIsSubmitting(true);
     setErrorMsg(null);
 
     try {
+      const submissionKey = idempotencyKey || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `WIP-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      setIdempotencyKey(submissionKey);
       const res = await onSubmit({
         moId: operation.moId,
         operationId: operation.id,
@@ -78,11 +140,17 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
         reworkQty: rework,
         rejectedQty: rejected,
         scrapReason: scrap > 0 ? scrapReason : undefined,
-        operatorName: operatorName.trim() || 'اپراتور مسئول خط',
+        operatorName: operatorName.trim() || postingContext?.users?.find((user: any) => user.id === createdByUserId)?.fullName || 'اپراتور مسئول خط',
         notes: notes.trim(),
+        relationalManufacturingOrderId,
+        shiftId,
+        createdByUserId,
+        relationalMachineId: relationalMachineId || undefined,
+        idempotencyKey: submissionKey,
       });
 
       if (res.success) {
+        setIdempotencyKey('');
         onClose();
       } else {
         setErrorMsg(res.error || 'خطا در ثبت عملکرد تولید');
@@ -143,6 +211,50 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl">
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">دستور ساخت متناظر در دیتابیس</label>
+              <select value={relationalManufacturingOrderId} onChange={e => setRelationalManufacturingOrderId(e.target.value)} disabled={contextLoading || isSubmitting} className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs text-slate-900">
+                <option value="">انتخاب دستور ساخت...</option>
+                {(postingContext?.manufacturingOrders || []).map((row: any) => (
+                  <option key={row.id} value={row.id}>{row.moNumber} — {row.part?.partNumber}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">شیفت تولید</label>
+              <select value={shiftId} onChange={e => setShiftId(e.target.value)} disabled={contextLoading || isSubmitting} className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs text-slate-900">
+                <option value="">انتخاب شیفت...</option>
+                {(postingContext?.shifts || []).map((row: any) => (
+                  <option key={row.id} value={row.id}>{row.name} ({row.startTime} تا {row.endTime})</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-slate-700">کاربر ثبت‌کننده</label>
+              <select value={createdByUserId} onChange={e => setCreatedByUserId(e.target.value)} disabled={contextLoading || isSubmitting} className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs text-slate-900">
+                <option value="">انتخاب کاربر...</option>
+                {(postingContext?.users || []).map((row: any) => (
+                  <option key={row.id} value={row.id}>{row.fullName}{row.personnelCode ? ` — ${row.personnelCode}` : ''}</option>
+                ))}
+              </select>
+            </div>
+            {selectedRelationalOperation && !selectedRelationalOperation.plannedMachineId && (
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-slate-700">ماشین واقعی عملیات</label>
+                <select value={relationalMachineId} onChange={e => setRelationalMachineId(e.target.value)} disabled={contextLoading || isSubmitting} className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs text-slate-900">
+                  <option value="">انتخاب ماشین...</option>
+                  {(postingContext?.machines || []).map((row: any) => (
+                    <option key={row.id} value={row.id}>{row.code} — {row.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {contextLoading && <p className="text-xs text-slate-500">در حال دریافت شیفت‌ها، کاربران و دستورهای ساخت...</p>}
+            {!contextLoading && postingContext?.manufacturingOrders?.length === 0 && (
+              <p className="text-xs text-rose-600 sm:col-span-2">برای این کد قطعه دستور ساخت relational متناظر پیدا نشد؛ ابتدا باید دستور ساخت معتبر در دیتابیس ایجاد شود.</p>
+            )}
+          </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {/* 1. Good Qty */}
             <div className="space-y-1 bg-emerald-950/20 p-2.5 rounded-xl border border-emerald-500/30">
@@ -247,7 +359,7 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
           <div className="p-2.5 bg-slate-100 rounded-xl border border-slate-200 text-[11px] text-slate-400 flex items-start gap-2">
             <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
             <span>
-              <strong>قانون انتقال صریح:</strong> قطعات سالم ثبت‌شده مستقیماً به مرحله بعد منتقل نمی‌شوند؛ این قطعات در وضعیت «آماده انتقال» قرار گرفته و نیازمند صدور و تأیید حواله انتقال ردیابی‌پذیر هستند.
+              <strong>ثبت اتمیک:</strong> گزارش تولید، کسر موجودی مرحله جاری، ورود سالم به مرحله بعد و ثبت ضایعات/دوباره‌کاری/مردودی با هم ثبت می‌شوند؛ مرحله مقصد نیازی به تأیید دریافت ندارد.
             </span>
           </div>
 
@@ -262,11 +374,11 @@ export const OperationProductionModal: React.FC<OperationProductionModalProps> =
             </button>
             <button
               type="submit"
-              disabled={isSubmitting || totalAccounted <= 0 || totalAccounted > inProgressTotal}
+              disabled={isSubmitting || contextLoading || totalAccounted <= 0 || totalAccounted > inProgressTotal || !relationalManufacturingOrderId || !shiftId || !createdByUserId}
               className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-emerald-900/40 cursor-pointer disabled:opacity-50"
             >
               <CheckCircle2 className={`w-4 h-4 ${isSubmitting ? 'animate-spin' : ''}`} />
-              <span>ثبت قطعی عملکرد در دفاتر WIP</span>
+              <span>ثبت قطعی تولید و کاردکس</span>
             </button>
           </div>
         </form>

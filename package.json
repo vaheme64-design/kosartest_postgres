@@ -15,6 +15,7 @@
     "clean-db": "tsx scripts/clean-database.ts",
     "lint": "tsc --noEmit",
     "seed": "tsx prisma/seed.ts",
+    "seed:master": "tsx prisma/seed-master.ts",
     "test": "tsx scripts/test-inventory.ts && tsx scripts/test-wip-reconciliation.ts && tsx scripts/test-production-planning.ts && tsx scripts/test-management-reports.ts"
   },
   "prisma": {

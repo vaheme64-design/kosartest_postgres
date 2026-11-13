@@ -11,34 +11,59 @@ declare global {
 }
 
 export const isDatabaseUrlConfigured = (): boolean => {
-  return Boolean(process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0);
+  const rawUrl = process.env.DATABASE_URL?.trim().replace(/^["']|["']$/g, '');
+  if (!rawUrl) return false;
+
+  try {
+    const parsed = new URL(rawUrl);
+    return (
+      (parsed.protocol === 'postgresql:' || parsed.protocol === 'postgres:') &&
+      Boolean(parsed.hostname) &&
+      parsed.pathname.length > 1 &&
+      parsed.hostname.toLowerCase() !== 'your_host' &&
+      parsed.username.toLowerCase() !== 'your_user' &&
+      parsed.pathname.slice(1).toLowerCase() !== 'your_database'
+    );
+  } catch {
+    return false;
+  }
 };
 
 export const resolveDatabaseUrl = (): string => {
-  let rawUrl =
-    process.env.DATABASE_URL && process.env.DATABASE_URL.trim().length > 0
-      ? process.env.DATABASE_URL.trim()
-      : 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
+  const rawValue = process.env.DATABASE_URL?.trim();
+  const rawUrl =
+    rawValue && ((rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+      (rawValue.startsWith("'") && rawValue.endsWith("'")))
+      ? rawValue.slice(1, -1).trim()
+      : rawValue;
 
-  // Strip surrounding quotes if present
-  if (
-    (rawUrl.startsWith('"') && rawUrl.endsWith('"')) ||
-    (rawUrl.startsWith("'") && rawUrl.endsWith("'"))
-  ) {
-    rawUrl = rawUrl.slice(1, -1).trim();
+  if (!rawUrl) {
+    throw new Error(
+      'DATABASE_URL is required. Configure the PostgreSQL connection string in the runtime environment before starting the application.'
+    );
   }
 
-  // Ensure valid PostgreSQL protocol for Prisma datasource validation
-  if (!rawUrl.startsWith('postgresql://') && !rawUrl.startsWith('postgres://')) {
-    rawUrl = 'postgresql://postgres:postgres@localhost:5432/kpims_db?schema=public';
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('DATABASE_URL is not a valid PostgreSQL connection URL.');
+  }
+
+  if (
+    (parsed.protocol !== 'postgresql:' && parsed.protocol !== 'postgres:') ||
+    !parsed.hostname ||
+    parsed.pathname.length <= 1 ||
+    parsed.hostname.toLowerCase() === 'your_host' ||
+    parsed.username.toLowerCase() === 'your_user' ||
+    parsed.pathname.slice(1).toLowerCase() === 'your_database'
+  ) {
+    throw new Error('DATABASE_URL must be a valid PostgreSQL URL with a host and database name.');
   }
 
   process.env.DATABASE_URL = rawUrl;
   return rawUrl;
 };
-
-// Immediate top-level invocation so process.env.DATABASE_URL is always a valid PostgreSQL URL
-resolveDatabaseUrl();
 
 export const getPrismaClient = (): PrismaClient => {
   if (!global.__prismaClient) {
@@ -87,10 +112,20 @@ export interface DatabaseStatus {
  * Health check & diagnostic utility for the Database connection
  */
 export async function checkDatabaseConnection(): Promise<DatabaseStatus> {
+  if (!isDatabaseUrlConfigured()) {
+    return {
+      isConfigured: false,
+      isConnected: false,
+      databaseType: 'PostgreSQL',
+      databaseUrlMasked: '',
+      errorMessage: 'DATABASE_URL is missing or is not a valid PostgreSQL connection URL.',
+      lastChecked: new Date().toISOString(),
+    };
+  }
+
   const rawUrl = resolveDatabaseUrl();
   const maskedUrl = rawUrl.replace(/:([^@]+)@/, ':****@');
-  const dbType: 'SQLite' | 'PostgreSQL' =
-    rawUrl.startsWith('postgresql://') || rawUrl.startsWith('postgres://') ? 'PostgreSQL' : 'SQLite';
+  const dbType: 'SQLite' | 'PostgreSQL' = 'PostgreSQL';
 
   try {
     const prisma = getPrismaClient();

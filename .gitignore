@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local databases and generated runtime bundles
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+server.js

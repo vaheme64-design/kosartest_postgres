@@ -868,6 +868,8 @@ async function runAllTests() {
         warehouseId: 'WH-RAW',
         warehouseName: 'انبار تست دیتابیس',
         ownership: 'SAPCO_SUPPLIER_OWNED',
+        contractId: 'CNT-SAPCO-1403-Q3',
+        contractNumber: 'CNT-SAPCO-1403-Q3',
         createdByUid: testUser.uid,
         createdByName: testUser.displayName,
         lines: [
@@ -875,14 +877,16 @@ async function runAllTests() {
             id: 'L-DB-1',
             documentId: 'DOC-PERSIST',
             lineNumber: 1,
-            partId: 'PRT-COIL-01',
-            partCode: 'SAPCO-DC04-0.8',
-            partName: 'ورق پایگاه داده',
+            partId: 'PRT-RAW-ECU-COIL',
+            partCode: 'RM-COIL-DC01A-2.0-1140',
+            partName: 'رول ورق روغنی DC01A',
             quantity: 500,
             unit: 'KG',
             quantityKg: 500,
             qualityStatus: 'AVAILABLE',
             ownership: 'SAPCO_SUPPLIER_OWNED',
+            contractId: 'CNT-SAPCO-1403-Q3',
+            contractNumber: 'CNT-SAPCO-1403-Q3',
           },
         ],
         totalQuantity: 500,
@@ -894,9 +898,71 @@ async function runAllTests() {
       const dbPostResult = await postDocumentInDbTransaction(dbDoc, testUser);
       assert(dbPostResult.success === true, 'Document successfully committed in PostgreSQL within Prisma $transaction');
 
+      const dbPart = await prisma.part.findUnique({ where: { partNumber: 'RM-COIL-DC01A-2.0-1140' } });
+      const dbWarehouse = await prisma.warehouse.findUnique({ where: { code: 'WH-RAW' } });
+      const persistedDoc = await prisma.inventoryDocument.findUnique({
+        where: { documentNumber: dbDoc.documentNumber },
+        include: { lines: true, transactions: true },
+      });
+      assert(!!persistedDoc && persistedDoc.lines.length === 1, 'Inventory document line persisted in PostgreSQL');
+      assert(!!persistedDoc && persistedDoc.transactions.length === 1, 'Kardex transaction persisted in PostgreSQL');
+      assert(persistedDoc?.lines[0]?.contractNumber === 'CNT-SAPCO-1403-Q3', 'Contract number preserved on inventory document line');
+      assert(persistedDoc?.transactions[0]?.contractId === 'CNT-SAPCO-1403-Q3', 'Contract reference preserved on Kardex transaction');
+
+      const persistedBalance = await prisma.stockBalance.findFirst({
+        where: {
+          partId: dbPart!.id,
+          warehouseId: dbWarehouse!.id,
+          ownership: 'SAPCO_SUPPLIER_OWNED',
+          contractId: 'CNT-SAPCO-1403-Q3',
+          qualityStatus: 'AVAILABLE',
+        },
+      });
+      assert(Number(persistedBalance?.quantityOnHand) === 500, 'Contract-specific stock balance updated in PostgreSQL');
+
       // Verify duplicate post is blocked in DB
       const dbDupResult = await postDocumentInDbTransaction(dbDoc, testUser);
       assert(dbDupResult.success === false, 'Duplicate post blocked by database transaction check');
+
+      // Quarantined stock is physically recorded but cannot be issued before QA release.
+      await prisma.stockBalance.create({
+        data: {
+          partId: dbPart!.id,
+          warehouseId: dbWarehouse!.id,
+          quantityOnHand: 100,
+          quantityReserved: 0,
+          quantityAvailable: 0,
+          weightKgOnHand: 100,
+          weightKgReserved: 0,
+          weightKgAvailable: 0,
+          ownership: 'SAPCO_SUPPLIER_OWNED',
+          contractId: 'CNT-SAPCO-1403-Q3',
+          contractNumber: 'CNT-SAPCO-1403-Q3',
+          qualityStatus: 'QUARANTINE',
+        },
+      });
+
+      const blockedIssueDoc: InventoryDocument = {
+        ...dbDoc,
+        id: `DOC-QUARANTINE-${Date.now()}`,
+        documentNumber: `ISS-QUARANTINE-${Date.now()}`,
+        documentType: 'ISSUE_RAW_MATERIAL',
+        documentStatus: 'DRAFT',
+        postingStatus: 'UNPOSTED',
+        lines: [{
+          ...dbDoc.lines[0],
+          id: 'L-QUARANTINE-1',
+          documentId: 'DOC-QUARANTINE',
+          quantity: 10,
+          quantityKg: 10,
+          qualityStatus: 'QUARANTINE',
+        }],
+        totalQuantity: 10,
+        totalWeightKg: 10,
+      };
+      const blockedIssueResult = await postDocumentInDbTransaction(blockedIssueDoc, testUser);
+      assert(blockedIssueResult.success === false && blockedIssueResult.error?.includes('کیفی') === true, 'Quarantined stock issue is rejected by PostgreSQL posting');
+      
     } catch (err: any) {
       console.warn('   Note: Prisma test completed with message:', err.message);
     }
@@ -942,6 +1008,11 @@ async function runAllTests() {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+
+  if (!isDbReady) {
+    const noDbPost = await postDocumentInDbTransaction(concurrentDocA, testUser);
+    assert(noDbPost.success === false, 'Inventory posting fails closed when DATABASE_URL is not configured');
+  }
 
   const sharedStockDocs = [initialStock100Doc]; // Total available: 100 kg
   const resA = atomicPostDocument(concurrentDocA, sharedStockDocs, [], testParts, testUser);

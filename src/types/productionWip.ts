@@ -16,7 +16,8 @@ export type OperationExecutionStatus =
 export type WipTransferStatus =
   | 'PENDING_APPROVAL'
   | 'APPROVED'
-  | 'REJECTED';
+  | 'REJECTED'
+  | 'AUTO_TRANSFERRED';
 
 export interface ManufacturingOperation {
   id: string;
@@ -41,8 +42,8 @@ export interface ManufacturingOperation {
   scrapQty: number;            // ضایعات قطعی و غیرقابل بازیافت
   reworkQty: number;           // قطعات نیازمند دوباره‌کاری (Rework)
   rejectedQty: number;         // قطعات نامنطبق در قرنطینه کیفی
-  readyForTransferQty: number; // تولید سالم آماده ارسال به مرحله بعد = goodOutputQty - transferredQty
-  transferredQty: number;      // مقداری که با حواله تأیید شده به مرحله بعد ارسال شده است
+  readyForTransferQty: number; // خروجی سالم نگه‌داشته‌شده برای جابه‌جایی دستی/استثنایی
+  transferredQty: number;      // مقدار منتقل‌شده خودکار یا با جابه‌جایی دستی به مرحله بعد
 
   standardCycleTimeSec: number;
   scrapNormPercent: number;
@@ -114,7 +115,8 @@ export interface ProductionActivityLog {
     | 'SCRAP_REGISTER'
     | 'REWORK_REGISTER'
     | 'TRANSFER_DISPATCH'
-    | 'TRANSFER_RECEIVE';
+    | 'TRANSFER_RECEIVE'
+    | 'AUTO_TRANSFER';
   quantity: number;
   goodQty?: number;
   scrapQty?: number;

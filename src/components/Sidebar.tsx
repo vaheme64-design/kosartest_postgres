@@ -207,9 +207,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     };
   }, []);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({
-    core: true,
-    planning_prod: true,
-    master_reports: true,
+    daily_ops: true,
   });
 
   const themeMeta = COLOR_THEMES[colorTheme];
@@ -686,10 +684,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const navGroups: NavGroup[] = useMemo(
     () => [
       {
-        id: 'core',
-        groupTitle: 'ماژول‌های اصلی کارخانه',
+        id: 'daily_ops',
+        groupTitle: 'عملیات روزانه',
+        collapsible: true,
         defaultOpen: true,
-        items: displayNavItems,
+        items: displayNavItems.filter(item => ['production', 'wip', 'inventory'].includes(item.tab)),
+      },
+      {
+        id: 'planning_supply',
+        groupTitle: 'برنامه‌ریزی و تأمین',
+        collapsible: true,
+        items: displayNavItems.filter(item => ['planning', 'contracts', 'sapco'].includes(item.tab)),
+      },
+      {
+        id: 'master_admin',
+        groupTitle: 'اطلاعات پایه و مدیریت',
+        collapsible: true,
+        items: displayNavItems.filter(item => ['master_data', 'machines', 'reports', 'settings'].includes(item.tab)),
+      },
+      {
+        id: 'overview',
+        groupTitle: 'نمای کلی',
+        collapsible: true,
+        items: displayNavItems.filter(item => item.tab === 'dashboard'),
       },
     ],
     [displayNavItems]

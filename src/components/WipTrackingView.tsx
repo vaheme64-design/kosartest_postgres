@@ -67,7 +67,7 @@ export const WipTrackingView: React.FC<WipTrackingViewProps> = ({
             <h2 className="text-xl font-bold text-white">کنترل کار در جریان ساخت (WIP Tracking)</h2>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            رهگیری موجودی مرحله‌ای، محموله‌های در حال انتقال بین‌خطوط، موجودی قابل استفاده و جلوگیری از دپوی مازاد
+            ثبت عملکرد هر مرحله، انتقال خودکار خروجی سالم به مرحله بعد و مشاهده موجودی واقعی WIP
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -76,7 +76,7 @@ export const WipTrackingView: React.FC<WipTrackingViewProps> = ({
             className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-sm font-semibold shadow-lg shadow-purple-600/20 cursor-pointer"
           >
             <ArrowRightLeft className="w-4 h-4" />
-            <span>ثبت انتقال بین‌مراحل</span>
+            <span>جابه‌جایی دستی / استثنایی</span>
           </button>
         </div>
       </div>
@@ -106,12 +106,12 @@ export const WipTrackingView: React.FC<WipTrackingViewProps> = ({
 
         <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
           <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-            <span>در حال انتقال بین ایستگاه‌ها</span>
+            <span>انتقال‌های معلق استثنایی</span>
             <Clock className="w-4 h-4 text-amber-400" />
           </div>
           <div className="text-2xl font-black text-amber-400">
             {formatNumber(totalInTransit)}
-            <span className="text-xs font-normal text-slate-400 mr-1.5">عدد (در ترانزیت)</span>
+            <span className="text-xs font-normal text-slate-400 mr-1.5">عدد</span>
           </div>
         </div>
       </div>

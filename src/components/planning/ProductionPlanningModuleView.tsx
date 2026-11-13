@@ -29,7 +29,7 @@ import {
 } from '../../types/productionPlanning';
 import { Part, Machine, DieMold, Routing } from '../../types/inventory';
 import { PlanningDashboardView } from './PlanningDashboardView';
-import { MachineRecommendationView } from './MachineRecommendationView';
+import { RelationalPlanProposalView } from './RelationalPlanProposalView';
 import { NewCustomerOrderModal } from './NewCustomerOrderModal';
 import { MrpModuleView } from './MrpModuleView';
 import { ConsumablesForecastView } from './ConsumablesForecastView';
@@ -97,6 +97,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
   const [metrics, setMetrics] = useState<PlanningDashboardMetrics | null>(null);
   const [netRequirements, setNetRequirements] = useState<PartNetRequirement[]>([]);
   const [suggestions, setSuggestions] = useState<ProductionPlanSuggestion[]>([]);
+  const [proposalCount, setProposalCount] = useState(0);
   const [customerOrders, setCustomerOrders] = useState<CustomerOrder[]>([]);
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [focusedMachineCode, setFocusedMachineCode] = useState<string | null>(null);
@@ -110,21 +111,16 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
   const loadPlanningData = async () => {
     setLoading(true);
     try {
-      const [metricsRes, netRes, sugRes, ordersRes] = await Promise.all([
+      const [metricsRes, netRes, proposalRes, ordersRes] = await Promise.all([
         fetch('/api/planning/dashboard-metrics').then(r => r.json()),
         fetch('/api/planning/net-requirements').then(r => r.json()),
-        fetch('/api/planning/suggestions').then(r => r.json()),
+        fetch('/api/planning/proposals').then(r => r.json()),
         fetch('/api/planning/customer-orders').then(r => r.json()),
       ]);
 
       if (metricsRes.success) setMetrics(metricsRes.data);
       if (netRes.success) setNetRequirements(netRes.data);
-      if (sugRes.success) {
-        setSuggestions(sugRes.data);
-        if (!selectedSuggestionId && sugRes.data.length > 0) {
-          setSelectedSuggestionId(sugRes.data[0].id);
-        }
-      }
+      if (proposalRes.success) setProposalCount(Array.isArray(proposalRes.data) ? proposalRes.data.length : 0);
       if (ordersRes.success) {
         try {
           const cached = localStorage.getItem('kpims_customer_orders_v2');
@@ -154,14 +150,21 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
   const handleRegenerate = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/planning/suggestions/regenerate', { method: 'POST' });
+      const res = await fetch('/api/planning/proposals/regenerate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
       const data = await res.json();
-      if (data.success) {
-        await loadPlanningData();
-        if (onGlobalRefresh) await onGlobalRefresh();
+      if (!res.ok || !data.success) {
+        setPlanToast(data.error || 'تولید پیشنهاد برنامه ناموفق بود.');
+        return;
       }
+      await loadPlanningData();
+      setPlanToast('پیشنهاد برنامه جدید از اطلاعات PostgreSQL ایجاد شد. برای بررسی و تأیید به تب پیشنهاد برنامه بروید.');
+      if (onGlobalRefresh) await onGlobalRefresh();
     } catch (err) {
-      console.error('Failed to regenerate plans:', err);
+      setPlanToast(err instanceof Error ? err.message : 'خطا در تولید پیشنهاد برنامه');
     } finally {
       setLoading(false);
     }
@@ -442,7 +445,7 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
             { id: 'mrp', label: '۱. انفجار BOM و نیاز ورق (MRP)' },
             { id: 'capacity_planning', label: '۲. تقویم ظرفیت ماشین‌آلات (Capacity Planning)' },
             { id: 'orders', label: `۳. سفارشات مشتریان (${toPersianDigits(customerOrders.length)})` },
-            { id: 'recommendations', label: `۴. پیشنهاد برنامه و پرس (${toPersianDigits(suggestions.length)})` },
+            { id: 'recommendations', label: `۴. پیشنهاد برنامه و پرس (${toPersianDigits(proposalCount)})` },
             { id: 'daily_schedule', label: '۵. تقویم روزانه سالن‌ها' },
             { id: 'dashboard', label: '۶. موازنه تقاضا و ظرفیت' },
           ].map(item => (
@@ -527,15 +530,11 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
 
       {/* 2. Machine Recommendations Sub-Tab */}
       {activeSubTab === 'recommendations' && (
-        <MachineRecommendationView
-          suggestions={suggestions}
-          selectedSuggestionId={selectedSuggestionId}
-          onSelectSuggestion={setSelectedSuggestionId}
-          onApprovePlan={handleApprovePlan}
-          onReleaseMo={handleReleaseMo}
-          onRevisePlan={handleRevisePlan}
-          onRefresh={loadPlanningData}
-          loading={loading}
+        <RelationalPlanProposalView
+          onReleased={async () => {
+            await loadPlanningData();
+            if (onGlobalRefresh) await onGlobalRefresh();
+          }}
         />
       )}
 

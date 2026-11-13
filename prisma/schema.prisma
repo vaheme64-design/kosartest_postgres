@@ -145,6 +145,14 @@ enum PlanLineStatus {
   CANCELLED    // لغو شده
 }
 
+enum PlanProposalStatus {
+  DRAFT
+  APPROVED
+  SUPERSEDED
+  RELEASED
+  CANCELLED
+}
+
 enum MOStatus {
   PLANNED      // صادر شده
   RELEASED     // ابلاغ به سالن و تخصیص متریال
@@ -282,7 +290,9 @@ model Part {
   thicknessMm          Decimal? // ضخامت ورق (میلیمتر)
   weightNetKg          Decimal       @default(0) // وزن خالص قطعه (کیلوگرم)
   weightGrossKg        Decimal       @default(0) // وزن ناخالص/بلنک مصرفی (کیلوگرم)
-  customerPartNumber   String?       // کد عظام یا ساپکو قطعه
+  scrapNormPercent     Decimal?      // حد مجاز ضایعات به درصد؛ در صورت تعریف مهندسی
+  customerPartNumber   String?       // کد قطعه مشتری (خودروساز)
+  supplierPartNumber   String?       // کد کالا نزد تامین‌کننده مانند ساپکو
   carModel             String?       // پژو ۲۰۶، ۲۰۷، تارا، دنا پلاس، شاهین، کوییک
   minSafetyStock       Decimal       @default(0) // حداقل موجودی اطمینان
   maxStock             Decimal?
@@ -295,6 +305,7 @@ model Part {
   dies                 Die[]
   customerOrderLines   CustomerOrderLine[]
   productionPlanLines  ProductionPlanLine[]
+  planProposalLines    ProductionPlanProposalLine[]
   manufacturingOrders  ManufacturingOrder[]
   inventoryDocLines    InventoryDocumentLine[]
   transactions         InventoryTransaction[]
@@ -303,6 +314,7 @@ model Part {
   materialLots         MaterialLot[]
   productionTransfers  ProductionTransfer[]
   physicalCoils        PhysicalCoil[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
   attributeValues      ItemAttributeValue[]
   trackingProfile      ItemTrackingProfile?
 
@@ -346,6 +358,7 @@ model PartRoute {
 
   operations           RouteOperation[]
   manufacturingOrders  ManufacturingOrder[]
+  planProposalLines    ProductionPlanProposalLine[]
 
   @@unique([partId, version])
   @@index([partId, status])
@@ -576,6 +589,7 @@ model CustomerOrder {
   orderDate               DateTime
   requestedDeliveryDate   DateTime
   customerContractNumber  String?        // شماره قرارداد یا برنامه ساپکو
+  priority                Int            @default(2) // 1: فوری، 2: عادی، 3: کم‌اهمیت
   documentStatus          DocumentStatus @default(DRAFT)
   notes                   String?
   totalAmount             Decimal?
@@ -604,6 +618,9 @@ model CustomerOrderLine {
   requestedDate    DateTime
   status           OrderLineStatus  @default(PENDING)
 
+  productionPlanLines  ProductionPlanLine[]
+  planProposalLines    ProductionPlanProposalLine[]
+
   @@unique([orderId, lineNumber])
   @@index([partId, status])
   @@map("customer_order_lines")
@@ -625,9 +642,55 @@ model ProductionPlan {
 
   planLines            ProductionPlanLine[]
   manufacturingOrders  ManufacturingOrder[]
+  proposalId           String? @unique
+  proposal             ProductionPlanProposal? @relation(fields: [proposalId], references: [id])
 
   @@index([status, startDate])
   @@map("production_plans")
+}
+
+// Versioned, persisted planning proposal and its demand-linked lines.
+model ProductionPlanProposal {
+  id                 String             @id @default(uuid())
+  proposalNumber     String             @unique
+  revisionGroupId    String
+  version            Int                @default(1)
+  status             PlanProposalStatus @default(DRAFT)
+  generatedAt        DateTime           @default(now())
+  inputSnapshot      Json
+  notes              String?
+  approvedByUserId   String?
+  approvedAt         DateTime?
+  releasedAt         DateTime?
+  lines              ProductionPlanProposalLine[]
+  productionPlan     ProductionPlan?
+
+  @@unique([revisionGroupId, version])
+  @@index([status, generatedAt])
+  @@map("production_plan_proposals")
+}
+
+model ProductionPlanProposalLine {
+  id                    String                @id @default(uuid())
+  proposalId            String
+  proposal              ProductionPlanProposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  customerOrderLineId   String
+  customerOrderLine     CustomerOrderLine     @relation(fields: [customerOrderLineId], references: [id])
+  partId                String
+  part                  Part                  @relation(fields: [partId], references: [id])
+  routeId               String
+  route                 PartRoute             @relation(fields: [routeId], references: [id])
+  requestedQty          Decimal
+  plannedQty            Decimal
+  plannedStartDate      DateTime
+  plannedEndDate        DateTime
+  priority              Int                   @default(2)
+  operationAssignments Json
+  warnings              Json?
+
+  @@unique([proposalId, customerOrderLineId])
+  @@index([partId, plannedStartDate])
+  @@map("production_plan_proposal_lines")
 }
 
 // ردیف‌های برنامه تولید
@@ -639,6 +702,8 @@ model ProductionPlanLine {
   part               Part               @relation(fields: [partId], references: [id])
   customerOrderId    String?
   customerOrder      CustomerOrder?     @relation(fields: [customerOrderId], references: [id])
+  customerOrderLineId String?
+  customerOrderLine   CustomerOrderLine? @relation(fields: [customerOrderLineId], references: [id])
   plannedQty         Decimal
   producedQty        Decimal            @default(0)
   plannedStartDate   DateTime
@@ -649,6 +714,7 @@ model ProductionPlanLine {
   manufacturingOrders ManufacturingOrder[]
 
   @@index([partId, status])
+  @@index([customerOrderLineId])
   @@map("production_plan_lines")
 }
 
@@ -677,7 +743,9 @@ model ManufacturingOrder {
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
+  wipExecutionLink     WipManufacturingOrderLink?
   operations           ProductionOperation[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
   reports              ProductionReport[]
   transfers            ProductionTransfer[]
   reservations         InventoryReservation[]
@@ -706,13 +774,19 @@ model ProductionOperation {
   inputQty             Decimal             @default(0)
   outputGoodQty        Decimal             @default(0)
   outputScrapQty       Decimal             @default(0)
+  outputReworkQty      Decimal             @default(0)
+  outputRejectedQty    Decimal             @default(0)
   status               ProductionOpStatus  @default(PENDING)
   startDate            DateTime?
   endDate              DateTime?
 
+  wipExecutionLink     WipOperationLink?
   reports              ProductionReport[]
   assignments          MachineAssignment[]
   scraps               ProductionScrap[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
+  inventoryTransactions  InventoryTransaction[]
+  inventoryDocumentLines InventoryDocumentLine[]
 
   @@unique([manufacturingOrderId, stepNumber])
   @@index([status])
@@ -743,6 +817,9 @@ model ProductionReport {
   goodQuantity            Decimal // تعداد سالم
   scrapQuantity           Decimal              @default(0) // تعداد ضایعات
   reworkQuantity          Decimal              @default(0) // تعداد دوباره‌کاری
+  rejectedQuantity        Decimal              @default(0) // تعداد مردودی / قرنطینه
+  scrapReasonText         String?              // علت ضایعات ثبت‌شده در موتور WIP
+  wipIdempotencyKey       String?              @unique // کلید یکتای ثبت عملکرد از موتور WIP
   runTimeMinutes          Int                  @default(0) // دقایق کار مفید
   downtimeMinutes         Int                  @default(0) // دقایق توقف پرس
   downtimeReason          String?              // علت توقف (خرابی قالب، تعویض رول، نقص برق)
@@ -851,12 +928,15 @@ model InventoryDocument {
   postedAt           DateTime?
   isReversed         Boolean           @default(false)
   reversalOfId       String?           @unique // ارجاع به سند ابطال‌شده
+  issueRequestKey    String?           @unique // Idempotency key for physical-coil issue requests
+  issueRequestFingerprint String?      @db.Text // Prevents reusing a key with a different payload
   notes              String?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
   lines              InventoryDocumentLine[]
   transactions       InventoryTransaction[]
+  coilIssueReturnRecords CoilIssueReturnRecord[]
 
   @@index([documentType, documentDate])
   @@index([warehouseId, postingStatus])
@@ -873,6 +953,10 @@ model InventoryDocumentLine {
   part               Part               @relation(fields: [partId], references: [id])
   materialLotId      String?
   materialLot        MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  physicalCoilId     String?
+  physicalCoil       PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
+  productionOperationId String?
+  productionOperation ProductionOperation? @relation(fields: [productionOperationId], references: [id])
   locationId         String?
   location           WarehouseLocation? @relation("Location", fields: [locationId], references: [id])
   targetLocationId   String?
@@ -881,6 +965,10 @@ model InventoryDocumentLine {
   unitId             String
   unit               UnitOfMeasure      @relation(fields: [unitId], references: [id])
   weightKg           Decimal // وزن متناظر به کیلوگرم
+  ownership          String   @default("COMPANY_OWNED")
+  contractId         String?
+  contractNumber     String?
+  qualityStatus      String   @default("AVAILABLE")
   unitCost           Decimal?
   notes              String?
 
@@ -900,6 +988,10 @@ model InventoryTransaction {
   part                    Part               @relation(fields: [partId], references: [id])
   materialLotId           String?
   materialLot             MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  physicalCoilId          String?
+  physicalCoil            PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
+  productionOperationId   String?
+  productionOperation     ProductionOperation? @relation(fields: [productionOperationId], references: [id])
   warehouseId             String
   warehouse               Warehouse          @relation(fields: [warehouseId], references: [id])
   locationId              String?
@@ -911,6 +1003,10 @@ model InventoryTransaction {
   unit                    UnitOfMeasure      @relation(fields: [unitId], references: [id])
   weightKg                Decimal // وزن مطلق به کیلوگرم
   weightKgSigned          Decimal // وزن با علامت (کیلوگرم)
+  ownership               String   @default("COMPANY_OWNED")
+  contractId              String?
+  contractNumber          String?
+  qualityStatus           String   @default("AVAILABLE")
   balanceAfter            Decimal? // مانده مقداری پس از تراکنش
   balanceKgAfter          Decimal? // مانده وزنی پس از تراکنش
   transactionDate         DateTime           // زمان وقوع به UTC
@@ -969,16 +1065,22 @@ model StockBalance {
   location             WarehouseLocation? @relation(fields: [locationId], references: [id])
   materialLotId        String?
   materialLot          MaterialLot?       @relation(fields: [materialLotId], references: [id])
+  physicalCoilId       String?
+  physicalCoil         PhysicalCoil?      @relation(fields: [physicalCoilId], references: [id])
   quantityOnHand       Decimal            @default(0) // موجودی فیزیکی
   quantityReserved     Decimal            @default(0) // مقدار رزرو شده
   quantityAvailable    Decimal            @default(0) // مقدار آزاد = موجودی منهای رزرو
   weightKgOnHand       Decimal            @default(0) // وزن فیزیکی (کیلوگرم)
   weightKgReserved     Decimal            @default(0) // وزن رزرو شده (کیلوگرم)
   weightKgAvailable    Decimal            @default(0) // وزن آزاد (کیلوگرم)
+  ownership            String             @default("COMPANY_OWNED")
+  contractId           String?
+  contractNumber       String?
+  qualityStatus        String             @default("AVAILABLE")
   lastTransactionAt    DateTime?
   updatedAt            DateTime           @updatedAt
 
-  @@unique([partId, warehouseId, locationId, materialLotId])
+  @@unique([partId, warehouseId, locationId, materialLotId, physicalCoilId, ownership, contractId, qualityStatus])
   @@index([partId, warehouseId])
   @@map("stock_balances")
 }
@@ -1040,6 +1142,7 @@ model MaterialContract {
   materialLots            MaterialLot[]
   transactions            MaterialContractTransaction[]
   contractCoilAllocations ContractCoilAllocation[]
+  coilIssueReturnRecords  CoilIssueReturnRecord[]
   commercialLines         ContractCommercialLine[]
 
   @@index([supplierCustomerId, status])
@@ -1217,7 +1320,10 @@ model PhysicalCoil {
   updatedAt              DateTime           @updatedAt
 
   contractAllocations    ContractCoilAllocation[]
+  stockBalances           StockBalance[]
   issueReturnRecords     CoilIssueReturnRecord[]
+  inventoryTransactions  InventoryTransaction[]
+  inventoryDocumentLines InventoryDocumentLine[]
 
   @@index([coilPackNumber])
   @@index([warehouseId, physicalStatus])
@@ -1250,7 +1356,16 @@ model CoilIssueReturnRecord {
   id                   String        @id @default(uuid())
   coilId               String
   coil                 PhysicalCoil  @relation(fields: [coilId], references: [id], onDelete: Cascade)
-  manufacturingOrderId String?       // شماره دستور ساخت مصرف‌کننده
+  inventoryDocumentId  String?
+  inventoryDocument    InventoryDocument? @relation(fields: [inventoryDocumentId], references: [id])
+  contractId           String?
+  contract             MaterialContract? @relation(fields: [contractId], references: [id])
+  partId               String?
+  part                 Part?          @relation(fields: [partId], references: [id])
+  productionOperationId String?
+  productionOperation ProductionOperation? @relation(fields: [productionOperationId], references: [id])
+  manufacturingOrderId String?       // شناسه دستور ساخت مصرف‌کننده
+  manufacturingOrder   ManufacturingOrder? @relation(fields: [manufacturingOrderId], references: [id])
   documentNumber       String        // شماره حواله خروج یا رسید برگشتی
   issuedWeightKg       Decimal // وزن ارسالی به پای خط
   consumedWeightKg     Decimal       @default(0) // وزن خالص مصرف‌شده
@@ -1641,5 +1756,58 @@ model DowntimeLog {
   @@index([workCenterId, startTime])
   @@index([downtimeReasonId])
   @@map("downtime_logs")
+}
+
+
+
+// Persistent snapshot for stage-level WIP execution.
+// The snapshot preserves the application's complete operation-level quantities and transfer states
+// until the relational routing/operation migration is completed.
+model WipStateSnapshot {
+  id        String   @id
+  payload   Json
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt
+
+  @@map("wip_state_snapshots")
+}
+
+
+// Transitional durable store for contract/physical-coil allocations and issue-return state.
+// The transactional inventory ledger remains normalized in InventoryDocument/InventoryTransaction.
+model InventoryAppStateSnapshot {
+  id        String   @id
+  payload   Json
+  updatedAt DateTime @updatedAt
+
+  @@map("inventory_app_state_snapshots")
+}
+
+// Explicit identity bridge between the snapshot-based WIP execution engine and
+// normalized production records. Snapshot IDs are never treated as database IDs.
+model WipManufacturingOrderLink {
+  id                    String                     @id @default(uuid())
+  wipManufacturingOrderId String                   @unique
+  manufacturingOrderId  String                     @unique
+  manufacturingOrder    ManufacturingOrder         @relation(fields: [manufacturingOrderId], references: [id], onDelete: Restrict)
+  operationLinks        WipOperationLink[]
+  createdAt             DateTime                   @default(now())
+  createdBy              String?
+  notes                  String?
+
+  @@map("wip_manufacturing_order_links")
+}
+
+model WipOperationLink {
+  id                         String                       @id @default(uuid())
+  wipOperationId             String                       @unique
+  manufacturingOrderLinkId   String
+  manufacturingOrderLink     WipManufacturingOrderLink    @relation(fields: [manufacturingOrderLinkId], references: [id], onDelete: Cascade)
+  productionOperationId      String                       @unique
+  productionOperation        ProductionOperation          @relation(fields: [productionOperationId], references: [id], onDelete: Restrict)
+  createdAt                  DateTime                     @default(now())
+
+  @@unique([manufacturingOrderLinkId, productionOperationId])
+  @@map("wip_operation_links")
 }
 

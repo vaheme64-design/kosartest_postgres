@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "fix/**"
+      - "rebuild/**"
+      - "improvement/**"
+  pull_request:
+    branches:
+      - main
+      - "rebuild/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kpims_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d kpims_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/kpims_ci?schema=public
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate Prisma schema
+        run: bunx prisma validate
+
+      - name: Generate initial migration preview
+        run: |
+          mkdir -p prisma/migrations/00000000000000_initial
+          printf 'provider = "postgresql"\n' > prisma/migrations/migration_lock.toml
+          bunx prisma migrate diff \
+            --from-empty \
+            --to-schema-datamodel prisma/schema.prisma \
+            --script > prisma/migrations/00000000000000_initial/migration.sql
+          test -s prisma/migrations/00000000000000_initial/migration.sql
+
+      - name: Apply migration preview to a clean PostgreSQL database
+        run: bunx prisma migrate deploy
+
+      - name: Upload migration preview for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: prisma-initial-migration-preview
+          path: prisma/migrations/00000000000000_initial/migration.sql
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: TypeScript check
+        run: bun run lint
+
+      - name: Production build
+        run: bun run build
+
+      - name: Seed canonical master data
+        run: bun run seed
+
+      - name: Verify production-safe master seed
+        run: bun run seed:master
+
+      - name: Inventory regression tests
+        run: bunx tsx scripts/test-inventory.ts
+
+      - name: WIP reconciliation tests
+        run: bunx tsx scripts/test-wip-reconciliation.ts
+
+      - name: Atomic WIP production ledger integration test
+        run: bunx tsx scripts/test-wip-production-ledger.ts
+      - name: WIP snapshot optimistic concurrency integration test
+        run: bunx tsx scripts/test-wip-snapshot-concurrency.ts
+
+      - name: Production planning tests
+        run: bunx tsx scripts/test-production-planning.ts
+
+      - name: PostgreSQL customer-order HTTP integration test
+        run: bunx tsx scripts/test-planning-customer-orders-http.ts
+
+      - name: PostgreSQL relational planning read-model integration test
+        run: bunx tsx scripts/test-relational-planning-read-model.ts
+
+      - name: Management reports tests
+        run: bunx tsx scripts/test-management-reports.ts
+
+      - name: Physical coil persistence integration test
+        run: bunx tsx scripts/test-physical-coil-persistence.ts
+
+      - name: Inventory HTTP lifecycle integration test
+        run: bunx tsx scripts/test-inventory-http.ts
+
+      - name: First-operation coil-to-WIP integration test
+        run: bunx tsx scripts/test-first-operation-coil-wip.ts

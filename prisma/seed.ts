@@ -16,11 +16,16 @@
 
 import { PartCategory, ProcessType, MachineType, MachineStatus, DieType, DieStatus, WarehouseType, DocumentStatus, PostingStatus, InventoryDocType, DocReferenceType, TransactionType, OrderLineStatus, PlanStatus, PlanLineStatus, MOStatus, ProductionOpStatus, ScrapReason, TransferStatus, LotStatus, ContractStatus, ContractTxType, RouteStatus } from '@prisma/client';
 import { getPrismaClient } from '../src/server/db/prisma';
+import { INITIAL_PARTS } from '../src/server/sampleData';
 
 const prisma = getPrismaClient();
 
 async function main() {
-  console.log('🌱 Starting KPIMS Relational Database Seed...');
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SEED !== 'true') {
+    throw new Error('Demo seed is blocked in production. Use `bun run seed:master` for canonical master data only.');
+  }
+
+  console.log('🌱 Starting KPIMS Relational Database Demo Seed...');
 
   // -------------------------------------------------------------------------
   // 1. CONTROL DATA: Roles & Permissions
@@ -184,6 +189,7 @@ async function main() {
   // -------------------------------------------------------------------------
   console.log('  -> Seeding Materials (Steel Grades)...');
   const materials = [
+    { code: 'MAT-DC01A', name: 'ورق روغنی DC01A مطابق EN 10130', grade: 'DC01A', standard: 'EN 10130', densityKgM3: 7850 },
     { code: 'MAT-DC04', name: 'ورق فولادی روغنی DC04 کشش عمیق فوق ویژه', grade: 'DC04', standard: 'EN 10130', densityKgM3: 7850, yieldStrengthMpa: 210, tensileStrengthMpa: 350, elongationPercent: 38 },
     { code: 'MAT-ST14', name: 'ورق روغنی نورد سرد ST14 کشش عمیق', grade: 'ST14', standard: 'DIN 1623', densityKgM3: 7850, yieldStrengthMpa: 220, tensileStrengthMpa: 360, elongationPercent: 36 },
     { code: 'MAT-ST12', name: 'ورق روغنی معمولی ST12 فرم‌دهی و خمش', grade: 'ST12', standard: 'DIN 1623', densityKgM3: 7850, yieldStrengthMpa: 280, tensileStrengthMpa: 420, elongationPercent: 28 },
@@ -231,6 +237,24 @@ async function main() {
     { warehouseCode: 'WH-WIP-STAMP', code: 'LOC-WIP-DRAWN-01', aisle: 'P', rack: 'DRAW', bin: 'D-01', maxCapacityKg: 10000 },
     { warehouseCode: 'WH-FINISHED', code: 'LOC-FIN-PALLET-01', aisle: 'F', rack: 'P-01', bin: 'F-01', maxCapacityKg: 15000 },
     { warehouseCode: 'WH-FINISHED', code: 'LOC-FIN-PALLET-02', aisle: 'F', rack: 'P-02', bin: 'F-02', maxCapacityKg: 15000 },
+
+    // Canonical application location codes used by inventory and WIP screens.
+    { warehouseCode: 'WH-RAW', code: 'LOC-RAW-A1', aisle: 'A', rack: '01', bin: 'A1', maxCapacityKg: 50000 },
+    { warehouseCode: 'WH-RAW', code: 'LOC-RAW-A2', aisle: 'A', rack: '02', bin: 'A2', maxCapacityKg: 50000 },
+    { warehouseCode: 'WH-RAW', code: 'LOC-RAW-B1', aisle: 'B', rack: '01', bin: 'B1', maxCapacityKg: 25000 },
+    { warehouseCode: 'WH-RAW', code: 'LOC-RAW-B2', aisle: 'B', rack: '02', bin: 'B2', maxCapacityKg: 25000 },
+    { warehouseCode: 'WH-WIP-STAMP', code: 'LOC-WIP-BLANK', aisle: 'P', rack: 'BLANK', bin: 'B', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-STAMP', code: 'LOC-WIP-DRAWN', aisle: 'P', rack: 'DRAW', bin: 'D', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-STAMP', code: 'LOC-WIP-TRIM', aisle: 'P', rack: 'TRIM', bin: 'T', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-STAMP', code: 'LOC-WIP-PUNCH', aisle: 'P', rack: 'PUNCH', bin: 'PH', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-STAMP', code: 'LOC-WIP-BEND', aisle: 'P', rack: 'BEND', bin: 'BD', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-WELD', code: 'LOC-WELD-IN', aisle: 'W', rack: 'IN', bin: 'WI', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-WELD', code: 'LOC-WELD-OUT', aisle: 'W', rack: 'OUT', bin: 'WO', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-WIP-WELD', code: 'LOC-PAINT-IN', aisle: 'W', rack: 'PAINT', bin: 'PI', maxCapacityKg: 10000 },
+    { warehouseCode: 'WH-FINISHED', code: 'LOC-FIN-P1', aisle: 'F', rack: 'P1', bin: 'P1', maxCapacityKg: 15000 },
+    { warehouseCode: 'WH-FINISHED', code: 'LOC-FIN-P2', aisle: 'F', rack: 'P2', bin: 'P2', maxCapacityKg: 15000 },
+    { warehouseCode: 'WH-FINISHED', code: 'LOC-FIN-P3', aisle: 'F', rack: 'P3', bin: 'P3', maxCapacityKg: 15000 },
+    { warehouseCode: 'WH-SCRAP', code: 'LOC-SCRAP-YARD', aisle: 'S', rack: 'YARD', bin: 'SCRAP', maxCapacityKg: 30000 },
   ];
   const locMap: Record<string, string> = {};
   for (const loc of locations) {
@@ -360,8 +384,30 @@ async function main() {
   console.log('  -> Seeding Automotive Metal Parts...');
 
   // Representative subset of key automotive stamped parts
-  const partsData = [
-    // Raw Materials (Coils & Sheets)
+  const partsData: {
+    partNumber: string;
+    name: string;
+    category: PartCategory;
+    unitCode: string;
+    materialCode?: string;
+    thicknessMm?: number;
+    weightNetKg: number;
+    weightGrossKg: number;
+    customerPartNumber?: string;
+    supplierPartNumber?: string;
+    carModel?: string;
+    minSafetyStock: number;
+    maxStock?: number;
+  }[] = [
+    // Application canonical master data: codes must match src/server/sampleData.ts
+    { partNumber: 'RM-COIL-DC01A-2.0-1140', name: 'رول ورق روغنی DC01A ضخامت 2mm با عرض 1140mm (ابعاد ۲×۱۱۴۰)', category: PartCategory.RAW_MATERIAL, unitCode: 'KG', materialCode: 'MAT-DC01A', thicknessMm: 2.0, weightNetKg: 1.0, weightGrossKg: 1.0, supplierPartNumber: 'SAP-RAW-DC01-1140', carModel: 'پژو ۲۰۶ و ۲۰۷', minSafetyStock: 4000, maxStock: 25000 },
+    { partNumber: 'RM-SHT-DC01A-2.0-1000', name: 'ورق شیت روغنی DC01A ضخامت 2mm ابعاد ۲×۱۰۰۰ (ورق آلترناتیو)', category: PartCategory.RAW_MATERIAL, unitCode: 'KG', materialCode: 'MAT-DC01A', thicknessMm: 2.0, weightNetKg: 1.0, weightGrossKg: 1.0, supplierPartNumber: 'SAP-RAW-DC01-ALT', carModel: 'پژو ۲۰۶ و ۲۰۷', minSafetyStock: 2000, maxStock: 15000 },
+    { partNumber: 'FST-NUT-WELD-M6', name: 'مهره جوشی چهارگوش پایه‌دار M6 استاندارد DIN 928', category: PartCategory.RAW_MATERIAL, unitCode: 'PCS', weightNetKg: 0.006, weightGrossKg: 0.006, supplierPartNumber: 'FST-DIN928-M6', carModel: 'پژو ۲۰۶ و ۲۰۷', minSafetyStock: 5000, maxStock: 50000 },
+    { partNumber: 'FST-BOLT-WELD-M6-20', name: 'پیچ پایه جوشی مقاومتی M6x20 استاندارد خودرویی', category: PartCategory.RAW_MATERIAL, unitCode: 'PCS', weightNetKg: 0.008, weightGrossKg: 0.008, supplierPartNumber: 'FST-STUD-M6X20', carModel: 'پژو ۲۰۶ و ۲۰۷', minSafetyStock: 3000, maxStock: 30000 },
+    { partNumber: 'WIP-ECU-MAIN-BRK', name: 'صفحه براکت اصلی ضدسرقت رایانه موتور', category: PartCategory.WIP_PART, unitCode: 'PCS', materialCode: 'MAT-DC01A', thicknessMm: 2.0, weightNetKg: 0.75, weightGrossKg: 0.75, supplierPartNumber: 'WIP-SAP-ECU01', carModel: 'پژو ۲۰۶', minSafetyStock: 300, maxStock: 2000 },
+    { partNumber: 'WIP-ECU-COMP-BRK', name: 'مکمل براکت ضدسرقت رایانه موتور', category: PartCategory.WIP_PART, unitCode: 'PCS', materialCode: 'MAT-DC01A', thicknessMm: 2.0, weightNetKg: 0.35, weightGrossKg: 0.35, supplierPartNumber: 'WIP-SAP-ECU02', carModel: 'پژو ۲۰۶', minSafetyStock: 300, maxStock: 2000 },
+    { partNumber: 'SAPCO-ASY-ECU-BRK-01', name: 'مجموعه براکت ضدسرقت رایانه موتور با پوشش رنگ کاتافورز ED', category: PartCategory.FINISHED_GOOD, unitCode: 'PCS', materialCode: 'MAT-DC01A', thicknessMm: 2.0, weightNetKg: 1.25, weightGrossKg: 1.25, supplierPartNumber: 'IK-501-ECU99', carModel: 'پژو ۲۰۶', minSafetyStock: 200, maxStock: 1800 },
+    // Seed demonstration catalog
     { partNumber: 'SAP-COIL-DC04-08', name: 'کویل ورق روغنی DC04 ضخامت ۰.۸ عرض ۱۲۵۰', category: PartCategory.RAW_MATERIAL, unitCode: 'KG', materialCode: 'MAT-DC04', thicknessMm: 0.8, weightNetKg: 1.0, weightGrossKg: 1.0, customerPartNumber: 'SAP-MAT-0498', carModel: 'عمومی بدنه', minSafetyStock: 5000 },
     { partNumber: 'SAP-COIL-ST14-12', name: 'کویل ورق روغنی ST14 ضخامت ۱.۲ عرض ۱۱۰۰', category: PartCategory.RAW_MATERIAL, unitCode: 'KG', materialCode: 'MAT-ST14', thicknessMm: 1.2, weightNetKg: 1.0, weightGrossKg: 1.0, customerPartNumber: 'SAP-MAT-0520', carModel: 'عمومی شاسی', minSafetyStock: 4000 },
     { partNumber: 'SAP-COIL-DX51-10', name: 'کویل ورق گالوانیزه DX51D ضخامت ۱.۰ عرض ۱۰۰۰', category: PartCategory.RAW_MATERIAL, unitCode: 'KG', materialCode: 'MAT-DX51D', thicknessMm: 1.0, weightNetKg: 1.0, weightGrossKg: 1.0, customerPartNumber: 'SAP-MAT-0610', carModel: 'عمومی کف', minSafetyStock: 3500 },
@@ -390,8 +436,10 @@ async function main() {
         weightNetKg: p.weightNetKg,
         weightGrossKg: p.weightGrossKg,
         customerPartNumber: p.customerPartNumber,
+        supplierPartNumber: p.supplierPartNumber,
         carModel: p.carModel,
         minSafetyStock: p.minSafetyStock,
+        maxStock: p.maxStock,
       },
       create: {
         partNumber: p.partNumber,
@@ -403,11 +451,60 @@ async function main() {
         weightNetKg: p.weightNetKg,
         weightGrossKg: p.weightGrossKg,
         customerPartNumber: p.customerPartNumber,
+        supplierPartNumber: p.supplierPartNumber,
         carModel: p.carModel,
         minSafetyStock: p.minSafetyStock,
+        maxStock: p.maxStock,
       },
     });
     partMap[p.partNumber] = created.id;
+  }
+
+  // -------------------------------------------------------------------------
+  // 8B. CANONICAL APPLICATION PARTS
+  // Keep the API's canonical part codes available in PostgreSQL. Inventory posting
+  // resolves document lines by these exact codes, so the demo seed and app catalog
+  // must not drift apart.
+  // -------------------------------------------------------------------------
+  console.log('  -> Synchronizing canonical application parts...');
+  for (const p of INITIAL_PARTS) {
+    const materialId = p.materialGrade ? materialMap[`MAT-${p.materialGrade}`] : undefined;
+    if (p.materialGrade && !materialId) {
+      throw new Error(`Material grade ${p.materialGrade} for application part ${p.code} is missing from the material seed.`);
+    }
+
+    await prisma.part.upsert({
+      where: { partNumber: p.code },
+      update: {
+        name: p.name,
+        category: p.category,
+        unitId: uomMap[p.unit],
+        materialId: materialId || null,
+        thicknessMm: p.thicknessMm,
+        weightNetKg: p.weightPerUnitKg,
+        weightGrossKg: p.weightPerUnitKg,
+        supplierPartNumber: p.sapcoCode,
+        carModel: p.carModel,
+        minSafetyStock: p.minStock,
+        maxStock: p.maxStock,
+        active: true,
+      },
+      create: {
+        partNumber: p.code,
+        name: p.name,
+        category: p.category,
+        unitId: uomMap[p.unit],
+        materialId,
+        thicknessMm: p.thicknessMm,
+        weightNetKg: p.weightPerUnitKg,
+        weightGrossKg: p.weightPerUnitKg,
+        supplierPartNumber: p.sapcoCode,
+        carModel: p.carModel,
+        minSafetyStock: p.minStock,
+        maxStock: p.maxStock,
+        active: true,
+      },
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -815,67 +912,65 @@ async function main() {
     },
   });
 
-  // Stock Balance Snapshot
-  await prisma.stockBalance.upsert({
-    where: {
-      partId_warehouseId_locationId_materialLotId: {
-        partId: partMap['SAP-COIL-DC04-08'],
-        warehouseId: whMap['WH-RAW'],
-        locationId: locMap['LOC-RAW-COIL-01'],
-        materialLotId: lotMap['COIL-SAP-1403-0498'],
-      },
-    },
-    update: {
-      quantityOnHand: 8750,
-      quantityAvailable: 8750,
-      weightKgOnHand: 8750,
-      weightKgAvailable: 8750,
-    },
-    create: {
-      partId: partMap['SAP-COIL-DC04-08'],
-      warehouseId: whMap['WH-RAW'],
-      locationId: locMap['LOC-RAW-COIL-01'],
-      materialLotId: lotMap['COIL-SAP-1403-0498'],
-      quantityOnHand: 8750,
-      quantityReserved: 0,
-      quantityAvailable: 8750,
-      weightKgOnHand: 8750,
-      weightKgReserved: 0,
-      weightKgAvailable: 8750,
-      lastTransactionAt: new Date('2024-10-28T08:00:00.000Z'),
-    },
-  });
+  // Stock Balance Snapshot (ownership/contract/quality-aware key)
+  const rawBalanceWhere = {
+    partId: partMap['SAP-COIL-DC04-08'],
+    warehouseId: whMap['WH-RAW'],
+    locationId: locMap['LOC-RAW-COIL-01'],
+    materialLotId: lotMap['COIL-SAP-1403-0498'],
+    ownership: 'COMPANY_OWNED',
+    contractId: null,
+    qualityStatus: 'AVAILABLE',
+  };
+  const rawBalance = await prisma.stockBalance.findFirst({ where: rawBalanceWhere });
+  const rawBalanceData = {
+    quantityOnHand: 8750,
+    quantityReserved: 0,
+    quantityAvailable: 8750,
+    weightKgOnHand: 8750,
+    weightKgReserved: 0,
+    weightKgAvailable: 8750,
+    ownership: 'COMPANY_OWNED',
+    contractId: null,
+    contractNumber: null,
+    qualityStatus: 'AVAILABLE',
+    lastTransactionAt: new Date('2024-10-28T08:00:00.000Z'),
+  };
+  if (rawBalance) {
+    await prisma.stockBalance.update({ where: { id: rawBalance.id }, data: rawBalanceData });
+  } else {
+    await prisma.stockBalance.create({ data: { ...rawBalanceWhere, ...rawBalanceData } });
+  }
 
   // Finished Goods stock balance
-  await prisma.stockBalance.upsert({
-    where: {
-      partId_warehouseId_locationId_materialLotId: {
-        partId: partMap['IKCO-206-BRK01'],
-        warehouseId: whMap['WH-FINISHED'],
-        locationId: locMap['LOC-FIN-PALLET-01'],
-        materialLotId: lotMap['COIL-SAP-1403-0498'], // traced back to parent lot
-      },
-    },
-    update: {
-      quantityOnHand: 1850,
-      quantityAvailable: 1850,
-      weightKgOnHand: 3182,
-      weightKgAvailable: 3182,
-    },
-    create: {
-      partId: partMap['IKCO-206-BRK01'],
-      warehouseId: whMap['WH-FINISHED'],
-      locationId: locMap['LOC-FIN-PALLET-01'],
-      materialLotId: lotMap['COIL-SAP-1403-0498'],
-      quantityOnHand: 1850,
-      quantityReserved: 0,
-      quantityAvailable: 1850,
-      weightKgOnHand: 3182,
-      weightKgReserved: 0,
-      weightKgAvailable: 3182,
-      lastTransactionAt: new Date('2024-10-28T16:00:00.000Z'),
-    },
-  });
+  const finishedBalanceWhere = {
+    partId: partMap['IKCO-206-BRK01'],
+    warehouseId: whMap['WH-FINISHED'],
+    locationId: locMap['LOC-FIN-PALLET-01'],
+    materialLotId: lotMap['COIL-SAP-1403-0498'],
+    ownership: 'COMPANY_OWNED',
+    contractId: null,
+    qualityStatus: 'AVAILABLE',
+  };
+  const finishedBalance = await prisma.stockBalance.findFirst({ where: finishedBalanceWhere });
+  const finishedBalanceData = {
+    quantityOnHand: 1850,
+    quantityReserved: 0,
+    quantityAvailable: 1850,
+    weightKgOnHand: 3182,
+    weightKgReserved: 0,
+    weightKgAvailable: 3182,
+    ownership: 'COMPANY_OWNED',
+    contractId: null,
+    contractNumber: null,
+    qualityStatus: 'AVAILABLE',
+    lastTransactionAt: new Date('2024-10-28T16:00:00.000Z'),
+  };
+  if (finishedBalance) {
+    await prisma.stockBalance.update({ where: { id: finishedBalance.id }, data: finishedBalanceData });
+  } else {
+    await prisma.stockBalance.create({ data: { ...finishedBalanceWhere, ...finishedBalanceData } });
+  }
 
   // Finished goods ledger transaction
   await prisma.inventoryTransaction.upsert({

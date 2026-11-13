@@ -28,9 +28,20 @@ import {
   PROCESS_DEFINITIONS,
   FACTORY_HALLS,
 } from '../types/inventory';
-import { checkDatabaseConnection, getPrismaClient } from './db/prisma';
+import { checkDatabaseConnection, getPrismaClient, isDatabaseUrlConfigured } from './db/prisma';
 import { CreateProductionPlanSchema, CreateSapcoReceiptSchema } from './validation/index';
 import { formatToJalali } from '../utils/jalali';
+import { linkWipManufacturingOrderToRelational } from './wipIdentityBridge';
+import { findWipProductionReportByKey, postWipProductionAtomically } from './wipProductionLedger';
+import { getRelationalPlanningReadModel } from './relationalPlanningReadModel';
+import {
+  approveRelationalPlanProposal,
+  createRelationalPlanProposal,
+  getRelationalPlanProposal,
+  listRelationalPlanProposals,
+  releaseRelationalPlanProposal,
+  reviseRelationalPlanProposal,
+} from './relationalPlanProposalService';
 
 import {
   calculateDetailedStockBalances,
@@ -89,6 +100,10 @@ import {
   productionLogsStore,
   clearProductionWipData,
   reseedProductionWipData,
+  persistProductionWipState,
+  loadProductionWipState,
+  getProductionWipSnapshotVersion,
+  advanceProductionWipSnapshotVersion,
 } from './productionWipEngine';
 import {
   calculateNetRequirements,
@@ -110,7 +125,6 @@ import {
   getProductionBacklogReport,
   getWipByPartAndOperationReport,
   getWipAgingReport,
-  getMaterialConsumptionVsStandardReport,
   getSapcoMaterialAccountReport,
   getInventoryValuationQuantitiesReport,
   getScrapByPartAndOperationReport,
@@ -321,18 +335,387 @@ let shiftsStore: ShiftDefinition[] = [
     status: 'ACTIVE',
   },
 ];
-let savedReportsStore: SavedReportConfig[] = [
-  {
-    id: 'REP-CFG-01',
-    name: 'موجودی کل کلاف‌ها بر اساس پکینگ و گرید',
-    reportType: 'COILS_SUMMARY',
-    selectedColumns: ['materialGrade', 'thicknessMm', 'widthMm', 'coilPackNumber', 'totalCoilsCount', 'totalRemainingWeightKg'],
-    groupBy: ['materialGrade', 'coilPackNumber'],
-    filters: {},
-    createdAt: new Date().toISOString(),
-  },
-];
+// Saved report configurations are persisted in PostgreSQL, not in process memory.
 let importBatchesStore: ImportBatchSummary[] = [];
+
+// Legacy snapshot for non-relational inventory UI state; physical coil and issue/return records are rehydrated from normalized PostgreSQL tables.
+const INVENTORY_APP_SNAPSHOT_ID = 'inventory-app-state';
+let inventoryStateQueue: Promise<unknown> = Promise.resolve();
+
+export async function persistInventoryAppState(): Promise<void> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required; contract and physical-coil state cannot remain memory-only.');
+  }
+
+  const prisma = getPrismaClient();
+  const payload = JSON.parse(JSON.stringify({
+    contracts: contractsStore,
+    physicalCoils: physicalCoilsStore,
+    coilIssueRecords: coilIssueRecordsStore,
+    reservations: reservationsStore,
+    inventoryDocuments: inventoryDocsStore,
+    auditLogs: auditLogsStore,
+    qcHolds: serverQcHoldStore,
+  }));
+
+  const task = inventoryStateQueue.catch(() => undefined).then(async () => {
+    await prisma.inventoryAppStateSnapshot.upsert({
+      where: { id: INVENTORY_APP_SNAPSHOT_ID },
+      create: { id: INVENTORY_APP_SNAPSHOT_ID, payload },
+      update: { payload },
+    });
+  });
+  inventoryStateQueue = task.then(() => undefined, () => undefined);
+  await task;
+}
+
+export async function loadInventoryAppState(): Promise<void> {
+  if (!isDatabaseUrlConfigured()) {
+    throw new Error('DATABASE_URL is required before loading inventory application state.');
+  }
+
+  const prisma = getPrismaClient();
+  const snapshot = await prisma.inventoryAppStateSnapshot.findUnique({
+    where: { id: INVENTORY_APP_SNAPSHOT_ID },
+  });
+
+  if (snapshot) {
+    const payload = snapshot.payload as {
+      contracts?: SapcoContract[];
+      physicalCoils?: PhysicalCoil[];
+      coilIssueRecords?: CoilIssueReturnRecord[];
+      reservations?: InventoryReservation[];
+      inventoryDocuments?: InventoryDocument[];
+      auditLogs?: AuditRecord[];
+      qcHolds?: Record<string, any>;
+    };
+    if (
+      !payload ||
+      !Array.isArray(payload.contracts) ||
+      !Array.isArray(payload.reservations) ||
+      !Array.isArray(payload.inventoryDocuments) ||
+      !Array.isArray(payload.auditLogs) ||
+      !payload.qcHolds || typeof payload.qcHolds !== 'object'
+    ) {
+      throw new Error('Persistent inventory application snapshot is malformed; refusing to overwrite it.');
+    }
+
+    contractsStore.splice(0, contractsStore.length, ...payload.contracts);
+    reservationsStore.splice(0, reservationsStore.length, ...payload.reservations);
+    inventoryDocsStore.splice(0, inventoryDocsStore.length, ...payload.inventoryDocuments);
+    auditLogsStore.splice(0, auditLogsStore.length, ...payload.auditLogs);
+    for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
+    Object.assign(serverQcHoldStore, payload.qcHolds);
+  } else if (process.env.NODE_ENV === 'production') {
+    // Do not expose hard-coded sample contracts/coils as live production inventory.
+    contractsStore.splice(0);
+    physicalCoilsStore.splice(0);
+    coilIssueRecordsStore.splice(0);
+    reservationsStore.splice(0);
+    inventoryDocsStore.splice(0);
+    auditLogsStore.splice(0);
+    for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
+    await persistInventoryAppState();
+  }
+
+  const dbParts = await prisma.part.findMany({
+    where: { active: true },
+    include: { unit: true, material: true },
+    orderBy: { partNumber: 'asc' },
+  });
+  if (dbParts.length) {
+    partsStore = dbParts.map(dbPart => {
+      const template = INITIAL_PARTS.find(part => part.code === dbPart.partNumber);
+      return {
+        id: template?.id || dbPart.id,
+        code: dbPart.partNumber,
+        name: dbPart.name,
+        category: dbPart.category as Part['category'],
+        unit: dbPart.unit.code as Part['unit'],
+        weightPerUnitKg: Number(dbPart.weightNetKg),
+        sapcoCode: dbPart.supplierPartNumber || template?.sapcoCode,
+        carModel: dbPart.carModel || undefined,
+        thicknessMm: dbPart.thicknessMm == null ? undefined : Number(dbPart.thicknessMm),
+        materialGrade: dbPart.material?.grade || undefined,
+        minStock: Number(dbPart.minSafetyStock),
+        maxStock: dbPart.maxStock == null ? undefined : Number(dbPart.maxStock),
+        isDemo: false,
+      } as Part;
+    });
+  } else if (process.env.NODE_ENV === 'production') {
+    partsStore = [];
+  }
+
+  const [dbPhysicalCoils, dbCoilIssueRecords] = await Promise.all([
+    prisma.physicalCoil.findMany({
+      include: {
+        part: { select: { id: true, partNumber: true, name: true } },
+        material: { select: { grade: true } },
+        warehouse: { select: { id: true, code: true, name: true } },
+        warehouseLocation: { select: { code: true } },
+        contractAllocations: {
+          include: { contract: { select: { id: true, contractNumber: true } } },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: { receiptDate: 'asc' },
+    }),
+    prisma.coilIssueReturnRecord.findMany({
+      include: {
+        coil: { select: { coilId: true } },
+        contract: { select: { id: true, contractNumber: true } },
+        part: { select: { partNumber: true, name: true } },
+        manufacturingOrder: { select: { moNumber: true } },
+        productionOperation: { select: { stepNumber: true } },
+      },
+      orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
+    }),
+  ]);
+
+  if (isDatabaseUrlConfigured()) {
+    physicalCoilsStore.splice(0, physicalCoilsStore.length, ...dbPhysicalCoils.map((row: any) => {
+      const appPart = partsStore.find(part => part.code === row.part?.partNumber);
+      return {
+        id: row.id,
+        coilId: row.coilId,
+        coilPackNumber: row.coilPackNumber,
+        partId: appPart?.id || row.partId || '',
+        partCode: row.part?.partNumber || '',
+        partName: row.part?.name || '',
+        materialGrade: row.material?.grade || '',
+        heatNumber: row.heatNumber || '',
+        thicknessMm: Number(row.thicknessMm),
+        widthMm: Number(row.widthMm),
+        originalWeightKg: Number(row.originalWeightKg),
+        remainingWeightKg: Number(row.remainingWeightKg),
+        warehouseId: row.warehouseId,
+        warehouseName: row.warehouse?.name || '',
+        warehouseLocationCode: row.warehouseLocation?.code || '',
+        ownership: row.ownership,
+        qualityStatus: row.qualityStatus,
+        physicalStatus: row.physicalStatus,
+        supplierName: row.supplierName || '',
+        receiptDate: row.receiptDate.toISOString(),
+        allocations: row.contractAllocations.map((allocation: any) => ({
+          contractId: allocation.contractId,
+          contractNumber: allocation.contract?.contractNumber || allocation.contractId,
+          coilId: row.id,
+          allocatedWeightKg: Number(allocation.allocatedWeightKg),
+          ownership: allocation.ownership,
+          notes: allocation.notes || undefined,
+        })),
+      } as PhysicalCoil;
+    }));
+  }
+
+  if (isDatabaseUrlConfigured()) {
+    coilIssueRecordsStore.splice(0, coilIssueRecordsStore.length, ...dbCoilIssueRecords.map((row: any) => ({
+      id: row.id,
+      coilId: row.coilId,
+      manufacturingOrderId: row.manufacturingOrder?.moNumber || row.manufacturingOrderId || '',
+      documentNumber: row.documentNumber,
+      issuedWeightKg: Number(row.issuedWeightKg),
+      consumedWeightKg: Number(row.consumedWeightKg),
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: Number(row.outstandingWeightKg),
+      varianceWeightKg: Number(row.varianceWeightKg),
+      scrappedKg: Number(row.varianceWeightKg),
+      status: row.status,
+      issuedAt: row.issuedAt.toISOString(),
+      returnedAt: row.returnedAt?.toISOString(),
+      notes: row.notes || undefined,
+      contractId: row.contractId || undefined,
+      contractNumber: row.contract?.contractNumber || undefined,
+      partCode: row.part?.partNumber || undefined,
+      partName: row.part?.name || undefined,
+      operationStep: row.productionOperation?.stepNumber,
+      operationName: row.productionOperation?.operation?.name,
+      plannedMachine: row.productionOperation?.plannedMachine ? `${row.productionOperation.plannedMachine.code} - ${row.productionOperation.plannedMachine.name}` : undefined,
+    } as CoilIssueReturnRecord)));
+  }
+
+  const dbDocuments = await prisma.inventoryDocument.findMany({
+    where: { postingStatus: 'POSTED' },
+    include: {
+      warehouse: true,
+      targetWarehouse: true,
+      createdByUser: true,
+      lines: {
+        include: {
+          part: true,
+          unit: true,
+          materialLot: true,
+          location: true,
+          targetLocation: true,
+        },
+        orderBy: { lineNumber: 'asc' },
+      },
+    },
+    orderBy: { documentDate: 'asc' },
+  });
+
+  if (dbDocuments.length || process.env.NODE_ENV === 'production') {
+    const mappedDatabaseDocuments = dbDocuments.map(dbDoc => {
+      const lines: InventoryDocumentLine[] = dbDoc.lines.map(line => {
+        const appPart = partsStore.find(part => part.code === line.part.partNumber);
+        return {
+          id: line.id,
+          documentId: dbDoc.id,
+          lineNumber: line.lineNumber,
+          partId: appPart?.id || line.partId,
+          partCode: line.part.partNumber,
+          partName: line.part.name,
+          materialLotId: line.materialLot?.lotNumber,
+          lotNumber: line.materialLot?.lotNumber,
+          heatNumber: line.materialLot?.heatNumber || undefined,
+          ownership: line.ownership as StockOwnership,
+          contractId: line.contractId || undefined,
+          contractNumber: line.contractNumber || undefined,
+          locationCode: line.location?.code,
+          targetLocationCode: line.targetLocation?.code,
+          quantity: Number(line.quantity),
+          unit: line.unit.code as InventoryDocumentLine['unit'],
+          quantityKg: Number(line.weightKg),
+          qualityStatus: line.qualityStatus as StockQualityStatus,
+          unitCost: line.unitCost == null ? undefined : Number(line.unitCost),
+          notes: line.notes || undefined,
+        };
+      });
+      const firstLine = lines[0];
+      const dbType = dbDoc.documentType;
+      let documentType: InventoryDocType;
+      if (dbType === 'RECEIPT') {
+        documentType = firstLine?.partCode && partsStore.find(p => p.code === firstLine.partCode)?.category === 'FINISHED_GOOD'
+          ? 'RECEIPT_FINISHED_GOODS'
+          : 'RECEIPT_RAW_MATERIAL';
+      } else if (dbType === 'ISSUE') {
+        documentType = dbDoc.referenceNumber?.startsWith('SO-') ? 'DELIVERY_CUSTOMER' : 'ISSUE_RAW_MATERIAL';
+      } else if (dbType === 'WIP_TRANSFER') {
+        documentType = 'TRANSFER';
+      } else if (dbType === 'INITIAL_BALANCE') {
+        documentType = 'OPENING_BALANCE';
+      } else if (dbType === 'RETURN') {
+        documentType = 'REVERSAL';
+      } else {
+        documentType = 'ADJUSTMENT';
+      }
+
+      return {
+        id: dbDoc.id,
+        documentNumber: dbDoc.documentNumber,
+        documentType,
+        documentDate: dbDoc.documentDate.toISOString(),
+        documentStatus: dbDoc.documentStatus as InventoryDocument['documentStatus'],
+        postingStatus: dbDoc.postingStatus as InventoryDocument['postingStatus'],
+        warehouseId: dbDoc.warehouse.code,
+        warehouseName: dbDoc.warehouse.name,
+        targetWarehouseId: dbDoc.targetWarehouse?.code,
+        targetWarehouseName: dbDoc.targetWarehouse?.name,
+        ownership: firstLine?.ownership || 'COMPANY_OWNED',
+        contractId: firstLine?.contractId,
+        contractNumber: firstLine?.contractNumber,
+        referenceType: dbDoc.referenceType || undefined,
+        referenceNumber: dbDoc.referenceNumber || undefined,
+        reversalOfDocumentId: dbDoc.reversalOfId || undefined,
+        adjustmentReason: dbDoc.notes || undefined,
+        auditNote: dbDoc.notes || undefined,
+        lines,
+        totalQuantity: lines.reduce((sum, line) => sum + line.quantity, 0),
+        totalWeightKg: lines.reduce((sum, line) => sum + line.quantityKg, 0),
+        createdByUid: dbDoc.createdByUser.username,
+        createdByName: dbDoc.createdByUser.fullName,
+        postedAt: dbDoc.postedAt?.toISOString(),
+        createdAt: dbDoc.createdAt.toISOString(),
+        updatedAt: dbDoc.updatedAt.toISOString(),
+      };
+    });
+    const documentsByNumber = new Map(inventoryDocsStore.map(doc => [doc.documentNumber, doc]));
+    for (const doc of mappedDatabaseDocuments) documentsByNumber.set(doc.documentNumber, doc);
+    inventoryDocsStore.splice(0, inventoryDocsStore.length, ...documentsByNumber.values());
+  }
+
+  const dbReservations = await prisma.inventoryReservation.findMany({
+    include: { part: { include: { unit: true } }, warehouse: true, materialLot: true, reservedForMO: true, reservedForCO: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (dbReservations.length) {
+    reservationsStore.splice(0, reservationsStore.length, ...dbReservations.map(row => {
+      const appPart = partsStore.find(part => part.code === row.part.partNumber);
+      return {
+        id: row.id,
+        reservationNumber: row.reservationNumber,
+        partId: appPart?.id || row.partId,
+        partCode: row.part.partNumber,
+        partName: row.part.name,
+        warehouseId: row.warehouse.code,
+        warehouseName: row.warehouse.name,
+        materialLotId: row.materialLot?.lotNumber,
+        lotNumber: row.materialLot?.lotNumber,
+        ownership: 'COMPANY_OWNED' as InventoryReservation['ownership'],
+        reservedFor: row.reservedForMO?.moNumber || row.reservedForCO?.orderNumber || 'سفارش نامشخص',
+        quantity: Number(row.quantity),
+        quantityKg: Number(row.weightKg),
+        unit: row.part.unit.code as InventoryReservation['unit'],
+        status: row.status as InventoryReservation['status'],
+        validUntil: row.validUntil?.toISOString(),
+        createdAt: row.createdAt.toISOString(),
+      };
+    }));
+  } else if (process.env.NODE_ENV === 'production' && !snapshot) {
+    reservationsStore.splice(0);
+  }
+
+  const dbAudit = await prisma.auditLog.findMany({
+    include: { user: true },
+    orderBy: { timestamp: 'desc' },
+    take: 1000,
+  });
+  if (dbAudit.length || process.env.NODE_ENV === 'production') {
+    const databaseAudit = dbAudit.map(row => ({
+      id: row.id,
+      action: row.action,
+      entityName: row.entityName,
+      entityId: row.entityId,
+      user: { uid: row.user?.username || 'system', displayName: row.user?.fullName || 'سیستم' },
+      details: JSON.stringify(row.newValues || row.oldValues || {}),
+      timestamp: row.timestamp.toISOString(),
+    }));
+    const auditById = new Map(auditLogsStore.map(row => [row.id, row]));
+    for (const row of databaseAudit) auditById.set(row.id, row);
+    auditLogsStore.splice(0, auditLogsStore.length, ...auditById.values());
+  }
+}
+
+let wipMutationQueue: Promise<unknown> = Promise.resolve();
+
+async function executePersistentWipMutation<T extends { success: boolean }>(mutation: () => T, persist?: (result: T) => Promise<void>): Promise<T> {
+  const task = wipMutationQueue.catch(() => undefined).then(async () => {
+    const clone = <V>(value: V): V => JSON.parse(JSON.stringify(value)) as V;
+    const previousOrders = clone(manufacturingOrdersStore);
+    const previousTransfers = clone(wipTransfersStore);
+    const previousLogs = clone(productionLogsStore);
+    const result = mutation();
+    if (!result.success) return result;
+
+    try {
+      if (persist) await persist(result);
+      else await persistProductionWipState();
+      return result;
+    } catch (error) {
+      manufacturingOrdersStore.splice(0, manufacturingOrdersStore.length, ...previousOrders);
+      wipTransfersStore.splice(0, wipTransfersStore.length, ...previousTransfers);
+      productionLogsStore.splice(0, productionLogsStore.length, ...previousLogs);
+      if (error instanceof Error && error.message.includes('WIP_SNAPSHOT_VERSION_CONFLICT')) {
+        // Refresh this process from the winning server's committed version before accepting another mutation.
+        await loadProductionWipState();
+      }
+      throw error;
+    }
+  });
+
+  wipMutationQueue = task.then(() => undefined, () => undefined);
+  return task;
+}
 
 export const apiRouter = Router();
 
@@ -1518,6 +1901,10 @@ apiRouter.post('/demo-data/seed', async (_req: Request, res: Response) => {
 
   reseedCustomerOrdersAndPlans();
   reseedProductionWipData();
+  await persistProductionWipState();
+  auditLogsStore.length = 0;
+  auditLogsStore.push(...INITIAL_AUDIT_LOGS);
+  await persistInventoryAppState();
 
   const summary = calculateInventoryLedger(transactionsStore, partsStore);
   res.json({
@@ -1548,6 +1935,8 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   contractsStore.length = 0;
   reservationsStore.length = 0;
   coilIssueRecordsStore.length = 0;
+  auditLogsStore.length = 0;
+  for (const key of Object.keys(serverQcHoldStore)) delete serverQcHoldStore[key];
 
   clearCustomerOrdersAndPlans();
   clearProductionWipData();
@@ -1556,6 +1945,8 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   try {
     const prisma = getPrismaClient();
     if (prisma) {
+      await prisma.wipStateSnapshot.deleteMany({});
+      await prisma.inventoryAppStateSnapshot.deleteMany({});
       await prisma.productionScrap.deleteMany({}).catch(() => {});
       await prisma.machineAssignment.deleteMany({}).catch(() => {});
       await prisma.productionReport.deleteMany({}).catch(() => {});
@@ -1582,6 +1973,9 @@ apiRouter.post('/demo-data/clean', async (_req: Request, res: Response) => {
   } catch (dbErr) {
     console.warn('Prisma tables wipe notice:', dbErr);
   }
+
+  await persistInventoryAppState();
+  await persistProductionWipState();
 
   const summary = calculateInventoryLedger(transactionsStore, partsStore);
   res.json({
@@ -1847,7 +2241,7 @@ apiRouter.get('/inventory/documents/:id', (req: Request, res: Response) => {
 /**
  * 16.5. Create Inventory Document (Draft or Auto-post)
  */
-apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
+apiRouter.post('/inventory/documents', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     const autoPost = payload.autoPost === true;
@@ -1907,7 +2301,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
         ownership: l.ownership || payload.ownership || 'COMPANY_OWNED',
         contractId: l.contractId || payload.contractId,
         contractNumber: l.contractNumber || payload.contractNumber,
-        locationCode: l.locationCode || 'LOC-01',
+        locationCode: l.locationCode || undefined,
         targetLocationCode: l.targetLocationCode,
         quantity: qty,
         unit: part ? part.unit : l.unit || 'PCS',
@@ -1950,6 +2344,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
         uid: payload.user?.uid || 'USR-OP-01',
         displayName: payload.user?.displayName || 'کاربر سیستم',
       };
+      const previousReservations = JSON.parse(JSON.stringify(reservationsStore)) as InventoryReservation[];
       const postResult = atomicPostDocument(
         newDoc,
         inventoryDocsStore,
@@ -1960,6 +2355,13 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
 
       if (!postResult.success) {
         return res.status(400).json({ success: false, error: postResult.error });
+      }
+
+      // Do not report a posted document until the relational ledger transaction commits.
+      const dbResult = await postDocumentInDbTransaction(newDoc, user);
+      if (!dbResult.success) {
+        reservationsStore.splice(0, reservationsStore.length, ...previousReservations);
+        return res.status(409).json({ success: false, error: dbResult.error || 'ثبت قطعی در PostgreSQL ناموفق بود.' });
       }
 
       inventoryDocsStore.unshift(newDoc);
@@ -2048,10 +2450,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
         }
       }
 
-      // Persist to PostgreSQL via Prisma transaction
-      postDocumentInDbTransaction(newDoc, user).catch(err => {
-        console.warn('PostgreSQL Prisma transaction background warning:', err?.message || err);
-      });
+      await persistInventoryAppState();
 
       return res.status(201).json({
         success: true,
@@ -2061,6 +2460,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
     }
 
     inventoryDocsStore.unshift(newDoc);
+    await persistInventoryAppState();
     res.status(201).json({
       success: true,
       message: `پیش‌نویس سند شماره «${newDoc.documentNumber}» ثبت شد. توجه: پیش‌نویس تا زمان ثبت قطعی در کاردکس اثر ندارد.`,
@@ -2077,7 +2477,7 @@ apiRouter.post('/inventory/documents', (req: Request, res: Response) => {
 /**
  * 16.6. Atomic Post Document
  */
-apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) => {
+apiRouter.post('/inventory/documents/:id/post', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { user } = req.body;
@@ -2093,6 +2493,15 @@ apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) =>
       displayName: user?.displayName || 'مدیر انبار',
     };
 
+    const previousState = {
+      postingStatus: doc.postingStatus,
+      documentStatus: doc.documentStatus,
+      postedByUid: doc.postedByUid,
+      postedByName: doc.postedByName,
+      postedAt: doc.postedAt,
+      updatedAt: doc.updatedAt,
+    };
+
     const postResult = atomicPostDocument(
       doc,
       inventoryDocsStore,
@@ -2105,18 +2514,26 @@ apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) =>
       return res.status(400).json({ success: false, error: postResult.error });
     }
 
+    // A successful response is sent only after the PostgreSQL transaction commits.
+    const dbResult = await postDocumentInDbTransaction(doc, postUser);
+    if (!dbResult.success) {
+      Object.assign(doc, previousState);
+      return res.status(409).json({
+        success: false,
+        error: dbResult.error || 'ثبت سند در PostgreSQL انجام نشد؛ وضعیت سند به حالت قبل بازگردانده شد.',
+      });
+    }
+
     if (postResult.auditRecord) {
       auditLogsStore.unshift(postResult.auditRecord);
     }
-
-    // Persist to PostgreSQL via Prisma transaction
-    postDocumentInDbTransaction(doc, postUser).catch(err => {
-      console.warn('PostgreSQL Prisma transaction background warning:', err?.message || err);
+    await persistInventoryAppState().catch(err => {
+      console.warn('Inventory app-state snapshot warning after committed ledger post:', err?.message || err);
     });
 
-    res.json({
+    return res.json({
       success: true,
-      message: `سند شماره «${doc.documentNumber}» با موفقیت در کاردکس و موجودی رسمی ثبت قطعی گردید.`,
+      message: `سند شماره «${doc.documentNumber}» با موفقیت در PostgreSQL، کاردکس و موجودی رسمی ثبت قطعی گردید.`,
       data: doc,
     });
   } catch (error) {
@@ -2130,7 +2547,7 @@ apiRouter.post('/inventory/documents/:id/post', (req: Request, res: Response) =>
 /**
  * 16.7. Reversal Document (Document Correction)
  */
-apiRouter.post('/inventory/documents/:id/reverse', (req: Request, res: Response) => {
+apiRouter.post('/inventory/documents/:id/reverse', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { reason, user } = req.body;
@@ -2159,6 +2576,7 @@ apiRouter.post('/inventory/documents/:id/reverse', (req: Request, res: Response)
     if (reversalResult.auditRecord) {
       auditLogsStore.unshift(reversalResult.auditRecord);
     }
+    await persistInventoryAppState();
 
     res.json({
       success: true,
@@ -2256,7 +2674,7 @@ apiRouter.get('/inventory/stock-inquiry', (req: Request, res: Response) => {
 /**
  * 16.8.1 Toggle QC Hold (قرنطینه کیفی) on Warehouse Stock Row or Coil
  */
-apiRouter.post('/inventory/qc-hold', (req: Request, res: Response) => {
+apiRouter.post('/inventory/qc-hold', async (req: Request, res: Response) => {
   try {
     const { key, partId, partCode, materialGrade, lotNumber, isHeld, heldQty, heldWeightKg, reasonFa } = req.body;
     if (!key) {
@@ -2289,6 +2707,7 @@ apiRouter.post('/inventory/qc-hold', (req: Request, res: Response) => {
       targetCoil.physicalStatus = isHeld ? 'BLOCKED' : targetCoil.remainingWeightKg > 0 ? 'AVAILABLE' : 'CONSUMED';
     }
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: isHeld
@@ -2375,7 +2794,7 @@ apiRouter.get('/inventory/reservations', (_req: Request, res: Response) => {
   res.json({ success: true, count: reservationsStore.length, data: reservationsStore });
 });
 
-apiRouter.post('/inventory/reservations', (req: Request, res: Response) => {
+apiRouter.post('/inventory/reservations', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     if (!payload.partId || !payload.warehouseId || !payload.quantity) {
@@ -2424,6 +2843,7 @@ apiRouter.post('/inventory/reservations', (req: Request, res: Response) => {
     };
 
     reservationsStore.unshift(newRes);
+    await persistInventoryAppState();
     res.status(201).json({ success: true, message: 'رزرو موجودی با موفقیت ثبت شد.', data: newRes });
   } catch (error) {
     res.status(500).json({
@@ -2433,7 +2853,7 @@ apiRouter.post('/inventory/reservations', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/reservations/:id/release', (req: Request, res: Response) => {
+apiRouter.post('/inventory/reservations/:id/release', async (req: Request, res: Response) => {
   const { id } = req.params;
   const resIndex = reservationsStore.findIndex(r => r.id === id);
   if (resIndex === -1) {
@@ -2441,6 +2861,7 @@ apiRouter.post('/inventory/reservations/:id/release', (req: Request, res: Respon
   }
 
   reservationsStore[resIndex].status = 'RELEASED';
+  await persistInventoryAppState();
   res.json({ success: true, message: 'رزرو با موفقیت آزاد گردید و به موجودی قابل استفاده بازگشت.', data: reservationsStore[resIndex] });
 });
 
@@ -2532,7 +2953,7 @@ apiRouter.get('/inventory/contracts', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/contracts', (req: Request, res: Response) => {
+apiRouter.post('/inventory/contracts', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     if (!payload.contractNumber || !payload.title) {
@@ -2616,6 +3037,7 @@ apiRouter.post('/inventory/contracts', (req: Request, res: Response) => {
       timestamp: new Date().toISOString(),
     });
 
+    await persistInventoryAppState();
     res.status(201).json({
       success: true,
       message: `قرارداد شماره «${newContract.contractNumber}» با موفقیت در سیستم ثبت گردید.`,
@@ -2629,7 +3051,7 @@ apiRouter.post('/inventory/contracts', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.put('/inventory/contracts/:id', (req: Request, res: Response) => {
+apiRouter.put('/inventory/contracts/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const payload = req.body;
@@ -2678,6 +3100,7 @@ apiRouter.put('/inventory/contracts/:id', (req: Request, res: Response) => {
 
     contractsStore[contractIndex] = updated;
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `قرارداد شماره «${updated.contractNumber}» به‌روزرسانی شد و در تاریخچه ویرایش‌ها ثبت گردید.`,
@@ -2691,7 +3114,7 @@ apiRouter.put('/inventory/contracts/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
+apiRouter.delete('/inventory/contracts/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const contract = contractsStore.find(c => c.id === id || c.contractNumber === id);
@@ -2707,6 +3130,7 @@ apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
     if (hasMovements) {
       // Soft-cancel instead of hard delete to preserve Kardex integrity
       contract.status = 'SUSPENDED';
+      await persistInventoryAppState();
       return res.json({
         success: true,
         message: `قرارداد «${contract.contractNumber}» به دلیل داشتن گردش کاردکس قطعی، به وضعیت «تعلیق» تغییر یافت و سوابق آن حفظ شد.`,
@@ -2715,6 +3139,7 @@ apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
     }
 
     contractsStore = contractsStore.filter(c => c.id !== contract.id);
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `قرارداد «${contract.contractNumber}» با موفقیت حذف گردید.`,
@@ -2727,7 +3152,7 @@ apiRouter.delete('/inventory/contracts/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/contracts/:id/allocate-coil', (req: Request, res: Response) => {
+apiRouter.post('/inventory/contracts/:id/allocate-coil', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { coilId, allocatedWeightKg, notes } = req.body;
@@ -2769,6 +3194,7 @@ apiRouter.post('/inventory/contracts/:id/allocate-coil', (req: Request, res: Res
       coil.allocations.push(allocRecord);
     }
 
+    await persistInventoryAppState();
     res.json({
       success: true,
       message: `مقدار ${weight} کیلوگرم از کلاف «${coil.coilId}» (پکینگ: ${coil.coilPackNumber}) به قرارداد «${contract.contractNumber}» تخصیص یافت.`,
@@ -2792,10 +3218,121 @@ apiRouter.get('/inventory/audit-logs', (_req: Request, res: Response) => {
 /**
  * 16.13. Physical Coils & Partial-Coil Management
  */
-apiRouter.get('/inventory/coils', (req: Request, res: Response) => {
+apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'فهرست دستور ساخت و عملیات فقط از PostgreSQL قابل دریافت است.' });
+    const prisma = getPrismaClient();
+    const orders = await prisma.manufacturingOrder.findMany({
+      where: {
+        status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS'] },
+        operations: { some: { status: { in: ['PENDING', 'READY', 'IN_PROGRESS'] } } },
+      },
+      include: {
+        part: { select: { partNumber: true, name: true, weightNetKg: true, weightGrossKg: true } },
+        operations: {
+          include: {
+            operation: { select: { code: true, name: true, processType: true } },
+            plannedMachine: { select: { code: true, name: true } },
+          },
+          orderBy: { stepNumber: 'asc' },
+        },
+      },
+      orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
+    });
+    const wipLinks = await prisma.wipManufacturingOrderLink.findMany({
+      where: { manufacturingOrderId: { in: orders.map((order: any) => order.id) } },
+      select: { manufacturingOrderId: true, wipManufacturingOrderId: true },
+    });
+    const wipIdByManufacturingOrderId = new Map(
+      wipLinks.map((link: any) => [link.manufacturingOrderId, link.wipManufacturingOrderId]),
+    );
+    const data = orders.map((order: any) => {
+      const firstStep = Math.min(...order.operations.map((operation: any) => operation.stepNumber));
+      const eligibleOperations = order.operations.filter((operation: any) => operation.status === 'READY' || operation.status === 'IN_PROGRESS' || (operation.status === 'PENDING' && operation.stepNumber === firstStep));
+      return {
+      id: order.id,
+      moNumber: order.moNumber,
+      partCode: order.part.partNumber,
+      partName: order.part.name,
+      weightNetKg: Number(order.part.weightNetKg || 0),
+      weightGrossKg: Number(order.part.weightGrossKg || 0),
+      wipManufacturingOrderId: wipIdByManufacturingOrderId.get(order.id) || null,
+      status: order.status,
+      operations: eligibleOperations.map((operation: any) => ({
+        id: operation.id,
+        stepNumber: operation.stepNumber,
+        operationCode: operation.operation.code,
+        operationName: operation.operation.name,
+        processType: operation.operation.processType,
+        status: operation.status,
+        isFirstOperation: operation.stepNumber === firstStep,
+        plannedMachine: operation.plannedMachine ? `${operation.plannedMachine.code} - ${operation.plannedMachine.name}` : null,
+      })),
+    };
+    }).filter((order: any) => order.operations.length > 0);
+    res.json({ success: true, source: 'POSTGRESQL_MANUFACTURING_ORDERS_AND_READY_OPERATIONS', count: data.length, data });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت گزینه‌های صدور کلاف' });
+  }
+});
+
+apiRouter.get('/inventory/coils', async (req: Request, res: Response) => {
   try {
     const { partId, materialGrade, warehouseId, ownership, packNumber, search } = req.query;
-    let list = [...physicalCoilsStore];
+    let list: PhysicalCoil[];
+    if (isDatabaseUrlConfigured()) {
+      // Read through to PostgreSQL so a server instance never serves an old coil balance
+      // from its process-local cache after another instance posts an issue or return.
+      const prisma = getPrismaClient();
+      const rows = await prisma.physicalCoil.findMany({
+        include: {
+          part: { select: { id: true, partNumber: true, name: true } },
+          material: { select: { grade: true } },
+          warehouse: { select: { id: true, code: true, name: true } },
+          warehouseLocation: { select: { code: true } },
+          contractAllocations: {
+            include: { contract: { select: { id: true, contractNumber: true } } },
+            orderBy: { createdAt: 'asc' },
+          },
+        },
+        orderBy: { receiptDate: 'asc' },
+      });
+      list = rows.map((row: any) => {
+        const appPart = partsStore.find(part => part.code === row.part?.partNumber);
+        return {
+          id: row.id,
+          coilId: row.coilId,
+          coilPackNumber: row.coilPackNumber,
+          partId: appPart?.id || row.partId || '',
+          partCode: row.part?.partNumber || '',
+          partName: row.part?.name || '',
+          materialGrade: row.material?.grade || '',
+          heatNumber: row.heatNumber || '',
+          thicknessMm: Number(row.thicknessMm),
+          widthMm: Number(row.widthMm),
+          originalWeightKg: Number(row.originalWeightKg),
+          remainingWeightKg: Number(row.remainingWeightKg),
+          warehouseId: row.warehouseId,
+          warehouseName: row.warehouse?.name || '',
+          warehouseLocationCode: row.warehouseLocation?.code || '',
+          ownership: row.ownership,
+          qualityStatus: row.qualityStatus,
+          physicalStatus: row.physicalStatus,
+          supplierName: row.supplierName || '',
+          receiptDate: row.receiptDate.toISOString(),
+          allocations: row.contractAllocations.map((allocation: any) => ({
+            contractId: allocation.contractId,
+            contractNumber: allocation.contract?.contractNumber || allocation.contractId,
+            coilId: row.id,
+            allocatedWeightKg: Number(allocation.allocatedWeightKg),
+            ownership: allocation.ownership,
+            notes: allocation.notes || undefined,
+          })),
+        } as PhysicalCoil;
+      });
+    } else {
+      list = [...physicalCoilsStore];
+    }
 
     if (partId && typeof partId === 'string' && partId !== 'ALL') {
       list = list.filter(c => c.partId === partId || c.partCode === partId);
@@ -2838,7 +3375,7 @@ apiRouter.get('/inventory/coils', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/coils', (req: Request, res: Response) => {
+apiRouter.post('/inventory/coils', async (req: Request, res: Response) => {
   try {
     const payload = req.body;
     if (!payload.coilId || !payload.partId || !payload.originalWeightKg || !payload.warehouseId) {
@@ -2875,12 +3412,227 @@ apiRouter.post('/inventory/coils', (req: Request, res: Response) => {
       allocations: payload.allocations || [],
     };
 
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'ثبت کلاف فیزیکی بدون اتصال PostgreSQL مجاز نیست؛ اطلاعات در حافظه موقت ذخیره نخواهد شد.' });
+    }
+
+    const prisma = getPrismaClient();
+    const receiptDocumentNumber = `RCV-CL-${Date.now()}`;
+    const dbCoil = await prisma.$transaction(async (tx: any) => {
+      const dbWarehouse = await tx.warehouse.findFirst({
+        where: { OR: [{ id: payload.warehouseId }, { code: warehouse?.code || payload.warehouseId }] },
+      });
+      if (!dbWarehouse) throw new Error('انبار انتخاب‌شده در اطلاعات پایه PostgreSQL یافت نشد.');
+      const dbPart = await tx.part.findFirst({
+        where: { OR: [{ id: payload.partId }, { partNumber: part?.code || payload.partCode || payload.partId }] },
+        include: { unit: { select: { code: true } } },
+      });
+      if (!dbPart) throw new Error('قطعه یا ماده پایه کلاف در PostgreSQL یافت نشد.');
+      if (dbPart.unit?.code !== 'KG') throw new Error('واحد پایه کالای کلاف باید KG باشد تا وزن و موجودی با یکدیگر مغایرت پیدا نکنند.');
+      const grade = newCoil.materialGrade;
+      const dbMaterial = dbPart.materialId
+        ? await tx.material.findUnique({ where: { id: dbPart.materialId } })
+        : await tx.material.findFirst({ where: { OR: [{ grade }, { code: `MAT-${grade}` }] } });
+      if (!dbMaterial) throw new Error(`ماده با گرید ${grade} در اطلاعات پایه PostgreSQL یافت نشد.`);
+      const dbLocation = newCoil.warehouseLocationCode
+        ? await tx.warehouseLocation.findFirst({ where: { warehouseId: dbWarehouse.id, code: newCoil.warehouseLocationCode } })
+        : null;
+      if (!dbLocation) throw new Error('موقعیت انبار کلاف در اطلاعات پایه PostgreSQL یافت نشد.');
+
+      const allocations = [];
+      let allocatedTotal = 0;
+      for (const allocation of (newCoil.allocations || [])) {
+        const allocatedWeightKg = Number(allocation.allocatedWeightKg);
+        if (!Number.isFinite(allocatedWeightKg) || allocatedWeightKg <= 0) throw new Error('وزن تخصیص قرارداد باید عددی مثبت باشد.');
+        const contract = await tx.materialContract.findFirst({
+          where: { OR: [{ id: allocation.contractId }, { contractNumber: allocation.contractNumber || allocation.contractId }] },
+        });
+        if (!contract) throw new Error(`قرارداد ${allocation.contractNumber || allocation.contractId} در PostgreSQL یافت نشد؛ ثبت کلاف لغو شد.`);
+        const alreadyReceived = Number(contract.receivedWeightKg || 0);
+        if (alreadyReceived + allocatedWeightKg > Number(contract.totalAllocatedWeightKg)) {
+          throw new Error(`وزن دریافتی قرارداد ${contract.contractNumber} از سقف تناژ قرارداد بیشتر می‌شود.`);
+        }
+        allocations.push({ contract, allocatedWeightKg, ownership: allocation.ownership || newCoil.ownership, notes: allocation.notes || null });
+        allocatedTotal += allocatedWeightKg;
+      }
+      if (allocatedTotal > newCoil.originalWeightKg) throw new Error('مجموع تخصیص قراردادها از وزن اولیه کلاف بیشتر است.');
+
+      const supplierContractId = allocations.length === 1 ? allocations[0].contract.id : null;
+      const materialLot = await tx.materialLot.create({
+        data: {
+          lotNumber: newCoil.coilId,
+          materialId: dbMaterial.id,
+          partId: dbPart.id,
+          supplierContractId,
+          heatNumber: newCoil.heatNumber || null,
+          coilSerialNumber: newCoil.coilId,
+          thicknessMm: newCoil.thicknessMm,
+          widthMm: newCoil.widthMm,
+          initialWeightKg: newCoil.originalWeightKg,
+          remainingWeightKg: newCoil.remainingWeightKg,
+          warehouseLocationId: dbLocation.id,
+          receivedDate: new Date(newCoil.receiptDate),
+        },
+      });
+      const created = await tx.physicalCoil.create({
+        data: {
+          id: newCoil.id,
+          coilId: newCoil.coilId,
+          coilPackNumber: newCoil.coilPackNumber,
+          partId: dbPart.id,
+          materialId: dbMaterial.id,
+          materialLotId: materialLot.id,
+          heatNumber: newCoil.heatNumber || null,
+          thicknessMm: newCoil.thicknessMm,
+          widthMm: newCoil.widthMm,
+          originalWeightKg: newCoil.originalWeightKg,
+          remainingWeightKg: newCoil.remainingWeightKg,
+          warehouseId: dbWarehouse.id,
+          warehouseLocationId: dbLocation.id,
+          ownership: newCoil.ownership,
+          qualityStatus: newCoil.qualityStatus,
+          physicalStatus: newCoil.physicalStatus,
+          supplierName: newCoil.supplierName,
+          receiptDate: new Date(newCoil.receiptDate),
+        },
+      });
+
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای ثبت سند رسمی انبار، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+      const receiptDoc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: receiptDocumentNumber,
+          documentType: 'RECEIPT',
+          documentDate: new Date(newCoil.receiptDate),
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: dbWarehouse.id,
+          referenceType: 'SAPCO_COIL',
+          referenceNumber: newCoil.coilPackNumber,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: new Date(),
+          notes: `رسید رسمی کلاف ${newCoil.coilId}؛ پکینگ ${newCoil.coilPackNumber}؛ ذوب ${newCoil.heatNumber || 'ثبت‌نشده'}`,
+        },
+      });
+
+      const segments = allocations.map(row => ({ ...row, contractId: row.contract.id, contractNumber: row.contract.contractNumber }));
+      if (newCoil.originalWeightKg - allocatedTotal > 0) {
+        segments.push({ contract: null, contractId: null, contractNumber: null, allocatedWeightKg: newCoil.originalWeightKg - allocatedTotal, ownership: newCoil.ownership, notes: null });
+      }
+      let lineNumber = 0;
+      for (const segment of segments) {
+        lineNumber += 1;
+        const weight = segment.allocatedWeightKg;
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: receiptDoc.id,
+            lineNumber,
+            partId: dbPart.id,
+            physicalCoilId: created.id,
+            materialLotId: materialLot.id,
+            locationId: dbLocation.id,
+            quantity: weight,
+            unitId: dbPart.unitId,
+            weightKg: weight,
+            ownership: segment.ownership,
+            contractId: segment.contractId,
+            contractNumber: segment.contractNumber,
+            qualityStatus: newCoil.qualityStatus,
+            notes: `رسید کلاف ${newCoil.coilId}؛ قرارداد ${segment.contractNumber || 'بدون تخصیص'}`,
+          },
+        });
+        const transactionNumber = `TRX-COIL-RCV-${Date.now()}-${lineNumber}`;
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber,
+            documentId: receiptDoc.id,
+            documentLineId: line.id,
+            partId: dbPart.id,
+            materialLotId: materialLot.id,
+            physicalCoilId: created.id,
+            warehouseId: dbWarehouse.id,
+            locationId: dbLocation.id,
+            transactionType: 'INBOUND',
+            quantity: weight,
+            quantitySigned: weight,
+            unitId: dbPart.unitId,
+            weightKg: weight,
+            weightKgSigned: weight,
+            ownership: segment.ownership,
+            contractId: segment.contractId,
+            contractNumber: segment.contractNumber,
+            qualityStatus: newCoil.qualityStatus,
+            transactionDate: new Date(newCoil.receiptDate),
+            createdByUserId: user.id,
+          },
+        });
+        const balance = await tx.stockBalance.findFirst({
+          where: {
+            partId: dbPart.id, warehouseId: dbWarehouse.id, locationId: dbLocation.id,
+            materialLotId: materialLot.id, physicalCoilId: created.id, ownership: segment.ownership,
+            contractId: segment.contractId, qualityStatus: newCoil.qualityStatus,
+          },
+        });
+        if (balance) {
+          await tx.stockBalance.update({
+            where: { id: balance.id },
+            data: {
+              quantityOnHand: { increment: weight }, quantityAvailable: { increment: weight },
+              weightKgOnHand: { increment: weight }, weightKgAvailable: { increment: weight },
+              lastTransactionAt: new Date(newCoil.receiptDate),
+            },
+          });
+        } else {
+          await tx.stockBalance.create({
+            data: {
+              partId: dbPart.id, warehouseId: dbWarehouse.id, locationId: dbLocation.id,
+              materialLotId: materialLot.id, physicalCoilId: created.id,
+              quantityOnHand: weight, quantityReserved: 0, quantityAvailable: weight,
+              weightKgOnHand: weight, weightKgReserved: 0, weightKgAvailable: weight,
+              ownership: segment.ownership, contractId: segment.contractId,
+              contractNumber: segment.contractNumber, qualityStatus: newCoil.qualityStatus,
+              lastTransactionAt: new Date(newCoil.receiptDate),
+            },
+          });
+        }
+        if (segment.contractId) {
+          await tx.contractCoilAllocation.create({
+            data: {
+              contractId: segment.contractId,
+              coilId: created.id,
+              allocatedWeightKg: weight,
+              ownership: segment.ownership,
+              sourceDocumentId: receiptDoc.id,
+              notes: segment.notes,
+            },
+          });
+          await tx.materialContract.update({
+            where: { id: segment.contractId },
+            data: { receivedWeightKg: { increment: weight } },
+          });
+          await tx.materialContractTransaction.create({
+            data: {
+              contractId: segment.contractId,
+              lotId: materialLot.id,
+              transactionType: 'RECEIPT',
+              weightKg: weight,
+              waybillNumber: payload.waybillNumber || null,
+              receiptDate: new Date(newCoil.receiptDate),
+              notes: `رسید کلاف ${newCoil.coilId}؛ پکینگ ${newCoil.coilPackNumber}`,
+            },
+          });
+        }
+      }
+      return created;
+    });
+
     physicalCoilsStore.unshift(newCoil);
 
     // Also create a corresponding posted RECEIPT_RAW_MATERIAL document in inventoryDocsStore so StockInquiryView and IssueFormModal see the new coil immediately
     const autoDoc: InventoryDocument = {
       id: `DOC-COIL-${Date.now()}`,
-      documentNumber: `RCV-CL-${Math.floor(10000 + Math.random() * 90000)}`,
+      documentNumber: receiptDocumentNumber,
       documentType: 'RECEIPT_RAW_MATERIAL',
       documentDate: newCoil.receiptDate || new Date().toISOString(),
       documentStatus: 'CONFIRMED',
@@ -2939,257 +3691,1029 @@ apiRouter.post('/inventory/coils', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/inventory/coils/:id/issue', (req: Request, res: Response) => {
+apiRouter.post('/inventory/coils/:id/issue', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'صدور کلاف بدون اتصال PostgreSQL مجاز نیست.' });
     const { id } = req.params;
-    const { issuedWeightKg, moId, moOperationId, scrappedKg, user, multiParts } = req.body;
-
-    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
+    const { issuedWeightKg, moId, moOperationId, scrappedKg, multiParts, initialInputQuantityPcs, wipManufacturingOrderId } = req.body;
+    const issueRequestKey = String(req.body.issueRequestKey || req.header('Idempotency-Key') || '').trim();
+    if (issueRequestKey.length < 8 || issueRequestKey.length > 160) {
+      return res.status(400).json({ success: false, error: 'شناسه یکتای درخواست حواله (Idempotency-Key) معتبر نیست؛ فرم را تازه باز کنید.' });
     }
+    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
 
-    const issueUser = {
-      uid: user?.uid || 'USR-OP',
-      displayName: user?.displayName || 'اپراتور خط پرس',
-    };
-
-    // Support Multi-Part issuance scenario (e.g., 1 coil issued for 2 distinct parts/MOs)
-    if (Array.isArray(multiParts) && multiParts.length > 0) {
-      const totalMultiKg = multiParts.reduce((sum: number, p: any) => sum + (Number(p.issuedWeightKg) || 0), 0);
-      if (totalMultiKg <= 0 || totalMultiKg > coil.remainingWeightKg) {
-        return res.status(400).json({
-          success: false,
-          error: `خطای وزن: مجموع وزن‌های تخصیص چندقطعه‌ای (${totalMultiKg} kg) نامعتبر است یا از مانده کلاف (${coil.remainingWeightKg} kg) بیشتر است.`,
-        });
+    const requested = Array.isArray(multiParts) && multiParts.length > 0
+      ? (() => {
+          const totalGoodWeight = multiParts.reduce((sum: number, row: any) => sum + (Number(row.issuedWeightKg) || 0), 0);
+          const totalMultiScrap = Number(scrappedKg) || 0;
+          return multiParts.map((p: any) => {
+            const goodWeight = Number(p.issuedWeightKg) || 0;
+            const scrapShare = totalGoodWeight > 0 ? totalMultiScrap * (goodWeight / totalGoodWeight) : 0;
+            return {
+              manufacturingOrderRef: p.moId || moId || null,
+              operationRef: p.moOperationId || moOperationId || null,
+              partRef: p.partId || p.partCode || null,
+              issuedWeightKg: goodWeight + scrapShare,
+              varianceWeightKg: scrapShare,
+              initialInputQuantityPcs: 0,
+              wipManufacturingOrderId: null,
+              notes: String(p.notes || p.partName || ''),
+            };
+          });
+        })()
+      : [{
+          manufacturingOrderRef: moId || null,
+          operationRef: moOperationId || null,
+          partRef: req.body.partId || req.body.partCode || null,
+          issuedWeightKg: Number(issuedWeightKg) || 0,
+          varianceWeightKg: Number(scrappedKg) || 0,
+          initialInputQuantityPcs: Number(initialInputQuantityPcs) || 0,
+          wipManufacturingOrderId: typeof wipManufacturingOrderId === 'string' ? wipManufacturingOrderId : null,
+          notes: '',
+        }];
+    if (requested.some((row: any) => !Number.isFinite(row.issuedWeightKg) || row.issuedWeightKg <= 0 || !Number.isFinite(row.varianceWeightKg) || row.varianceWeightKg < 0 || row.varianceWeightKg > row.issuedWeightKg)) {
+      return res.status(400).json({ success: false, error: 'وزن حواله باید مثبت و وزن ضایعات باید بین صفر و وزن حواله باشد.' });
+    }
+    const totalIssuedKg = requested.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
+    const prisma = getPrismaClient();
+    const issuedAt = new Date();
+    const issueRequestFingerprint = JSON.stringify({
+      coilId: id,
+      requested: requested.map((row: any) => ({
+        manufacturingOrderRef: row.manufacturingOrderRef,
+        operationRef: row.operationRef,
+        partRef: row.partRef,
+        issuedWeightKg: row.issuedWeightKg,
+        varianceWeightKg: row.varianceWeightKg,
+        initialInputQuantityPcs: row.initialInputQuantityPcs,
+        wipManufacturingOrderId: row.wipManufacturingOrderId,
+      })),
+    });
+    const priorIssue = await prisma.inventoryDocument.findUnique({
+      where: { issueRequestKey },
+      include: { coilIssueReturnRecords: true },
+    });
+    if (priorIssue) {
+      if (priorIssue.issueRequestFingerprint !== issueRequestFingerprint) {
+        return res.status(409).json({ success: false, error: 'این شناسه درخواست قبلاً برای اطلاعات متفاوتی استفاده شده است؛ فرم را ببندید و حواله جدیدی آغاز کنید.' });
       }
-
-      const createdRecords: CoilIssueReturnRecord[] = [];
-      for (const p of multiParts) {
-        const partWeight = Number(p.issuedWeightKg) || 0;
-        if (partWeight <= 0) continue;
-        const partObj = partsStore.find(pt => pt.id === p.partId || pt.code === p.partCode);
-        const partLabel = partObj ? `${partObj.name} (${partObj.code})` : (p.partName || p.partCode || 'قطعه نامشخص');
-        const opLabel = p.moOperationId || 'ایستگاه ۱: برش و کشش';
-
-        const rec: CoilIssueReturnRecord = {
-          id: `CIR-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          coilId: coil.id,
-          manufacturingOrderId: p.moId || 'MO-DEMO',
-          documentNumber: `ISS-${coil.coilId}-${p.moId || 'P'}`,
-          issuedWeightKg: partWeight,
-          consumedWeightKg: 0,
-          returnedWeightKg: 0,
-          outstandingWeightKg: partWeight,
-          varianceWeightKg: Number(p.scrappedKg) || 0,
-          scrappedKg: Number(p.scrappedKg) || 0,
-          status: 'ISSUED',
-          issuedAt: new Date().toISOString(),
-          notes: `صدور ${partWeight} kg جهت قطعه «${partLabel}» در سفارش «${p.moId || 'MO'}» (${opLabel})`,
-        };
-        coilIssueRecordsStore.unshift(rec);
-        createdRecords.push(rec);
-      }
-
-      coil.remainingWeightKg = Math.round((coil.remainingWeightKg - totalMultiKg) * 1000) / 1000;
-      coil.physicalStatus = coil.remainingWeightKg === 0 ? 'CONSUMED' : 'PARTIALLY_ISSUED';
-      coil.updatedAt = new Date().toISOString();
-
+      const priorCoil = await prisma.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!priorCoil) throw new Error('سند حواله قبلی ثبت شده اما کلاف متناظر یافت نشد.');
       return res.json({
-        success: true,
-        message: `تعداد ${createdRecords.length} ردیف خروج کلاف برای قطعات مختلف با مجموع وزن ${totalMultiKg} کیلوگرم صادر شد. مانده کلاف: ${coil.remainingWeightKg} کیلوگرم.`,
-        coil,
-        issueRecords: createdRecords,
+        success: true, duplicate: true,
+        message: `این درخواست قبلاً با سند ${priorIssue.documentNumber} ثبت شده است؛ موجودی دوباره کسر نشد. مانده: ${Number(priorCoil.remainingWeightKg)} کیلوگرم.`,
+        coil: { ...coil, remainingWeightKg: Number(priorCoil.remainingWeightKg), physicalStatus: priorCoil.physicalStatus },
+        documentNumber: priorIssue.documentNumber,
+        issueRecords: priorIssue.coilIssueReturnRecords,
+        issueRecord: priorIssue.coilIssueReturnRecords[0] || null,
+        persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
       });
     }
 
-    const result = issuePhysicalCoilPartial(
-      coil,
-      Number(issuedWeightKg),
-      moId || 'MO-DEMO',
-      moOperationId,
-      Number(scrappedKg) || 0,
-      issueUser
-    );
-
-    if (!result.success) {
-      return res.status(400).json({ success: false, error: result.error });
+    for (const request of requested) {
+      if (!request.initialInputQuantityPcs) continue;
+      if (requested.length !== 1 || !Number.isInteger(request.initialInputQuantityPcs) || request.initialInputQuantityPcs <= 0) {
+        throw new Error('تعداد ورودی مرحله اول باید مثبت و برای یک دستور ساخت باشد.');
+      }
+      if (!request.wipManufacturingOrderId) throw new Error('دستور WIP متناظر با دستور ساخت پیدا نشد.');
+      const relationalMo = await prisma.manufacturingOrder.findFirst({
+        where: { OR: [{ id: request.manufacturingOrderRef }, { moNumber: request.manufacturingOrderRef }] },
+        include: { part: { select: { partNumber: true } } },
+      });
+      const wipOrder = manufacturingOrdersStore.find(row => row.id === request.wipManufacturingOrderId);
+      if (!relationalMo || !wipOrder || wipOrder.moNumber !== relationalMo.moNumber || wipOrder.partCode !== relationalMo.part.partNumber) {
+        throw new Error('ارتباط دستور WIP و دستور ساخت معتبر نیست.');
+      }
+      const existingLink = await prisma.wipManufacturingOrderLink.findUnique({ where: { manufacturingOrderId: relationalMo.id } });
+      if (!existingLink) {
+        await linkWipManufacturingOrderToRelational(wipOrder.id, relationalMo.id, 'coil-issue', 'Automatic identity link before first-operation raw-material issue');
+      } else if (existingLink.wipManufacturingOrderId !== wipOrder.id) {
+        throw new Error('دستور ساخت قبلاً به یک دستور WIP دیگر متصل شده است.');
+      }
     }
 
-    if (result.issueRecord) {
-      coilIssueRecordsStore.unshift(result.issueRecord);
+    const persisted = await prisma.$transaction(async (tx: any) => {
+      const existingRequest = await tx.inventoryDocument.findUnique({
+        where: { issueRequestKey },
+        include: { coilIssueReturnRecords: true },
+      });
+      if (existingRequest) {
+        if (existingRequest.issueRequestFingerprint !== issueRequestFingerprint) {
+          throw new Error('این شناسه درخواست قبلاً برای اطلاعات متفاوتی استفاده شده است؛ فرم را ببندید و حواله جدیدی آغاز کنید.');
+        }
+        const existingCoil = await tx.physicalCoil.findUnique({ where: { id: existingRequest.coilIssueReturnRecords[0]?.coilId || '' } });
+        if (!existingCoil) throw new Error('سند حواله تکراری یافت شد اما کلاف متناظر موجود نیست.');
+        return { duplicate: true, coil: existingCoil, records: existingRequest.coilIssueReturnRecords, documentNumber: existingRequest.documentNumber, entries: [], wipInput: null };
+      }
+      const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!dbCoil) throw new Error('کلاف در پایگاه داده عملیاتی وجود ندارد؛ ابتدا رسید کلاف را ثبت کنید.');
+      if (['QUARANTINE', 'QUALITY_BLOCKED', 'REJECTED'].includes(dbCoil.qualityStatus) || dbCoil.physicalStatus === 'BLOCKED') {
+        throw new Error('کلاف قرنطینه یا مسدود است و امکان صدور ندارد.');
+      }
+      const availableKg = Number(dbCoil.remainingWeightKg);
+      if (totalIssuedKg > availableKg) throw new Error(`وزن حواله (${totalIssuedKg}) از مانده کلاف (${availableKg}) بیشتر است.`);
+
+      const balances = await tx.stockBalance.findMany({
+        where: { physicalCoilId: dbCoil.id, qualityStatus: 'AVAILABLE', weightKgAvailable: { gt: 0 } },
+        orderBy: [{ contractNumber: 'asc' }, { updatedAt: 'asc' }],
+      });
+      const totalAvailable = balances.reduce((sum: number, row: any) => sum + Number(row.weightKgAvailable), 0);
+      if (totalAvailable < totalIssuedKg) {
+        throw new Error(`مانده قابل صدور در کاردکس این کلاف (${totalAvailable} kg) با وزن درخواستی (${totalIssuedKg} kg) کافی نیست؛ ابتدا موجودی کلاف را تطبیق دهید.`);
+      }
+      const dbPart = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+      if (!dbPart) throw new Error('کالای پایه کلاف در PostgreSQL یافت نشد.');
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای صدور سند رسمی حواله، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+
+      const docNumber = `ISS-COIL-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      const doc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: docNumber,
+          documentType: 'ISSUE',
+          documentDate: issuedAt,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: dbCoil.warehouseId,
+          referenceType: 'MANUFACTURING_ORDER',
+          referenceNumber: requested.map((row: any) => row.manufacturingOrderRef).filter(Boolean).join(', ') || dbCoil.coilId,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: issuedAt,
+          issueRequestKey,
+          issueRequestFingerprint,
+          notes: `حواله ${totalIssuedKg} کیلوگرم از کلاف ${dbCoil.coilId} به تولید`,
+        },
+      });
+
+      const balanceRemainders = balances.map((balance: any) => ({ balance, initialOnHand: Number(balance.weightKgOnHand), initialAvailable: Number(balance.weightKgAvailable), remaining: Number(balance.weightKgAvailable) }));
+      const entries: any[] = [];
+      let postedWipInput: any = null;
+      let lineNumber = 0;
+      const createdRecords: any[] = [];
+      for (const request of requested) {
+        let requestRemaining = request.issuedWeightKg;
+        if (!request.manufacturingOrderRef) throw new Error('برای صدور کلاف، شماره دستور ساخت (MO) الزامی است.');
+        const mo = await tx.manufacturingOrder.findFirst({
+          where: { OR: [{ id: request.manufacturingOrderRef }, { moNumber: request.manufacturingOrderRef }] },
+        });
+        if (!mo) throw new Error(`دستور ساخت «${request.manufacturingOrderRef}» در PostgreSQL یافت نشد؛ حواله بدون اتصال به دستور ساخت مجاز نیست.`);
+        const targetPart = request.partRef
+          ? await tx.part.findFirst({ where: { OR: [{ id: request.partRef }, { partNumber: request.partRef }] } })
+          : await tx.part.findUnique({ where: { id: mo.partId } });
+        if (!targetPart) throw new Error(`قطعه مقصد دستور ساخت ${mo.moNumber} در اطلاعات پایه یافت نشد.`);
+        if (!request.operationRef) throw new Error(`برای ردیابی مرحله مصرف، انتخاب عملیات تولید دستور ${mo.moNumber} الزامی است.`);
+        const operation = await tx.productionOperation.findUnique({ where: { id: request.operationRef } });
+        if (!operation || operation.manufacturingOrderId !== mo.id) {
+          throw new Error(`عملیات «${request.operationRef}» به دستور ساخت ${mo.moNumber} تعلق ندارد یا یافت نشد.`);
+        }
+        const firstOperationForOrder = await tx.productionOperation.findFirst({
+          where: { manufacturingOrderId: mo.id },
+          orderBy: { stepNumber: 'asc' },
+          select: { id: true },
+        });
+        if (requested.length === 1 && firstOperationForOrder?.id === operation.id && (!Number.isFinite(request.initialInputQuantityPcs) || request.initialInputQuantityPcs <= 0)) {
+          throw new Error('برای صدور ورق به اولین مرحله، تعداد قطعات ورودی را بررسی و تأیید کنید.');
+        }
+        if (request.initialInputQuantityPcs > 0) {
+          const firstOperation = await tx.productionOperation.findFirst({
+            where: { manufacturingOrderId: mo.id },
+            orderBy: { stepNumber: 'asc' },
+            select: { id: true },
+          });
+          if (firstOperation?.id !== operation.id) throw new Error('تعداد ورودی اولیه فقط برای اولین عملیات مجاز است.');
+        }
+        if (operation.status === 'COMPLETED' || operation.status === 'SKIPPED') {
+          throw new Error(`عملیات ${operation.stepNumber} دستور ساخت ${mo.moNumber} خاتمه یافته یا رد شده است و دریافت مواد برای آن مجاز نیست.`);
+        }
+        if (operation.status === 'PENDING') {
+          const firstOperation = await tx.productionOperation.findFirst({
+            where: { manufacturingOrderId: mo.id },
+            orderBy: { stepNumber: 'asc' },
+            select: { id: true },
+          });
+          if (firstOperation?.id !== operation.id) {
+            throw new Error('عملیات انتخاب‌شده هنوز منتظر تکمیل مرحله قبلی است.');
+          }
+        }
+
+        let wipPostingContext: any = null;
+        if (request.initialInputQuantityPcs > 0) {
+          const link = await tx.wipManufacturingOrderLink.findUnique({
+            where: { manufacturingOrderId: mo.id },
+            include: { operationLinks: true },
+          });
+          const operationLink = link?.operationLinks.find((row: any) => row.productionOperationId === operation.id);
+          if (!link || link.wipManufacturingOrderId !== request.wipManufacturingOrderId || !operationLink) {
+            throw new Error('ارتباط هویتی عملیات WIP معتبر نیست.');
+          }
+          const snapshot = await tx.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+          if (snapshot && getProductionWipSnapshotVersion() !== snapshot.version) {
+            throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: وضعیت WIP این سرور قدیمی است؛ اطلاعات را تازه‌سازی و حواله را دوباره ثبت کنید.');
+          }
+          const snapshotPayload: any = snapshot?.payload;
+          const wipOrder = snapshotPayload?.manufacturingOrders?.find((row: any) => row.id === link.wipManufacturingOrderId);
+          const wipOperation = wipOrder?.operations?.find((row: any) => row.id === operationLink.wipOperationId);
+          if (!snapshot || !wipOrder || !wipOperation || wipOperation.sequence !== 1) {
+            throw new Error('مرحله اول در تصویر پایدار WIP یافت نشد.');
+          }
+          const locationRows = await tx.warehouseLocation.findMany({ where: { code: wipOperation.warehouseLocation, active: true } });
+          if (locationRows.length !== 1) throw new Error(`محل مرحله اول «${wipOperation.warehouseLocation}» باید دقیقاً یک موقعیت فعال داشته باشد.`);
+          const pcsUnit = await tx.unitOfMeasure.findUnique({ where: { id: targetPart.unitId } });
+          if (!pcsUnit || pcsUnit.code !== 'PCS') throw new Error('واحد قطعه دستور ساخت باید PCS باشد.');
+          const netWeightPerPiece = Number(targetPart.weightNetKg || 0);
+          if (!Number.isFinite(netWeightPerPiece) || netWeightPerPiece <= 0) throw new Error('وزن خالص مهندسی قطعه باید تعریف شود.');
+          const totalNetMaterialKg = request.issuedWeightKg - request.varianceWeightKg;
+          if (totalNetMaterialKg <= 0) throw new Error('وزن خالص مواد پس از کسر افت باید مثبت باشد.');
+          wipPostingContext = {
+            snapshotPayload, snapshotVersion: snapshot!.version, wipOrder, wipOperation, location: locationRows[0], netWeightPerPiece, totalNetMaterialKg,
+            wipManufacturingOrderId: link.wipManufacturingOrderId,
+            wipOperationId: operationLink.wipOperationId,
+          };
+        }
+
+        let remainingPcsToAllocate = request.initialInputQuantityPcs;
+        for (const source of balanceRemainders) {
+          if (requestRemaining <= 0) break;
+          if (source.remaining <= 0) continue;
+          const weight = Math.min(source.remaining, requestRemaining);
+          if (weight <= 0) continue;
+          source.remaining = Math.round((source.remaining - weight) * 1000) / 1000;
+          requestRemaining = Math.round((requestRemaining - weight) * 1000) / 1000;
+          lineNumber += 1;
+          const balance = source.balance;
+          const nextOnHand = source.initialOnHand - (source.initialAvailable - source.remaining);
+          const balanceUpdate = await tx.stockBalance.updateMany({
+            where: { id: balance.id, weightKgAvailable: { gte: weight }, weightKgOnHand: { gte: weight } },
+            data: {
+              quantityOnHand: { decrement: weight },
+              quantityAvailable: { decrement: weight },
+              weightKgOnHand: { decrement: weight },
+              weightKgAvailable: { decrement: weight },
+              lastTransactionAt: issuedAt,
+            },
+          });
+          if (balanceUpdate.count !== 1) throw new Error('مانده کاردکس قرارداد هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی کنید.');
+          const line = await tx.inventoryDocumentLine.create({
+            data: {
+              documentId: doc.id,
+              lineNumber,
+              partId: dbPart.id,
+              physicalCoilId: dbCoil.id,
+              productionOperationId: operation.id,
+              materialLotId: dbCoil.materialLotId,
+              locationId: balance.locationId,
+              quantity: weight,
+              unitId: dbPart.unitId,
+              weightKg: weight,
+              ownership: balance.ownership,
+              contractId: balance.contractId,
+              contractNumber: balance.contractNumber,
+              qualityStatus: balance.qualityStatus,
+              notes: `مصرف کلاف ${dbCoil.coilId} برای ${mo?.moNumber || request.manufacturingOrderRef || 'سفارش ثبت‌نشده'}`,
+            },
+          });
+          await tx.inventoryTransaction.create({
+            data: {
+              transactionNumber: `TRX-COIL-ISS-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+              documentId: doc.id,
+              documentLineId: line.id,
+              partId: dbPart.id,
+              materialLotId: dbCoil.materialLotId,
+              physicalCoilId: dbCoil.id,
+              productionOperationId: operation.id,
+              warehouseId: dbCoil.warehouseId,
+              locationId: balance.locationId,
+              transactionType: 'OUTBOUND',
+              quantity: weight,
+              quantitySigned: -weight,
+              unitId: dbPart.unitId,
+              weightKg: weight,
+              weightKgSigned: -weight,
+              ownership: balance.ownership,
+              contractId: balance.contractId,
+              contractNumber: balance.contractNumber,
+              qualityStatus: balance.qualityStatus,
+              balanceAfter: nextOnHand,
+              balanceKgAfter: nextOnHand,
+              transactionDate: issuedAt,
+              createdByUserId: user.id,
+              manufacturingOrderId: mo?.id || null,
+            },
+          });
+          const varianceForSegment = request.issuedWeightKg > 0 ? request.varianceWeightKg * (weight / request.issuedWeightKg) : 0;
+          const record = await tx.coilIssueReturnRecord.create({
+            data: {
+              id: `CIR-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+              coilId: dbCoil.id,
+              inventoryDocumentId: doc.id,
+              contractId: balance.contractId,
+              partId: targetPart.id,
+              productionOperationId: operation?.id || null,
+              manufacturingOrderId: mo?.id || null,
+              documentNumber: docNumber,
+              issuedWeightKg: weight,
+              consumedWeightKg: 0,
+              returnedWeightKg: 0,
+              outstandingWeightKg: Math.max(0, weight - varianceForSegment),
+              varianceWeightKg: varianceForSegment,
+              status: weight - varianceForSegment <= 0.001 ? 'CONSUMED' : 'ISSUED',
+              issuedAt,
+              notes: request.notes || `حواله ${weight} کیلوگرم به ${mo?.moNumber || request.manufacturingOrderRef || 'خط تولید'}؛ قرارداد ${balance.contractNumber || 'بدون تخصیص'}`,
+            },
+          });
+          createdRecords.push(record);
+          if (wipPostingContext) {
+            const netMaterialKg = Math.max(0, weight - varianceForSegment);
+            const proportionalPcs = Math.floor(request.initialInputQuantityPcs * (netMaterialKg / wipPostingContext.totalNetMaterialKg));
+            const pcsShare = requestRemaining <= 0.001
+              ? remainingPcsToAllocate
+              : Math.min(remainingPcsToAllocate, proportionalPcs);
+            remainingPcsToAllocate -= pcsShare;
+            if (pcsShare > 0) {
+              const wipWeightKg = pcsShare * wipPostingContext.netWeightPerPiece;
+              const wipIdentity = {
+                partId: targetPart.id, warehouseId: wipPostingContext.location.warehouseId,
+                locationId: wipPostingContext.location.id, materialLotId: dbCoil.materialLotId,
+                physicalCoilId: dbCoil.id, ownership: balance.ownership, contractId: balance.contractId,
+                contractNumber: balance.contractNumber, qualityStatus: 'AVAILABLE',
+              };
+              const existingWipBalance = await tx.stockBalance.findFirst({ where: wipIdentity });
+              const wipBalanceAfter = Number(existingWipBalance?.quantityOnHand || 0) + pcsShare;
+              if (existingWipBalance) {
+                await tx.stockBalance.update({
+                  where: { id: existingWipBalance.id },
+                  data: {
+                    quantityOnHand: { increment: pcsShare }, quantityAvailable: { increment: pcsShare },
+                    weightKgOnHand: { increment: wipWeightKg }, weightKgAvailable: { increment: wipWeightKg },
+                    lastTransactionAt: issuedAt,
+                  },
+                });
+              } else {
+                await tx.stockBalance.create({
+                  data: { ...wipIdentity, quantityOnHand: pcsShare, quantityReserved: 0, quantityAvailable: pcsShare,
+                    weightKgOnHand: wipWeightKg, weightKgReserved: 0, weightKgAvailable: wipWeightKg, lastTransactionAt: issuedAt },
+                });
+              }
+              await tx.inventoryTransaction.create({
+                data: {
+                  transactionNumber: `TRX-WIP-INPUT-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+                  partId: targetPart.id, materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+                  productionOperationId: operation.id, warehouseId: wipPostingContext.location.warehouseId,
+                  locationId: wipPostingContext.location.id, transactionType: 'INBOUND',
+                  quantity: pcsShare, quantitySigned: pcsShare, unitId: targetPart.unitId,
+                  weightKg: wipWeightKg, weightKgSigned: wipWeightKg, ownership: balance.ownership,
+                  contractId: balance.contractId, contractNumber: balance.contractNumber, qualityStatus: 'AVAILABLE',
+                  balanceAfter: wipBalanceAfter, balanceKgAfter: wipBalanceAfter * wipPostingContext.netWeightPerPiece,
+                  transactionDate: issuedAt, createdByUserId: user.id, manufacturingOrderId: mo.id,
+                },
+              });
+            }
+          }
+          entries.push({ weight, contractNumber: balance.contractNumber });
+        }
+        if (requestRemaining > 0.001) throw new Error(`موجودی قابل تخصیص برای سفارش ${request.manufacturingOrderRef || 'نامشخص'} کافی نیست.`);
+        if (wipPostingContext) {
+          wipPostingContext.wipOperation.waitingInputQty = Number(wipPostingContext.wipOperation.waitingInputQty || 0) + request.initialInputQuantityPcs;
+          if (wipPostingContext.wipOperation.status === 'PENDING') wipPostingContext.wipOperation.status = 'READY';
+          wipPostingContext.wipOperation.lastActivityAt = issuedAt.toISOString();
+          wipPostingContext.wipOrder.initialInputQuantity = Number(wipPostingContext.wipOrder.initialInputQuantity || 0) + request.initialInputQuantityPcs;
+          wipPostingContext.wipOrder.updatedAt = issuedAt.toISOString();
+          const snapshotUpdate = await tx.wipStateSnapshot.updateMany({
+            where: { id: 'production-wip-state', version: wipPostingContext.snapshotVersion },
+            data: { payload: wipPostingContext.snapshotPayload, version: { increment: 1 } },
+          });
+          if (snapshotUpdate.count !== 1) {
+            throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: یک ثبت دیگر وضعیت WIP را تغییر داده است؛ حواله و تمام گردش‌های انبار لغو شدند.');
+          }
+          postedWipInput = {
+            wipManufacturingOrderId: wipPostingContext.wipManufacturingOrderId,
+            wipOperationId: wipPostingContext.wipOperationId,
+            quantityPcs: request.initialInputQuantityPcs,
+            expectedSnapshotVersion: wipPostingContext.snapshotVersion,
+          };
+        }
+      }
+
+      if (dbCoil.materialLotId) {
+        await tx.materialLot.updateMany({
+          where: { id: dbCoil.materialLotId, remainingWeightKg: { gte: totalIssuedKg } },
+          data: { remainingWeightKg: { decrement: totalIssuedKg } },
+        }).then((result: any) => { if (result.count !== 1) throw new Error('مانده لوت ماده اولیه با مانده کلاف تطبیق ندارد؛ صدور لغو شد.'); });
+      }
+      const coilUpdate = await tx.physicalCoil.updateMany({
+        where: { id: dbCoil.id, remainingWeightKg: { gte: totalIssuedKg }, qualityStatus: 'AVAILABLE', physicalStatus: { not: 'BLOCKED' } },
+        data: {
+          remainingWeightKg: { decrement: totalIssuedKg },
+          physicalStatus: totalIssuedKg === availableKg ? 'CONSUMED' : 'PARTIALLY_ISSUED',
+        },
+      });
+      if (coilUpdate.count !== 1) throw new Error('مانده کلاف هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و دوباره تلاش کنید.');
+      const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
+      return { duplicate: false, coil: updatedCoil, records: createdRecords, documentNumber: docNumber, entries, wipInput: postedWipInput };
+    });
+
+    if (persisted.duplicate) {
+      return res.json({
+        success: true, duplicate: true,
+        message: `این درخواست قبلاً با سند ${persisted.documentNumber} ثبت شده است؛ موجودی دوباره کسر نشد. مانده: ${Number(persisted.coil.remainingWeightKg)} کیلوگرم.`,
+        coil: { ...coil, remainingWeightKg: Number(persisted.coil.remainingWeightKg), physicalStatus: persisted.coil.physicalStatus },
+        documentNumber: persisted.documentNumber,
+        issueRecords: persisted.records,
+        issueRecord: persisted.records[0] || null,
+        persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
+      });
     }
 
+    coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
+    coil.physicalStatus = persisted.coil.physicalStatus;
+    coil.updatedAt = new Date().toISOString();
+    if (persisted.wipInput) {
+      // Reload the committed snapshot instead of incrementing the local cache.
+      // This also reconciles any same-process WIP mutation that committed immediately
+      // after this transaction and before the HTTP handler resumed.
+      await loadProductionWipState();
+    }
+    const issueRecords: CoilIssueReturnRecord[] = persisted.records.map((row: any) => ({
+      ...row,
+      issuedWeightKg: Number(row.issuedWeightKg),
+      consumedWeightKg: Number(row.consumedWeightKg),
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: Number(row.outstandingWeightKg),
+      varianceWeightKg: Number(row.varianceWeightKg),
+      scrappedKg: Number(row.varianceWeightKg),
+      issuedAt: row.issuedAt.toISOString(),
+    }));
+    coilIssueRecordsStore.unshift(...issueRecords);
     res.json({
       success: true,
-      message: `مقدار ${issuedWeightKg} کیلوگرم از کلاف «${coil.coilId}» جهت خط تولید صادر شد. مانده کلاف: ${coil.remainingWeightKg} کیلوگرم.`,
+      message: `حواله ${totalIssuedKg} کیلوگرم از کلاف «${coil.coilId}» در سند ${persisted.documentNumber} ثبت شد. مانده: ${coil.remainingWeightKg} کیلوگرم.`,
       coil,
-      issueRecord: result.issueRecord,
+      issueRecords,
+      issueRecord: issueRecords[0],
+      documentNumber: persisted.documentNumber,
+      persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در صدور جزئی کلاف',
-    });
+    res.status(409).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک حواله کلاف' });
   }
 });
 
 /**
  * 16.13.1. Coil Lifecycle & Genealogy Traceability Report
  */
-apiRouter.get('/inventory/coils/:id/genealogy', (req: Request, res: Response) => {
+apiRouter.get('/inventory/coils/:id/genealogy', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'شناسنامه ردیابی کلاف فقط از پایگاه داده عملیاتی قابل ارائه است.' });
+    }
     const { id } = req.params;
-    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id || c.coilPackNumber === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
-    }
-
-    // Find all issue and return records
-    const records = coilIssueRecordsStore.filter(r => r.coilId === coil.id || r.coilId === coil.coilId);
-
-    // Find related inventory documents mentioning this coil or heat
-    const relatedDocs = inventoryDocsStore.filter(doc =>
-      doc.lines.some(l => l.lotNumber === coil.coilPackNumber || l.lotNumber === coil.coilId || l.heatNumber === coil.heatNumber)
-    );
-
-    // Calculate consumption statistics
-    const totalIssuedKg = records.reduce((sum, r) => sum + (r.issuedWeightKg || 0), 0);
-    const totalReturnedKg = records.reduce((sum, r) => sum + (r.returnedWeightKg || 0), 0);
-    const totalScrappedKg = records.reduce((sum, r) => sum + (r.scrappedKg || 0), 0);
-    const netConsumedKg = Math.max(0, totalIssuedKg - totalReturnedKg);
-
-    let lifecycleStatus: 'FULL' | 'PARTIAL' | 'CONSUMED' = 'FULL';
-    if (coil.remainingWeightKg <= 0) {
-      lifecycleStatus = 'CONSUMED';
-    } else if (coil.remainingWeightKg < coil.originalWeightKg) {
-      lifecycleStatus = 'PARTIAL';
-    }
-
-    res.json({
-      success: true,
-      data: {
-        coil,
-        lifecycleStatus,
-        metrics: {
-          originalWeightKg: coil.originalWeightKg,
-          remainingWeightKg: coil.remainingWeightKg,
-          totalIssuedKg,
-          totalReturnedKg,
-          totalScrappedKg,
-          netConsumedKg,
-          utilizationPercent: coil.originalWeightKg > 0 ? Math.round((netConsumedKg / coil.originalWeightKg) * 100) : 0,
+    const prisma = getPrismaClient();
+    const coil = await prisma.physicalCoil.findFirst({
+      where: { OR: [{ id }, { coilId: id }, { coilPackNumber: id }] },
+      include: {
+        material: { select: { code: true, name: true, grade: true, standard: true } },
+        part: { select: { partNumber: true, name: true } },
+        warehouse: { select: { code: true, name: true } },
+        warehouseLocation: { select: { code: true } },
+        contractAllocations: {
+          include: { contract: { select: { id: true, contractNumber: true, title: true, status: true } } },
+          orderBy: { createdAt: 'asc' },
         },
-        records,
-        relatedDocs,
-        allocations: coil.allocations || [],
+        issueReturnRecords: {
+          include: {
+            inventoryDocument: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } },
+            productionOperation: { include: { operation: { select: { code: true, name: true } }, plannedMachine: { select: { code: true, name: true } } } },
+          },
+          orderBy: [{ issuedAt: 'asc' }, { createdAt: 'asc' }],
+        },
+        inventoryTransactions: {
+          include: {
+            document: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } },
+            productionOperation: { include: { operation: { select: { code: true, name: true } }, plannedMachine: { select: { code: true, name: true } } } },
+          },
+          orderBy: [{ transactionDate: 'asc' }],
+        },
+        inventoryDocumentLines: {
+          include: { document: { select: { id: true, documentNumber: true, documentType: true, documentDate: true, referenceNumber: true } } },
+          orderBy: [{ lineNumber: 'asc' }],
+        },
       },
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در استخراج شناسنامه و ردگیری کلاف',
-    });
-  }
-});
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی در PostgreSQL یافت نشد.' });
 
-apiRouter.post('/inventory/coils/:id/return', (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    const { returnedRemnantWeightKg, warehouseId, locationCode, notes, user } = req.body;
-
-    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
-    }
-
-    const returnUser = {
-      uid: user?.uid || 'USR-OP',
-      displayName: user?.displayName || 'انباردار مواد اولیه',
-    };
-
-    const result = returnPhysicalCoilPartial(
-      coil,
-      Number(returnedRemnantWeightKg),
-      warehouseId || coil.warehouseId,
-      locationCode || coil.warehouseLocationCode,
-      notes || 'برگشت مازاد یا ته کلاف از خط تولید به انبار',
-      returnUser
-    );
-
-    if (!result.success) {
-      return res.status(400).json({ success: false, error: result.error });
-    }
-
-    if (result.returnRecord) {
-      coilIssueRecordsStore.unshift(result.returnRecord);
-    }
-
-    res.json({
-      success: true,
-      message: `ته‌کلاف / مازاد به وزن ${returnedRemnantWeightKg} کیلوگرم با حفظ پکینگ اصلی (${coil.coilPackNumber}) به انبار برگشت داده شد. مانده جدید کلاف: ${coil.remainingWeightKg} کیلوگرم.`,
-      coil,
-      returnRecord: result.returnRecord,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در برگشت ته‌کلاف به انبار',
-    });
-  }
-});
-
-apiRouter.post('/inventory/coils/:id/allocate', (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    const { allocations } = req.body;
-
-    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
-    if (!coil) {
-      return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
-    }
-
-    if (!Array.isArray(allocations) || allocations.length === 0) {
-      return res.status(400).json({ success: false, error: 'لیست تخصیص قراردادها مشخص نشده است.' });
-    }
-
-    const totalAllocated = allocations.reduce((sum: number, a: any) => sum + Number(a.allocatedWeightKg || 0), 0);
-    if (totalAllocated > coil.originalWeightKg) {
-      return res.status(400).json({
-        success: false,
-        error: `مجموع وزن تخصیص داده شده (${totalAllocated} kg) بیشتر از وزن فیزیکی کلاف (${coil.originalWeightKg} kg) است.`,
-      });
-    }
-
-    coil.allocations = allocations.map((a: any) => ({
-      contractId: a.contractId,
-      contractNumber: a.contractNumber || a.contractId,
-      coilId: coil.id,
-      allocatedWeightKg: Number(a.allocatedWeightKg),
-      ownership: a.ownership || coil.ownership,
+    const records = coil.issueReturnRecords.map((row: any) => ({
+      ...row,
+      issuedWeightKg: Number(row.issuedWeightKg),
+      consumedWeightKg: Number(row.consumedWeightKg),
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: Number(row.outstandingWeightKg),
+      varianceWeightKg: Number(row.varianceWeightKg),
+    }));
+    const totalIssuedKg = records.reduce((sum: number, row: any) => sum + row.issuedWeightKg, 0);
+    const issueEvents = records.filter((row: any) => row.issuedWeightKg > 0);
+    const returnEvents = records.filter((row: any) => row.issuedWeightKg <= 0 && row.returnedWeightKg > 0);
+    const totalReturnedKg = returnEvents.reduce((sum: number, row: any) => sum + row.returnedWeightKg, 0);
+    const totalConsumedKg = issueEvents.reduce((sum: number, row: any) => sum + row.consumedWeightKg, 0);
+    const totalVarianceKg = issueEvents.reduce((sum: number, row: any) => sum + row.varianceWeightKg, 0);
+    const remainingWeightKg = Number(coil.remainingWeightKg);
+    const originalWeightKg = Number(coil.originalWeightKg);
+    const relatedDocumentsMap = new Map<string, any>();
+    for (const row of coil.issueReturnRecords) if (row.inventoryDocument) relatedDocumentsMap.set(row.inventoryDocument.id, row.inventoryDocument);
+    for (const row of coil.inventoryTransactions) if (row.document) relatedDocumentsMap.set(row.document.id, row.document);
+    for (const row of coil.inventoryDocumentLines) if (row.document) relatedDocumentsMap.set(row.document.id, row.document);
+    const relatedDocuments = [...relatedDocumentsMap.values()].sort((a: any, b: any) => a.documentDate.getTime() - b.documentDate.getTime());
+    const ledgerTransactions = coil.inventoryTransactions.map((tx: any) => ({
+      transactionNumber: tx.transactionNumber,
+      documentNumber: tx.document?.documentNumber || tx.transactionNumber,
+      transactionType: tx.transactionType,
+      quantitySigned: Number(tx.quantitySigned),
+      weightKgSigned: Number(tx.weightKgSigned),
+      contractNumber: tx.contractNumber,
+      transactionDate: tx.transactionDate.toISOString(),
+      operationStep: tx.productionOperation?.stepNumber || null,
+      operationName: tx.productionOperation?.operation?.name || null,
+      plannedMachine: tx.productionOperation?.plannedMachine ? `${tx.productionOperation.plannedMachine.code} - ${tx.productionOperation.plannedMachine.name}` : null,
+    }));
+    const allocations = coil.contractAllocations.map((row: any) => ({
+      id: row.id,
+      contractId: row.contractId,
+      contractNumber: row.contract.contractNumber,
+      contractTitle: row.contract.title,
+      contractStatus: row.contract.status,
+      allocatedWeightKg: Number(row.allocatedWeightKg),
+      ownership: row.ownership,
+      sourceDocumentId: row.sourceDocumentId,
+      notes: row.notes,
     }));
 
     res.json({
       success: true,
-      message: `تخصیص چندقراردادی کلاف شماره «${coil.coilId}» به‌روزرسانی شد.`,
-      coil,
+      source: 'POSTGRESQL_PHYSICAL_COIL_GENEALOGY',
+      data: {
+        coil: {
+          ...coil,
+          originalWeightKg,
+          remainingWeightKg,
+          thicknessMm: Number(coil.thicknessMm),
+          widthMm: Number(coil.widthMm),
+          warehouseName: coil.warehouse?.name,
+          warehouseCode: coil.warehouse?.code,
+          warehouseLocationCode: coil.warehouseLocation?.code,
+          materialGrade: coil.material?.grade,
+          partCode: coil.part?.partNumber,
+          partName: coil.part?.name,
+        },
+        lifecycleStatus: remainingWeightKg <= 0 ? 'CONSUMED' : remainingWeightKg < originalWeightKg ? 'PARTIAL' : 'FULL',
+        metrics: {
+          originalWeightKg,
+          remainingWeightKg,
+          totalIssuedKg,
+          totalReturnedKg,
+          totalConsumedKg,
+          totalVarianceKg,
+          outstandingAtProductionKg: issueEvents.reduce((sum: number, row: any) => sum + row.outstandingWeightKg, 0),
+          utilizationPercent: originalWeightKg > 0 ? Math.round(((totalConsumedKg + totalVarianceKg) / originalWeightKg) * 10000) / 100 : 0,
+        },
+        records,
+        allocations,
+        relatedDocuments: [],
+        traceabilityLimitations: ['پیوند مستقیم رکورد کلاف با سند رسید و تراکنش کاردکس هنوز در مدل داده برقرار نشده است.'],
+      },
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در به‌روزرسانی تخصیص قراردادهای کلاف',
-    });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در استخراج شناسنامه ردیابی کلاف' });
   }
 });
 
-/**
+apiRouter.post('/inventory/coils/:id/return', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'برگشت ته‌کلاف بدون اتصال PostgreSQL مجاز نیست.' });
+    const { id } = req.params;
+    const returnedKg = Number(req.body.returnedRemnantWeightKg);
+    const { warehouseId, locationCode, notes } = req.body;
+    if (!Number.isFinite(returnedKg) || returnedKg <= 0) return res.status(400).json({ success: false, error: 'وزن برگشتی باید عددی مثبت باشد.' });
+    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
+
+    const prisma = getPrismaClient();
+    const returnedAt = new Date();
+    const persisted = await prisma.$transaction(async (tx: any) => {
+      const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد.');
+      const openIssues = await tx.coilIssueReturnRecord.findMany({
+        where: { coilId: dbCoil.id, issuedWeightKg: { gt: 0 }, outstandingWeightKg: { gt: 0 } },
+        include: { contract: true },
+        orderBy: [{ issuedAt: 'asc' }, { id: 'asc' }],
+      });
+      const outstandingTotal = openIssues.reduce((sum: number, row: any) => sum + Number(row.outstandingWeightKg), 0);
+      if (returnedKg > outstandingTotal) {
+        throw new Error(`وزن برگشتی (${returnedKg} kg) از مانده حواله‌های باز پای خط (${outstandingTotal} kg) بیشتر است.`);
+      }
+      const targetWarehouse = warehouseId
+        ? await tx.warehouse.findFirst({ where: { OR: [{ id: warehouseId }, { code: warehouseId }] } })
+        : await tx.warehouse.findUnique({ where: { id: dbCoil.warehouseId } });
+      if (!targetWarehouse) throw new Error('انبار مقصد برگشت در اطلاعات پایه PostgreSQL یافت نشد.');
+      const targetLocationCode = locationCode || (targetWarehouse.id === dbCoil.warehouseId ? null : null);
+      const targetLocation = targetLocationCode
+        ? await tx.warehouseLocation.findFirst({ where: { warehouseId: targetWarehouse.id, code: targetLocationCode } })
+        : targetWarehouse.id === dbCoil.warehouseId && dbCoil.warehouseLocationId
+          ? await tx.warehouseLocation.findUnique({ where: { id: dbCoil.warehouseLocationId } })
+          : null;
+      if (targetLocationCode && !targetLocation) throw new Error('موقعیت مقصد برگشت در انبار انتخاب‌شده یافت نشد.');
+      if (targetWarehouse.id !== dbCoil.warehouseId && !targetLocation) throw new Error('برای برگشت به انبار دیگر، تعیین موقعیت مقصد الزامی است.');
+
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای ثبت سند رسمی برگشت، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+      const docNumber = `RET-COIL-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      const doc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: docNumber,
+          documentType: 'RETURN',
+          documentDate: returnedAt,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: targetWarehouse.id,
+          referenceType: 'MANUFACTURING_ORDER',
+          referenceNumber: dbCoil.coilId,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: returnedAt,
+          notes: notes || `برگشت ${returnedKg} کیلوگرم ته‌کلاف ${dbCoil.coilId} از خط تولید`,
+        },
+      });
+
+      let remainingToApply = returnedKg;
+      let lineNumber = 0;
+      const returnRecords: any[] = [];
+      for (const issue of openIssues) {
+        if (remainingToApply <= 0.001) break;
+        const outstanding = Number(issue.outstandingWeightKg);
+        const applied = Math.min(outstanding, remainingToApply);
+        const nextOutstanding = Math.max(0, Math.round((outstanding - applied) * 1000) / 1000);
+        // Guard each open issue row atomically. A stale read must never overwrite
+        // a newer outstanding balance when two remnant returns arrive together.
+        const issueUpdate = await tx.coilIssueReturnRecord.updateMany({
+          where: {
+            id: issue.id,
+            outstandingWeightKg: { gte: applied },
+          },
+          data: {
+            returnedWeightKg: { increment: applied },
+            outstandingWeightKg: { decrement: applied },
+            status: nextOutstanding === 0 ? 'FULLY_RETURNED' : 'PARTIALLY_RETURNED',
+            returnedAt,
+          },
+        });
+        if (issueUpdate.count !== 1) {
+          throw new Error('مانده حواله هم‌زمان تغییر کرده است؛ اطلاعات را تازه‌سازی و برگشت را دوباره ثبت کنید.');
+        }
+        remainingToApply = Math.round((remainingToApply - applied) * 1000) / 1000;
+        lineNumber += 1;
+
+        const contractId = issue.contractId || null;
+        const contractNumber = issue.contract?.contractNumber || null;
+        const existingBalance = await tx.stockBalance.findFirst({
+          where: {
+            partId: dbCoil.partId, warehouseId: targetWarehouse.id,
+            locationId: targetLocation?.id || null, materialLotId: dbCoil.materialLotId,
+            physicalCoilId: dbCoil.id, ownership: dbCoil.ownership,
+            contractId, qualityStatus: 'AVAILABLE',
+          },
+        });
+        if (existingBalance) {
+          await tx.stockBalance.update({
+            where: { id: existingBalance.id },
+            data: {
+              quantityOnHand: { increment: applied }, quantityAvailable: { increment: applied },
+              weightKgOnHand: { increment: applied }, weightKgAvailable: { increment: applied },
+              lastTransactionAt: returnedAt,
+            },
+          });
+        } else {
+          await tx.stockBalance.create({
+            data: {
+              partId: dbCoil.partId, warehouseId: targetWarehouse.id,
+              locationId: targetLocation?.id || null, materialLotId: dbCoil.materialLotId,
+              physicalCoilId: dbCoil.id, quantityOnHand: applied, quantityReserved: 0,
+              quantityAvailable: applied, weightKgOnHand: applied, weightKgReserved: 0,
+              weightKgAvailable: applied, ownership: dbCoil.ownership,
+              contractId, contractNumber, qualityStatus: 'AVAILABLE', lastTransactionAt: returnedAt,
+            },
+          });
+        }
+        const dbPart = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+        if (!dbPart) throw new Error('کالای پایه کلاف یافت نشد.');
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: doc.id, lineNumber, partId: dbCoil.partId,
+            physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
+            locationId: targetLocation?.id || null, quantity: applied,
+            productionOperationId: issue.productionOperationId || null,
+            unitId: dbPart.unitId, weightKg: applied, ownership: dbCoil.ownership,
+            contractId, contractNumber, qualityStatus: 'AVAILABLE',
+            notes: `برگشت ته‌کلاف ${dbCoil.coilId}؛ حواله مبدا ${issue.documentNumber}`,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TRX-COIL-RET-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
+            materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+            warehouseId: targetWarehouse.id, locationId: targetLocation?.id || null,
+            productionOperationId: issue.productionOperationId || null,
+            transactionType: 'INBOUND', quantity: applied, quantitySigned: applied,
+            unitId: dbPart.unitId, weightKg: applied, weightKgSigned: applied,
+            ownership: dbCoil.ownership, contractId, contractNumber,
+            qualityStatus: 'AVAILABLE', transactionDate: returnedAt,
+            createdByUserId: user.id, manufacturingOrderId: issue.manufacturingOrderId || null,
+          },
+        });
+        const returnRecord = await tx.coilIssueReturnRecord.create({
+          data: {
+            id: `CRR-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            coilId: dbCoil.id, inventoryDocumentId: doc.id, contractId,
+            partId: issue.partId || dbCoil.partId,
+            productionOperationId: issue.productionOperationId || null,
+            manufacturingOrderId: issue.manufacturingOrderId || null,
+            documentNumber: docNumber, issuedWeightKg: 0, consumedWeightKg: 0,
+            returnedWeightKg: applied, outstandingWeightKg: 0, varianceWeightKg: 0,
+            status: 'FULLY_RETURNED', issuedAt: returnedAt, returnedAt,
+            notes: notes || `برگشت ${applied} کیلوگرم از حواله ${issue.documentNumber}`,
+          },
+        });
+        returnRecords.push(returnRecord);
+      }
+      if (remainingToApply > 0.001) throw new Error('مقدار برگشتی به‌طور کامل به حواله‌های باز تخصیص داده نشد.');
+
+      await tx.physicalCoil.update({
+        where: { id: dbCoil.id },
+        data: {
+          remainingWeightKg: { increment: returnedKg },
+          warehouseId: targetWarehouse.id,
+          warehouseLocationId: targetLocation?.id || null,
+          physicalStatus: 'AVAILABLE',
+        },
+      });
+      if (dbCoil.materialLotId) {
+        await tx.materialLot.update({
+          where: { id: dbCoil.materialLotId },
+          data: {
+            remainingWeightKg: { increment: returnedKg },
+            warehouseLocationId: targetLocation?.id || null,
+          },
+        });
+      }
+      const updatedCoil = await tx.physicalCoil.findUnique({ where: { id: dbCoil.id } });
+      return { coil: updatedCoil, records: returnRecords, documentNumber: docNumber };
+    }, { isolationLevel: 'Serializable' });
+
+    coil.remainingWeightKg = Number(persisted.coil.remainingWeightKg);
+    coil.warehouseId = persisted.coil.warehouseId;
+    coil.warehouseLocationCode = locationCode || coil.warehouseLocationCode;
+    coil.physicalStatus = persisted.coil.physicalStatus;
+    coil.updatedAt = new Date().toISOString();
+    const returnRecords: CoilIssueReturnRecord[] = persisted.records.map((row: any) => ({
+      ...row,
+      issuedWeightKg: 0, consumedWeightKg: 0,
+      returnedWeightKg: Number(row.returnedWeightKg),
+      outstandingWeightKg: 0, varianceWeightKg: 0, scrappedKg: 0,
+      issuedAt: row.issuedAt.toISOString(),
+      returnedAt: row.returnedAt?.toISOString(),
+    }));
+    coilIssueRecordsStore.unshift(...returnRecords);
+    res.json({
+      success: true,
+      message: `ته‌کلاف ${returnedKg} کیلوگرمی با سند ${persisted.documentNumber} به انبار برگشت و کاردکس به‌روزرسانی شد.`,
+      coil, returnRecords, returnRecord: returnRecords[0],
+      documentNumber: persisted.documentNumber,
+      persistence: 'POSTGRESQL_DOCUMENT_LEDGER_AND_STOCK_BALANCE',
+    });
+  } catch (error) {
+    res.status(409).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت اتمیک برگشت ته‌کلاف' });
+  }
+});
+
+apiRouter.post('/inventory/coils/:id/allocate', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'تخصیص قرارداد کلاف بدون اتصال PostgreSQL مجاز نیست.' });
+    const { id } = req.params;
+    const { allocations } = req.body;
+    if (!Array.isArray(allocations) || allocations.length === 0) {
+      return res.status(400).json({ success: false, error: 'حداقل یک تخصیص قرارداد لازم است.' });
+    }
+    const normalized = allocations.map((row: any) => ({
+      contractId: String(row.contractId || ''),
+      contractNumber: String(row.contractNumber || row.contractId || ''),
+      allocatedWeightKg: Number(row.allocatedWeightKg),
+      ownership: String(row.ownership || ''),
+      notes: row.notes ? String(row.notes) : null,
+    }));
+    if (normalized.some((row: any) => !row.contractId || !Number.isFinite(row.allocatedWeightKg) || row.allocatedWeightKg <= 0)) {
+      return res.status(400).json({ success: false, error: 'شناسه قرارداد و وزن مثبت برای تمام ردیف‌های تخصیص الزامی است.' });
+    }
+    const coil = physicalCoilsStore.find(c => c.id === id || c.coilId === id);
+    if (!coil) return res.status(404).json({ success: false, error: 'کلاف فیزیکی مورد نظر یافت نشد.' });
+    const totalAllocated = normalized.reduce((sum: number, row: any) => sum + row.allocatedWeightKg, 0);
+    if (totalAllocated > coil.originalWeightKg) {
+      return res.status(400).json({ success: false, error: 'مجموع تخصیص از وزن اولیه کلاف بیشتر است.' });
+    }
+
+    const prisma = getPrismaClient();
+    const persisted = await prisma.$transaction(async (tx: any) => {
+      const dbCoil = await tx.physicalCoil.findFirst({ where: { OR: [{ id }, { coilId: id }] } });
+      if (!dbCoil) throw new Error('کلاف در PostgreSQL یافت نشد؛ ابتدا رسید کلاف را ثبت کنید.');
+      if (!dbCoil.partId) throw new Error('کالای پایه کلاف در اطلاعات PostgreSQL تعریف نشده است.');
+      if (Math.abs(Number(dbCoil.remainingWeightKg) - Number(dbCoil.originalWeightKg)) > 0.001) {
+        throw new Error('تخصیص مجدد قرارداد پس از صدور یا تغییر وزن کلاف مجاز نیست؛ تخصیص باید پیش از اولین حواله انجام شود.');
+      }
+      const priorIssues = await tx.coilIssueReturnRecord.count({ where: { coilId: dbCoil.id, issuedWeightKg: { gt: 0 } } });
+      if (priorIssues > 0) throw new Error('پس از ثبت حواله تولید، تغییر قراردادهای تخصیص‌یافته مجاز نیست.');
+      const oldBalances = await tx.stockBalance.findMany({ where: { physicalCoilId: dbCoil.id } });
+      if (!oldBalances.length) throw new Error('مانده تفکیک‌شده کلاف در کاردکس یافت نشد؛ ابتدا رسید/موجودی کلاف را تطبیق دهید.');
+      if (oldBalances.some((row: any) => row.qualityStatus !== 'AVAILABLE' || Number(row.weightKgReserved) > 0 || Number(row.quantityReserved) > 0)) {
+        throw new Error('تا زمانی که کلاف دارای موجودی رزروشده یا مسدود است، تغییر تخصیص قرارداد مجاز نیست.');
+      }
+      const oldBalanceTotal = oldBalances.reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      if (Math.abs(oldBalanceTotal - Number(dbCoil.remainingWeightKg)) > 0.001) {
+        throw new Error('جمع مانده‌های کاردکس با وزن باقیمانده کلاف تطبیق ندارد؛ تغییر تخصیص لغو شد.');
+      }
+
+      const resolved: any[] = [];
+      for (const row of normalized) {
+        const contract = await tx.materialContract.findFirst({
+          where: { OR: [{ id: row.contractId }, { contractNumber: row.contractNumber }] },
+        });
+        if (!contract) throw new Error(`قرارداد «${row.contractNumber}» در PostgreSQL یافت نشد.`);
+        if (contract.materialId !== dbCoil.materialId) throw new Error(`گرید ماده قرارداد ${contract.contractNumber} با گرید کلاف یکسان نیست.`);
+        const otherAllocations = await tx.contractCoilAllocation.aggregate({
+          where: { contractId: contract.id, coilId: { not: dbCoil.id } },
+          _sum: { allocatedWeightKg: true },
+        });
+        const alreadyAllocated = Number(otherAllocations._sum.allocatedWeightKg || 0);
+        if (alreadyAllocated + row.allocatedWeightKg > Number(contract.totalAllocatedWeightKg)) {
+          throw new Error(`تخصیص قرارداد ${contract.contractNumber} از سقف تناژ قرارداد بیشتر می‌شود.`);
+        }
+        resolved.push({ ...row, contractId: contract.id, contractNumber: contract.contractNumber, ownership: dbCoil.ownership });
+      }
+      const duplicateContracts = new Set<string>();
+      for (const row of resolved) {
+        if (duplicateContracts.has(row.contractId)) throw new Error('برای هر قرارداد فقط یک ردیف تخصیص ثبت کنید.');
+        duplicateContracts.add(row.contractId);
+      }
+      const unallocatedWeight = Number(dbCoil.remainingWeightKg) - totalAllocated;
+      const targetSegments = [...resolved];
+      if (unallocatedWeight > 0.001) {
+        targetSegments.push({
+          contractId: null,
+          contractNumber: null,
+          allocatedWeightKg: unallocatedWeight,
+          ownership: dbCoil.ownership,
+          notes: 'بخش تخصیص‌نیافته کلاف',
+        });
+      }
+
+      const part = await tx.part.findUnique({ where: { id: dbCoil.partId } });
+      if (!part) throw new Error('کالای پایه کلاف یافت نشد.');
+      const user = await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) throw new Error('برای ثبت سند اصلاح تخصیص، حداقل یک کاربر فعال در PostgreSQL لازم است.');
+      const docNumber = `ADJ-COIL-ALLOC-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      const doc = await tx.inventoryDocument.create({
+        data: {
+          documentNumber: docNumber,
+          documentType: 'COUNT_ADJUSTMENT',
+          documentDate: new Date(),
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: dbCoil.warehouseId,
+          referenceType: 'SAPCO_COIL',
+          referenceNumber: dbCoil.coilId,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: new Date(),
+          notes: `اصلاح تخصیص قراردادهای کلاف ${dbCoil.coilId}`,
+        },
+      });
+
+      let lineNumber = 0;
+      for (const old of oldBalances) {
+        lineNumber += 1;
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: doc.id, lineNumber, partId: dbCoil.partId,
+            physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
+            locationId: old.locationId, quantity: Number(old.weightKgOnHand),
+            unitId: part.unitId,
+            weightKg: Number(old.weightKgOnHand), ownership: old.ownership,
+            contractId: old.contractId, contractNumber: old.contractNumber,
+            qualityStatus: old.qualityStatus,
+            notes: `خروج اصلاحی از تخصیص قبلی ${old.contractNumber || 'بدون قرارداد'}`,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TRX-COIL-ALLOC-OUT-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
+            materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+            warehouseId: dbCoil.warehouseId, locationId: old.locationId,
+            transactionType: 'ADJUSTMENT_NEG', quantity: Number(old.weightKgOnHand),
+            quantitySigned: -Number(old.weightKgOnHand), unitId: line.unitId,
+            weightKg: Number(old.weightKgOnHand), weightKgSigned: -Number(old.weightKgOnHand),
+            ownership: old.ownership, contractId: old.contractId, contractNumber: old.contractNumber,
+            qualityStatus: old.qualityStatus, transactionDate: new Date(), createdByUserId: user.id,
+          },
+        });
+      }
+
+      await tx.stockBalance.deleteMany({ where: { physicalCoilId: dbCoil.id } });
+      await tx.contractCoilAllocation.deleteMany({ where: { coilId: dbCoil.id } });
+      for (const segment of targetSegments) {
+        lineNumber += 1;
+        const weight = segment.allocatedWeightKg;
+        const line = await tx.inventoryDocumentLine.create({
+          data: {
+            documentId: doc.id, lineNumber, partId: dbCoil.partId,
+            physicalCoilId: dbCoil.id, materialLotId: dbCoil.materialLotId,
+            locationId: dbCoil.warehouseLocationId, quantity: weight,
+            unitId: part.unitId, weightKg: weight, ownership: segment.ownership,
+            contractId: segment.contractId, contractNumber: segment.contractNumber,
+            qualityStatus: 'AVAILABLE',
+            notes: `ورود اصلاحی به تخصیص ${segment.contractNumber || 'بدون قرارداد'}`,
+          },
+        });
+        await tx.inventoryTransaction.create({
+          data: {
+            transactionNumber: `TRX-COIL-ALLOC-IN-${Date.now()}-${lineNumber}-${Math.floor(Math.random() * 10000)}`,
+            documentId: doc.id, documentLineId: line.id, partId: dbCoil.partId,
+            materialLotId: dbCoil.materialLotId, physicalCoilId: dbCoil.id,
+            warehouseId: dbCoil.warehouseId, locationId: dbCoil.warehouseLocationId,
+            transactionType: 'ADJUSTMENT_POS', quantity: weight, quantitySigned: weight,
+            unitId: part.unitId, weightKg: weight, weightKgSigned: weight,
+            ownership: segment.ownership, contractId: segment.contractId,
+            contractNumber: segment.contractNumber, qualityStatus: 'AVAILABLE',
+            balanceAfter: weight, balanceKgAfter: weight,
+            transactionDate: new Date(), createdByUserId: user.id,
+          },
+        });
+        await tx.stockBalance.create({
+          data: {
+            partId: dbCoil.partId, warehouseId: dbCoil.warehouseId,
+            locationId: dbCoil.warehouseLocationId, materialLotId: dbCoil.materialLotId,
+            physicalCoilId: dbCoil.id, quantityOnHand: weight, quantityReserved: 0,
+            quantityAvailable: weight, weightKgOnHand: weight, weightKgReserved: 0,
+            weightKgAvailable: weight, ownership: segment.ownership,
+            contractId: segment.contractId, contractNumber: segment.contractNumber,
+            qualityStatus: 'AVAILABLE', lastTransactionAt: new Date(),
+          },
+        });
+        if (segment.contractId) {
+          await tx.contractCoilAllocation.create({
+            data: {
+              contractId: segment.contractId, coilId: dbCoil.id,
+              allocatedWeightKg: weight, ownership: segment.ownership,
+              sourceDocumentId: doc.id, notes: segment.notes,
+            },
+          });
+        }
+      }
+      return {
+        documentNumber: docNumber,
+        allocations: targetSegments.filter((row: any) => row.contractId).map((row: any) => ({
+          ...row, coilId: dbCoil.id,
+        })),
+      };
+    });
+
+    coil.allocations = persisted.allocations;
+    coil.updatedAt = new Date().toISOString();
+    res.json({
+      success: true,
+      message: `تخصیص کلاف «${coil.coilId}» با سند اصلاحی ${persisted.documentNumber} در کاردکس و قراردادها ثبت شد.`,
+      coil,
+      allocations: persisted.allocations,
+      documentNumber: persisted.documentNumber,
+      persistence: 'POSTGRESQL_CONTRACT_REALLOCATION_ADJUSTMENT_LEDGER',
+    });
+  } catch (error) {
+    res.status(409).json({ success: false, error: error instanceof Error ? error.message : 'خطا در ثبت تخصیص قراردادهای کلاف' });
+  }
+});
+
 /**
  * 16.13b. Atomic Operation Execution & Multi-Tier BOM Backflush Engine
  * Automatically deducts consumed raw materials / fasteners / WIP sub-assemblies
  * and posts official WIP or Finished Goods receipts with full Heat/Coil traceability.
  */
-apiRouter.post('/production/execute-op-backflush', (req: Request, res: Response) => {
+apiRouter.post('/production/execute-op-backflush', async (req: Request, res: Response) => {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(409).json({
+        success: false,
+        error: 'اجرای Backflush فعلاً به نسبت‌های ثابت نمونه متکی است و تا زمان اتصال به BOM تأییدشده و ردیابی واقعی کویل در محیط عملیاتی غیرفعال است.',
+      });
+    }
+
     const {
       orderCode = 'MO-ECU-01',
       partId,
@@ -3558,6 +5082,7 @@ apiRouter.post('/production/execute-op-backflush', (req: Request, res: Response)
     }
 
     const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
+    await persistInventoryAppState();
 
     res.json({
       success: true,
@@ -3696,7 +5221,7 @@ apiRouter.get('/traceability/full-chain', (_req: Request, res: Response) => {
 /**
  * 16.14. Customizable Inventory & ERP Reports (Including 3-Tier Stock, End-to-End Traceability & BOM Backflush)
  */
-apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
+apiRouter.get('/inventory/custom-reports', async (req: Request, res: Response) => {
   try {
     const {
       reportType = 'THREE_TIER_STOCK',
@@ -3711,6 +5236,160 @@ apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
       contractId,
       search,
     } = req.query;
+
+    if (['THREE_TIER_STOCK', 'END_TO_END_TRACEABILITY', 'BOM_BACKFLUSH_VARIANCE'].includes(String(reportType))) {
+      if (!isDatabaseUrlConfigured()) {
+        return res.status(503).json({ success: false, error: 'این گزارش فقط از داده‌های عملیاتی PostgreSQL قابل تولید است.' });
+      }
+      const prisma = getPrismaClient();
+      const searchStr = search ? String(search).toLowerCase().trim() : '';
+
+      if (reportType === 'THREE_TIER_STOCK') {
+        const parts = await prisma.part.findMany({
+          where: { active: true },
+          include: {
+            unit: { select: { code: true, symbol: true } },
+            stockBalances: true,
+            transactions: {
+              where: { postingStatus: 'POSTED', transactionType: { in: ['INBOUND', 'OUTBOUND'] } },
+              include: { document: { select: { documentNumber: true } } },
+            },
+          },
+          orderBy: [{ category: 'asc' }, { partNumber: 'asc' }],
+        });
+        const rows = parts.map((part: any) => {
+          const onHand = part.stockBalances.reduce((sum: number, row: any) => sum + Number(row.quantityOnHand || 0), 0);
+          const available = part.stockBalances.reduce((sum: number, row: any) => sum + Number(row.quantityAvailable || 0), 0);
+          const entered = part.transactions.filter((tx: any) => tx.transactionType === 'INBOUND').reduce((sum: number, tx: any) => sum + Math.abs(Number(tx.quantitySigned || tx.quantity)), 0);
+          const issued = part.transactions.filter((tx: any) => tx.transactionType === 'OUTBOUND').reduce((sum: number, tx: any) => sum + Math.abs(Number(tx.quantitySigned || tx.quantity)), 0);
+          const docs = [...new Set(part.transactions.map((tx: any) => tx.document?.documentNumber).filter(Boolean))];
+          const tier = part.category === 'RAW_MATERIAL' || part.category === 'CONSUMABLE'
+            ? '۱. مواد اولیه و اتصالات'
+            : part.category === 'WIP_PART' ? '۲. نیمه‌ساخته حین تولید (WIP)' : '۳. محصول نهایی';
+          const row = {
+            tier,
+            partCode: part.partNumber,
+            partName: part.name,
+            unit: part.unit?.code || part.unit?.symbol || '—',
+            totalReceived: Number(entered.toFixed(3)),
+            totalIssued: Number(issued.toFixed(3)),
+            onHand: Number(onHand.toFixed(3)),
+            available: Number(available.toFixed(3)),
+            minStock: Number(part.minSafetyStock || 0),
+            controlStatus: onHand < Number(part.minSafetyStock || 0) ? 'کمتر از نقطه سفارش' : 'موجودی استاندارد و کافی',
+            documents: docs,
+          };
+          return row;
+        }).filter((row: any) => !searchStr || Object.values(row).some(v => String(v).toLowerCase().includes(searchStr)));
+        return res.json({
+          success: true,
+          reportType,
+          source: 'POSTGRESQL_STOCK_BALANCES_AND_INVENTORY_TRANSACTIONS',
+          rowCount: rows.length,
+          columns: ['tier', 'partCode', 'partName', 'unit', 'totalReceived', 'totalIssued', 'onHand', 'available', 'minStock', 'controlStatus', 'documents'],
+          summary: {
+            totalItems: rows.length,
+            rawItems: rows.filter((row: any) => row.tier.startsWith('۱')).length,
+            wipItems: rows.filter((row: any) => row.tier.startsWith('۲')).length,
+            finishedItems: rows.filter((row: any) => row.tier.startsWith('۳')).length,
+          },
+          data: rows,
+        });
+      }
+
+      if (reportType === 'END_TO_END_TRACEABILITY') {
+        const [transactions, coils] = await Promise.all([
+          prisma.inventoryTransaction.findMany({
+            where: { postingStatus: 'POSTED' },
+            include: {
+              document: { select: { documentNumber: true, documentType: true, referenceNumber: true } },
+              part: { select: { partNumber: true, name: true } },
+              materialLot: { select: { lotNumber: true, heatNumber: true, coilSerialNumber: true } },
+              physicalCoil: { select: { coilId: true, coilPackNumber: true, heatNumber: true } },
+              productionOperation: { include: { operation: { select: { code: true, name: true } }, plannedMachine: { select: { code: true, name: true } } } },
+              warehouse: { select: { code: true, name: true } },
+              unit: { select: { code: true, symbol: true } },
+              manufacturingOrder: { select: { moNumber: true } },
+            },
+            orderBy: [{ transactionDate: 'desc' }],
+            take: 10000,
+          }),
+          prisma.coilIssueReturnRecord.findMany({
+            include: {
+              coil: {
+                include: {
+                  material: { select: { grade: true } },
+                  part: { select: { partNumber: true, name: true } },
+                  warehouse: { select: { code: true, name: true } },
+                  contractAllocations: { include: { contract: { select: { contractNumber: true } } } },
+                },
+              },
+            },
+            orderBy: [{ issuedAt: 'desc' }],
+            take: 10000,
+          }),
+        ]);
+        const transactionRows = transactions.map((tx: any) => ({
+          sourceType: 'INVENTORY_TRANSACTION',
+          documentNumber: tx.document?.documentNumber || tx.transactionNumber,
+          documentType: tx.document?.documentType || tx.transactionType,
+          partCode: tx.part?.partNumber || tx.partId,
+          partName: tx.part?.name || '',
+          quantity: Number(tx.quantitySigned ?? tx.quantity),
+          unit: tx.unitId,
+          weightKg: Number(tx.weightKgSigned ?? tx.weightKg),
+          coilNumber: tx.physicalCoil?.coilId || tx.materialLot?.coilSerialNumber || tx.materialLot?.lotNumber || '—',
+          coilPackNumber: tx.physicalCoil?.coilPackNumber || '—',
+          heatNumber: tx.physicalCoil?.heatNumber || tx.materialLot?.heatNumber || '—',
+          manufacturingOrder: tx.manufacturingOrder?.moNumber || tx.manufacturingOrderId || tx.document?.referenceNumber || '—',
+          warehouse: tx.warehouse ? `${tx.warehouse.code} - ${tx.warehouse.name}` : tx.warehouseId,
+          contractNumber: tx.contractNumber || '—',
+          operationStep: tx.productionOperation?.stepNumber || null,
+          operationName: tx.productionOperation?.operation?.name || null,
+          plannedMachine: tx.productionOperation?.plannedMachine ? `${tx.productionOperation.plannedMachine.code} - ${tx.productionOperation.plannedMachine.name}` : '—',
+          date: tx.transactionDate.toISOString(),
+        }));
+        const coilRows = coils.filter((record: any) => !record.inventoryDocumentId).map((record: any) => ({
+          sourceType: 'PHYSICAL_COIL_ISSUE_RETURN',
+          documentNumber: record.documentNumber,
+          documentType: Number(record.issuedWeightKg) > 0 ? 'COIL_ISSUE' : 'COIL_RETURN',
+          partCode: record.coil?.part?.partNumber || '—',
+          partName: record.coil?.part?.name || record.coil?.material?.grade || '',
+          quantity: Number(record.issuedWeightKg) > 0 ? -Number(record.issuedWeightKg) : Number(record.returnedWeightKg),
+          unit: 'KG',
+          weightKg: Number(record.issuedWeightKg) > 0 ? -Number(record.issuedWeightKg) : Number(record.returnedWeightKg),
+          coilNumber: record.coil?.coilId || record.coilId,
+          coilPackNumber: record.coil?.coilPackNumber || '—',
+          heatNumber: record.coil?.heatNumber || '—',
+          manufacturingOrder: record.manufacturingOrderId || '—',
+          warehouse: record.coil?.warehouse ? `${record.coil.warehouse.code} - ${record.coil.warehouse.name}` : '—',
+          contractNumber: record.coil?.contractAllocations?.map((a: any) => a.contract.contractNumber).join(', ') || '—',
+          date: (record.returnedAt || record.issuedAt).toISOString(),
+        }));
+        const rows = [...transactionRows, ...coilRows]
+          .filter((row: any) => !searchStr || Object.values(row).some(v => String(v).toLowerCase().includes(searchStr)))
+          .sort((a: any, b: any) => b.date.localeCompare(a.date))
+          .slice(0, 10000);
+        return res.json({
+          success: true,
+          reportType,
+          source: 'POSTGRESQL_INVENTORY_LEDGER_AND_PHYSICAL_COIL_RECORDS',
+          rowCount: rows.length,
+          truncated: transactions.length === 10000 || coils.length === 10000,
+          columns: ['sourceType', 'documentNumber', 'documentType', 'partCode', 'partName', 'quantity', 'unit', 'weightKg', 'coilNumber', 'coilPackNumber', 'heatNumber', 'manufacturingOrder', 'operationStep', 'operationName', 'plannedMachine', 'warehouse', 'contractNumber', 'date'],
+          summary: { inventoryTransactions: transactions.length, coilIssueReturnRecords: coils.length, totalRows: rows.length },
+          data: rows,
+          limitations: ['پیوند مستقیم فیزیکی کویل با تراکنش کاردکس هنوز برقرار نشده است؛ دو منبع داده در گزارش به‌صورت مجزا و با sourceType مشخص نمایش داده می‌شوند.'],
+        });
+      }
+
+      return res.status(409).json({
+        success: false,
+        reportType,
+        error: 'گزارش انحراف مصرف BOM تا زمان ثبت مصرف واقعی از BOM نسخه‌دار و ارتباط آن با گزارش تولید و تراکنش انبار غیرفعال است؛ داده نمونه یا عدد ساختگی نمایش داده نمی‌شود.',
+        source: 'NOT_AVAILABLE_UNTIL_BOM_BACKFLUSH_IS_RELATIONAL',
+      });
+    }
 
     const { balances } = calculateDetailedStockBalances(inventoryDocsStore, reservationsStore, partsStore);
     const searchStr = search ? String(search).toLowerCase().trim() : '';
@@ -3997,33 +5676,102 @@ apiRouter.get('/inventory/custom-reports', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/inventory/report-configs', (_req: Request, res: Response) => {
-  res.json({ success: true, count: savedReportsStore.length, data: savedReportsStore });
-});
-
-apiRouter.post('/inventory/report-configs', (req: Request, res: Response) => {
+apiRouter.get('/inventory/report-configs', async (_req: Request, res: Response) => {
   try {
-    const payload = req.body;
-    if (!payload.name || !payload.reportType) {
-      return res.status(400).json({ success: false, error: 'نام گزارش و نوع گزارش الزامی است.' });
-    }
-
-    const newConfig: SavedReportConfig = {
-      id: payload.id || `REP-CFG-${Date.now()}`,
-      name: payload.name,
-      reportType: payload.reportType,
-      selectedColumns: payload.selectedColumns || [],
-      groupBy: payload.groupBy || [],
-      filters: payload.filters || {},
-      createdAt: new Date().toISOString(),
-    };
-
-    savedReportsStore.unshift(newConfig);
-    res.status(201).json({ success: true, message: 'پیکربندی گزارش با موفقیت ذخیره شد.', data: newConfig });
-  } catch (error) {
+    const records = await getPrismaClient().savedReportConfig.findMany({
+      orderBy: { updatedAt: 'desc' },
+    });
+    const data: SavedReportConfig[] = records.map(record => ({
+      id: record.id,
+      name: record.name,
+      reportType: record.reportType as SavedReportConfig['reportType'],
+      selectedColumns: Array.isArray(record.selectedColumns) ? record.selectedColumns as string[] : [],
+      groupBy: Array.isArray(record.groupBy) ? record.groupBy as string[] : [],
+      filters: record.filters && typeof record.filters === 'object' && !Array.isArray(record.filters)
+        ? record.filters as Record<string, any>
+        : {},
+      sortBy: record.sortBy || undefined,
+      sortOrder: record.sortOrder === 'desc' ? 'desc' : 'asc',
+      createdAt: record.createdAt.toISOString(),
+    }));
+    res.json({ success: true, count: data.length, data });
+  } catch (err) {
     res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'خطا در ذخیره پیکربندی گزارش',
+      error: err instanceof Error ? err.message : 'خطا در دریافت پیکربندی گزارش‌ها از PostgreSQL',
+    });
+  }
+});
+
+apiRouter.post('/inventory/report-configs', async (req: Request, res: Response) => {
+  try {
+    const payload = req.body || {};
+    const allowedReportTypes = new Set([
+      'COILS_SUMMARY',
+      'COIL_PACK_INQUIRY',
+      'CONTRACT_STOCK',
+      'WAREHOUSE_STOCK',
+      'OWNERSHIP_REPORT',
+      'CUSTOM',
+    ]);
+    if (typeof payload.name !== 'string' || !payload.name.trim() || !allowedReportTypes.has(payload.reportType)) {
+      return res.status(400).json({ success: false, error: 'نام معتبر گزارش و نوع گزارش مجاز الزامی است.' });
+    }
+
+    const id = typeof payload.id === 'string' && payload.id.trim()
+      ? payload.id.trim()
+      : `REP-CFG-${Date.now()}`;
+    const selectedColumns = Array.isArray(payload.selectedColumns)
+      ? payload.selectedColumns.filter((value: unknown): value is string => typeof value === 'string')
+      : [];
+    const groupBy = Array.isArray(payload.groupBy)
+      ? payload.groupBy.filter((value: unknown): value is string => typeof value === 'string')
+      : [];
+    const filters = payload.filters && typeof payload.filters === 'object' && !Array.isArray(payload.filters)
+      ? payload.filters
+      : {};
+    const sortBy = typeof payload.sortBy === 'string' && payload.sortBy.trim() ? payload.sortBy.trim() : null;
+    const sortOrder = payload.sortOrder === 'desc' ? 'desc' : 'asc';
+
+    const record = await getPrismaClient().savedReportConfig.upsert({
+      where: { id },
+      create: {
+        id,
+        name: payload.name.trim(),
+        reportType: payload.reportType,
+        selectedColumns,
+        groupBy,
+        filters,
+        sortBy,
+        sortOrder,
+      },
+      update: {
+        name: payload.name.trim(),
+        reportType: payload.reportType,
+        selectedColumns,
+        groupBy,
+        filters,
+        sortBy,
+        sortOrder,
+      },
+    });
+
+    const data: SavedReportConfig = {
+      id: record.id,
+      name: record.name,
+      reportType: record.reportType as SavedReportConfig['reportType'],
+      selectedColumns,
+      groupBy,
+      filters,
+      sortBy: record.sortBy || undefined,
+      sortOrder: record.sortOrder === 'desc' ? 'desc' : 'asc',
+      createdAt: record.createdAt.toISOString(),
+    };
+    res.status(201).json({ success: true, message: 'پیکربندی گزارش در PostgreSQL ذخیره شد.', data });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err instanceof Error ? err.message : 'خطا در ذخیره پیکربندی گزارش در PostgreSQL',
     });
   }
 });
@@ -4895,9 +6643,9 @@ apiRouter.get('/wip/manufacturing-orders/:id', (req: Request, res: Response) => 
 /**
  * 17.4. Create New Manufacturing Order from Approved Part Routing
  */
-apiRouter.post('/wip/manufacturing-orders', (req: Request, res: Response) => {
+apiRouter.post('/wip/manufacturing-orders', async (req: Request, res: Response) => {
   try {
-    const result = createManufacturingOrder(req.body);
+    const result = await executePersistentWipMutation(() => createManufacturingOrder(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -4913,16 +6661,18 @@ apiRouter.post('/wip/manufacturing-orders', (req: Request, res: Response) => {
 /**
  * 17.5. Register Operation Input (Loading into machine from waiting queue)
  */
-apiRouter.post('/wip/operations/input', (req: Request, res: Response) => {
+apiRouter.post('/wip/operations/input', async (req: Request, res: Response) => {
   try {
-    const result = registerOperationInput(req.body);
+    const result = await executePersistentWipMutation(() => registerOperationInput(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
     res.json({ success: true, message: 'ورودی مرحله با موفقیت ثبت شد و به پای دستگاه منتقل گردید.', data: result.data });
   } catch (error) {
-    res.status(500).json({
+    const conflict = error instanceof Error && error.message.includes('WIP_SNAPSHOT_VERSION_CONFLICT');
+    res.status(conflict ? 409 : 500).json({
       success: false,
+      conflict,
       error: error instanceof Error ? error.message : 'خطا در ثبت ورودی مرحله',
     });
   }
@@ -4931,18 +6681,119 @@ apiRouter.post('/wip/operations/input', (req: Request, res: Response) => {
 /**
  * 17.6. Register Good Production, Scrap, Rework, Rejected Quantities
  */
-apiRouter.post('/wip/operations/production', (req: Request, res: Response) => {
+apiRouter.post('/wip/operations/production', async (req: Request, res: Response) => {
   try {
-    const result = registerOperationProduction(req.body);
+    const body = req.body || {};
+    const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+    const shiftId = typeof body.shiftId === 'string' ? body.shiftId.trim() : '';
+    const createdByUserId = typeof body.createdByUserId === 'string' ? body.createdByUserId.trim() : '';
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 160) {
+      return res.status(400).json({ success: false, error: 'کلید یکتای ثبت (idempotencyKey) با طول ۸ تا ۱۶۰ کاراکتر الزامی است.' });
+    }
+    if (!shiftId || !createdByUserId) {
+      return res.status(400).json({ success: false, error: 'شناسه شیفت (shiftId) و کاربر ثبت‌کننده (createdByUserId) الزامی است.' });
+    }
+
+    const wipMoId = typeof body.moId === 'string' ? body.moId : '';
+    const relationalManufacturingOrderId = typeof body.relationalManufacturingOrderId === 'string'
+      ? body.relationalManufacturingOrderId.trim()
+      : '';
+    const prisma = getPrismaClient();
+    const existingIdentityLink = await prisma.wipManufacturingOrderLink.findUnique({
+      where: { wipManufacturingOrderId: wipMoId },
+    });
+    if (!existingIdentityLink) {
+      if (!relationalManufacturingOrderId) {
+        return res.status(400).json({
+          success: false,
+          error: 'برای اتصال اولیه، انتخاب دستور ساخت متناظر در دیتابیس الزامی است.',
+          inventoryPosted: false,
+        });
+      }
+      await linkWipManufacturingOrderToRelational(wipMoId, relationalManufacturingOrderId, createdByUserId);
+    } else if (relationalManufacturingOrderId && existingIdentityLink.manufacturingOrderId !== relationalManufacturingOrderId) {
+      return res.status(409).json({ success: false, error: 'این دستور WIP قبلاً به دستور ساخت دیگری متصل شده است.', inventoryPosted: false });
+    }
+
+    const previous = await findWipProductionReportByKey(idempotencyKey);
+    if (previous) {
+      return res.json({
+        success: true,
+        duplicate: true,
+        message: 'این گزارش قبلاً ثبت شده است؛ ثبت تکراری انجام نشد.',
+        report: previous,
+        inventoryPosted: true,
+      });
+    }
+
+    let ledgerResult: any;
+    const result = await executePersistentWipMutation(
+      () => registerOperationProduction(body),
+      async (mutationResult) => {
+        if (!mutationResult.success || !mutationResult.data) {
+          throw new Error('WIP production mutation returned no manufacturing order.');
+        }
+        const mo = mutationResult.data;
+        const operationId = typeof body.operationId === 'string' ? body.operationId : '';
+        const operation = mo.operations.find(item => item.id === operationId);
+        if (!operation) throw new Error('WIP operation not found after production registration.');
+        ledgerResult = await postWipProductionAtomically({
+          wipManufacturingOrderId: mo.id,
+          wipOperationId: operation.id,
+          idempotencyKey,
+          machineId: typeof body.relationalMachineId === 'string' ? body.relationalMachineId : (typeof body.machineId === 'string' ? body.machineId : ''),
+          shiftId,
+          createdByUserId,
+          reportDate: typeof body.reportDate === 'string' ? body.reportDate : undefined,
+          notes: typeof body.notes === 'string' ? body.notes : undefined,
+          goodQty: Number(body.goodQty) || 0,
+          scrapQty: Number(body.scrapQty) || 0,
+          reworkQty: Number(body.reworkQty) || 0,
+          rejectedQty: Number(body.rejectedQty) || 0,
+          scrapReason: typeof body.scrapReason === 'string' ? body.scrapReason : undefined,
+          operatorName: typeof body.operatorName === 'string' ? body.operatorName : 'اپراتور',
+          expectedSnapshotVersion: getProductionWipSnapshotVersion(),
+          snapshotPayload: {
+            manufacturingOrders: manufacturingOrdersStore,
+            wipTransfers: wipTransfersStore,
+            productionLogs: productionLogsStore,
+          },
+        });
+        if (ledgerResult?.duplicate) {
+          throw new Error('WIP_IDEMPOTENCY_DUPLICATE');
+        }
+        advanceProductionWipSnapshotVersion(getProductionWipSnapshotVersion());
+      },
+    );
     if (!result.success) {
       return res.status(400).json(result);
     }
-    res.json({ success: true, message: 'تولید مرحله با موفقیت در دفاتر WIP ثبت گردید و آماده انتقال شد.', data: result.data });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت عملکرد تولید مرحله',
+    return res.status(201).json({
+      success: true,
+      duplicate: ledgerResult?.duplicate === true,
+      message: 'گزارش تولید، گردش کاردکس و موجودی به‌صورت اتمیک ثبت شدند؛ انتقال سالم به مرحله بعد خودکار است.',
+      data: result.data,
+      report: ledgerResult?.report,
+      inventoryTransactionCount: ledgerResult?.transactionCount ?? 0,
+      inventoryPosted: true,
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در ثبت اتمیک عملکرد تولید';
+    const key = typeof req.body?.idempotencyKey === 'string' ? req.body.idempotencyKey.trim() : '';
+    if (key) {
+      const previous = await findWipProductionReportByKey(key).catch(() => null);
+      if (previous) {
+        return res.json({
+          success: true,
+          duplicate: true,
+          message: 'این گزارش قبلاً توسط درخواست هم‌زمان دیگری ثبت شده است؛ ثبت تکراری انجام نشد.',
+          report: previous,
+          inventoryPosted: true,
+        });
+      }
+    }
+    const status = /not found|missing|invalid|must |required|insufficient|mismatch|no validated|exactly one|does not match|changed during|conserve/i.test(message) ? 409 : 500;
+    return res.status(status).json({ success: false, error: message, inventoryPosted: false });
   }
 });
 
@@ -4963,9 +6814,9 @@ apiRouter.get('/wip/transfers', (_req: Request, res: Response) => {
 /**
  * 17.8. Create Inter-Operation Transfer
  */
-apiRouter.post('/wip/transfers', (req: Request, res: Response) => {
+apiRouter.post('/wip/transfers', async (req: Request, res: Response) => {
   try {
-    const result = createOperationTransfer(req.body);
+    const result = await executePersistentWipMutation(() => createOperationTransfer(req.body));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -4981,14 +6832,14 @@ apiRouter.post('/wip/transfers', (req: Request, res: Response) => {
 /**
  * 17.9. Approve & Receive Inter-Operation Transfer
  */
-apiRouter.post('/wip/transfers/:id/approve', (req: Request, res: Response) => {
+apiRouter.post('/wip/transfers/:id/approve', async (req: Request, res: Response) => {
   try {
     const { receivedBy, notes } = req.body;
-    const result = approveOperationTransfer({
+    const result = await executePersistentWipMutation(() => approveOperationTransfer({
       transferId: req.params.id,
       receivedBy: receivedBy || 'سرپرست ایستگاه مقصد',
       notes,
-    });
+    }));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -5004,14 +6855,14 @@ apiRouter.post('/wip/transfers/:id/approve', (req: Request, res: Response) => {
 /**
  * 17.10. Reject Inter-Operation Transfer
  */
-apiRouter.post('/wip/transfers/:id/reject', (req: Request, res: Response) => {
+apiRouter.post('/wip/transfers/:id/reject', async (req: Request, res: Response) => {
   try {
     const { rejectedBy, rejectionReason } = req.body;
-    const result = rejectOperationTransfer({
+    const result = await executePersistentWipMutation(() => rejectOperationTransfer({
       transferId: req.params.id,
       rejectedBy: rejectedBy || 'بازرس کنترل کیفیت',
       rejectionReason: rejectionReason || 'مغایرت تعداد یا عدم انطباق کیفی در ورودی',
-    });
+    }));
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -5065,6 +6916,13 @@ apiRouter.get('/wip/logs', (_req: Request, res: Response) => {
  */
 apiRouter.get('/planning/dashboard-metrics', (_req: Request, res: Response) => {
   try {
+    if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLANNING_DASHBOARD_PENDING',
+        error: 'داشبورد برنامه‌ریزی تا تکمیل محاسبات و ذخیره‌سازی relational فعال نیست؛ داده نمونه نمایش داده نمی‌شود.',
+      });
+    }
     const metrics = getPlanningDashboardMetrics();
     res.json({ success: true, data: metrics });
   } catch (error) {
@@ -5078,10 +6936,110 @@ apiRouter.get('/planning/dashboard-metrics', (_req: Request, res: Response) => {
 /**
  * 18.2. Get Multi-Stage Net Requirements (Gross Demand, Available FG, WIP Credit, Material Shortage)
  */
-apiRouter.get('/planning/net-requirements', (_req: Request, res: Response) => {
+apiRouter.get('/planning/read-model', async (_req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'مدل برنامه‌ریزی relational به اتصال PostgreSQL نیاز دارد.' });
+    }
+    const data = await getRelationalPlanningReadModel();
+    return res.json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در بارگذاری مدل relational برنامه‌ریزی',
+    });
+  }
+});
+
+apiRouter.get('/planning/proposals', async (_req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'مدیریت پیشنهادهای برنامه به PostgreSQL نیاز دارد.' });
+    const data = await listRelationalPlanProposals();
+    return res.json({ success: true, count: data.length, source: 'postgresql', data });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت پیشنهادهای برنامه' });
+  }
+});
+
+apiRouter.get('/planning/proposals/:id', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'مدیریت پیشنهادهای برنامه به PostgreSQL نیاز دارد.' });
+    const data = await getRelationalPlanProposal(req.params.id);
+    if (!data) return res.status(404).json({ success: false, error: 'پیشنهاد برنامه یافت نشد.' });
+    return res.json({ success: true, data });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت جزئیات پیشنهاد برنامه' });
+  }
+});
+
+apiRouter.post('/planning/proposals/regenerate', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'تولید پیشنهاد برنامه به PostgreSQL نیاز دارد.' });
+    const data = await createRelationalPlanProposal(typeof req.body?.notes === 'string' ? req.body.notes : undefined);
+    return res.status(201).json({ success: true, message: 'پیشنهاد نسخه ۱ از داده‌های relational ایجاد شد.', data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در تولید پیشنهاد برنامه';
+    return res.status(/وجود ندارد|پوشش می‌دهند|مسیر تولید ناقص|تاییدشده هنوز صادر نشده/i.test(message) ? 409 : 500).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/revise', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'اصلاح پیشنهاد به PostgreSQL نیاز دارد.' });
+    const data = await reviseRelationalPlanProposal(
+      req.params.id,
+      Array.isArray(req.body?.changes) ? req.body.changes : [],
+      typeof req.body?.note === 'string' ? req.body.note : 'اصلاح دستی پیشنهاد برنامه',
+    );
+    return res.status(201).json({ success: true, message: `نسخه ${data.version} به‌صورت پیش‌نویس ایجاد شد.`, data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در اصلاح پیشنهاد برنامه';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 400).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/approve', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'تایید پیشنهاد به PostgreSQL نیاز دارد.' });
+    const approvedBy = typeof req.body?.approvedBy === 'string' && req.body.approvedBy.trim() ? req.body.approvedBy.trim() : 'کاربر تاییدکننده';
+    const data = await approveRelationalPlanProposal(req.params.id, approvedBy);
+    return res.json({ success: true, message: 'پیشنهاد در PostgreSQL تایید شد.', data });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در تایید پیشنهاد';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 409).json({ success: false, error: message });
+  }
+});
+
+apiRouter.post('/planning/proposals/:id/release', async (req: Request, res: Response) => {
+  try {
+    if (!isDatabaseUrlConfigured()) return res.status(409).json({ success: false, code: 'DATABASE_REQUIRED', error: 'صدور برنامه به PostgreSQL نیاز دارد.' });
+    const releasedBy = typeof req.body?.releasedBy === 'string' && req.body.releasedBy.trim() ? req.body.releasedBy.trim() : 'کاربر صادرکننده';
+    const data = await releaseRelationalPlanProposal(req.params.id, releasedBy);
+    return res.status(data.replayed ? 200 : 201).json({
+      success: true,
+      message: data.replayed ? 'این پیشنهاد قبلاً صادر شده است؛ دستورهای ساخت قبلی بازگردانده شدند.' : 'برنامه تولید و دستورهای ساخت به‌صورت تراکنشی صادر شدند.',
+      data,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در صدور برنامه تولید';
+    return res.status(/یافت نشد/i.test(message) ? 404 : 409).json({ success: false, error: message });
+  }
+});
+
+apiRouter.get('/planning/net-requirements', async (_req: Request, res: Response) => {
+  try {
+    if (isDatabaseUrlConfigured()) {
+      const readModel = await getRelationalPlanningReadModel();
+      return res.json({
+        success: true,
+        count: readModel.requirements.length,
+        data: readModel.requirements,
+        source: 'postgresql',
+        generatedAt: readModel.generatedAt,
+      });
+    }
     const requirements = calculateNetRequirements();
-    res.json({ success: true, count: requirements.length, data: requirements });
+    res.json({ success: true, count: requirements.length, data: requirements, source: 'memory-fallback' });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -5094,6 +7052,14 @@ apiRouter.get('/planning/net-requirements', (_req: Request, res: Response) => {
  * 18.3. Get All Proposed Production Plan Suggestions
  */
 apiRouter.get('/planning/suggestions', (_req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     res.json({ success: true, count: planSuggestionsStore.length, data: planSuggestionsStore });
   } catch (error) {
@@ -5108,6 +7074,14 @@ apiRouter.get('/planning/suggestions', (_req: Request, res: Response) => {
  * 18.4. Get Single Suggestion Details
  */
 apiRouter.get('/planning/suggestions/:id', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const suggestion = planSuggestionsStore.find(s => s.id === req.params.id);
     if (!suggestion) {
@@ -5126,6 +7100,14 @@ apiRouter.get('/planning/suggestions/:id', (req: Request, res: Response) => {
  * 18.5. Regenerate Suggestions Based on Fresh Demand and WIP
  */
 apiRouter.post('/planning/suggestions/regenerate', (_req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     planSuggestionsStore.length = 0; // Clear
     const fresh = generateProductionPlanSuggestions();
@@ -5143,6 +7125,14 @@ apiRouter.post('/planning/suggestions/regenerate', (_req: Request, res: Response
  * 18.6. Approve Proposed Plan
  */
 apiRouter.post('/planning/suggestions/:id/approve', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const approvedBy = req.body.approvedBy || 'مهندس حسینی (مدیر تولید)';
     const result = approvePlanSuggestion(req.params.id, approvedBy);
@@ -5160,6 +7150,14 @@ apiRouter.post('/planning/suggestions/:id/approve', (req: Request, res: Response
  * 18.7. Release Approved Plan to Official Manufacturing Order
  */
 apiRouter.post('/planning/suggestions/:id/release-mo', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const releasedBy = req.body.releasedBy || 'مهندس حسینی (مدیر تولید)';
     const result = releasePlanToManufacturingOrder(req.params.id, releasedBy);
@@ -5182,6 +7180,14 @@ apiRouter.post('/planning/suggestions/:id/release-mo', (req: Request, res: Respo
  * 18.8. Revise Plan Operations / Versioning
  */
 apiRouter.post('/planning/suggestions/:id/revise', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const { modifiedOperations, note } = req.body;
     const result = revisePlanVersion(req.params.id, modifiedOperations, note || 'اصلاح دستی تخصیص ماشین‌آلات');
@@ -5199,6 +7205,14 @@ apiRouter.post('/planning/suggestions/:id/revise', (req: Request, res: Response)
  * 18.9. Dynamic Machine Eligibility Evaluation
  */
 apiRouter.post('/planning/evaluate-machine-eligibility', (req: Request, res: Response) => {
+  if (isDatabaseUrlConfigured()) {
+      return res.status(409).json({
+        success: false,
+        code: 'RELATIONAL_PLAN_LIFECYCLE_PENDING',
+        error: 'چرخه پیشنهاد، تأیید و صدور برنامه هنوز به‌طور کامل در PostgreSQL پیاده‌سازی نشده است؛ پیشنهاد نمونه یا حافظه‌ای ارائه نمی‌شود.',
+      });
+    }
+    
   try {
     const candidateMachines = evaluateMachineEligibility(req.body);
     res.json({ success: true, data: candidateMachines });
@@ -5213,9 +7227,93 @@ apiRouter.post('/planning/evaluate-machine-eligibility', (req: Request, res: Res
 /**
  * 18.10. Get Customer Orders
  */
-apiRouter.get('/planning/customer-orders', (_req: Request, res: Response) => {
+function mapRelationalCustomerOrder(row: any): CustomerOrder {
+  const lines = (row.orderLines || []).map((line: any) => {
+    const orderedQuantity = Number(line.orderedQty);
+    const deliveredQuantity = Number(line.deliveredQty);
+    return {
+      id: line.id,
+      orderId: row.id,
+      partId: line.partId,
+      partCode: line.part?.partNumber || '',
+      partName: line.part?.name || '',
+      orderedQuantity,
+      deliveredQuantity,
+      remainingQuantity: Math.max(0, orderedQuantity - deliveredQuantity),
+      dueDate: line.requestedDate.toISOString().slice(0, 10),
+      unitPriceRials: line.unitPrice == null ? undefined : Number(line.unitPrice),
+    };
+  });
+  const status: CustomerOrder['status'] = row.documentStatus === 'CANCELLED'
+    ? 'CANCELLED'
+    : row.documentStatus === 'CLOSED'
+      ? 'FULFILLED'
+      : lines.some((line: any) => line.deliveredQuantity > 0 && line.remainingQuantity > 0)
+        ? 'PARTIALLY_FULFILLED'
+        : 'OPEN';
+  return {
+    id: row.id,
+    orderNumber: row.orderNumber,
+    customerName: row.customer?.name || '',
+    contractNumber: row.customerContractNumber || '',
+    orderDate: row.orderDate.toISOString().slice(0, 10),
+    dueDate: row.requestedDeliveryDate.toISOString().slice(0, 10),
+    priority: Math.min(3, Math.max(1, Number(row.priority) || 2)) as 1 | 2 | 3,
+    status,
+    lines,
+    notes: row.notes || undefined,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+async function resolveRelationalOrderLines(tx: any, inputLines: any[], orderId?: string) {
+  if (!Array.isArray(inputLines) || inputLines.length === 0) {
+    throw new Error('سفارش باید حداقل یک ردیف قطعه داشته باشد.');
+  }
+  const result = [];
+  for (let index = 0; index < inputLines.length; index++) {
+    const line = inputLines[index];
+    const orderedQty = Number(line.orderedQuantity ?? line.orderedQty);
+    const deliveredQty = Number(line.deliveredQuantity ?? line.deliveredQty ?? 0);
+    if (!Number.isFinite(orderedQty) || orderedQty <= 0 || !Number.isFinite(deliveredQty) || deliveredQty < 0 || deliveredQty > orderedQty) {
+      throw new Error(`تعداد سفارش/تحویل در ردیف ${index + 1} معتبر نیست.`);
+    }
+    const partIdentifier = String(line.partId || line.partCode || '').trim();
+    if (!partIdentifier) throw new Error(`قطعه ردیف ${index + 1} مشخص نشده است.`);
+    const part = await tx.part.findFirst({
+      where: { OR: [{ id: partIdentifier }, { partNumber: partIdentifier }], active: true },
+      select: { id: true, partNumber: true },
+    });
+    if (!part) throw new Error(`قطعه «${partIdentifier}» در اطلاعات پایه فعال یافت نشد.`);
+    result.push({
+      partId: part.id,
+      lineNumber: index + 1,
+      orderedQty,
+      deliveredQty,
+      unitPrice: line.unitPriceRials == null ? undefined : Number(line.unitPriceRials),
+      requestedDate: new Date(line.dueDate || line.requestedDate || new Date(Date.now() + 7 * 86400000).toISOString()),
+      status: deliveredQty >= orderedQty ? 'COMPLETED' : deliveredQty > 0 ? 'PARTIALLY_FULFILLED' : 'PENDING',
+    });
+  }
+  return result;
+}
+
+/**
+ * 18.10. Get Customer Orders
+ */
+apiRouter.get('/planning/customer-orders', async (_req: Request, res: Response) => {
   try {
-    res.json({ success: true, count: customerOrdersStore.length, data: customerOrdersStore });
+    if (isDatabaseUrlConfigured()) {
+      const prisma = getPrismaClient();
+      const rows = await prisma.customerOrder.findMany({
+        include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        orderBy: [{ orderDate: 'desc' }, { createdAt: 'desc' }],
+      });
+      const data = rows.map(mapRelationalCustomerOrder);
+      customerOrdersStore.splice(0, customerOrdersStore.length, ...data);
+      return res.json({ success: true, count: data.length, data, source: 'postgresql' });
+    }
+    return res.json({ success: true, count: customerOrdersStore.length, data: customerOrdersStore, source: 'memory-fallback' });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -5227,106 +7325,135 @@ apiRouter.get('/planning/customer-orders', (_req: Request, res: Response) => {
 /**
  * 18.11. Create Customer Order
  */
-apiRouter.post('/planning/customer-orders', (req: Request, res: Response) => {
+apiRouter.post('/planning/customer-orders', async (req: Request, res: Response) => {
   try {
-    const payload = req.body;
+    const payload = req.body || {};
+    const orderNumber = String(payload.orderNumber || '').trim();
+    if (!orderNumber) return res.status(400).json({ success: false, error: 'شماره سفارش مشتری الزامی است.' });
+    const priority = Number(payload.priority ?? 2) as 1 | 2 | 3;
+    if (![1, 2, 3].includes(priority)) return res.status(400).json({ success: false, error: 'اولویت سفارش باید ۱، ۲ یا ۳ باشد.' });
+
+    if (isDatabaseUrlConfigured()) {
+      const prisma = getPrismaClient();
+      const created = await prisma.$transaction(async (tx: any) => {
+        const customerIdentifier = String(payload.customerCode || payload.customerName || 'CUST-SAPCO').trim();
+        const customer = await tx.customer.findFirst({
+          where: { OR: [{ id: customerIdentifier }, { code: customerIdentifier }, { name: customerIdentifier }], active: true },
+        });
+        if (!customer) throw new Error(`مشتری «${customerIdentifier}» در اطلاعات پایه فعال یافت نشد.`);
+        const orderLines = await resolveRelationalOrderLines(tx, payload.lines, undefined);
+        return tx.customerOrder.create({
+          data: {
+            orderNumber,
+            customerId: customer.id,
+            orderDate: new Date(payload.orderDate || new Date().toISOString()),
+            requestedDeliveryDate: new Date(payload.dueDate || new Date(Date.now() + 7 * 86400000).toISOString()),
+            customerContractNumber: payload.contractNumber || null,
+            priority,
+            documentStatus: payload.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED',
+            notes: payload.notes || null,
+            orderLines: { create: orderLines },
+          },
+          include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        });
+      }, { isolationLevel: 'Serializable' });
+      const data = mapRelationalCustomerOrder(created);
+      customerOrdersStore.unshift(data);
+      planSuggestionsStore.length = 0;
+      return res.status(201).json({ success: true, message: 'سفارش مشتری در PostgreSQL ثبت شد.', data, source: 'postgresql' });
+    }
+
     const newOrder: CustomerOrder = {
       id: `ORD-2026-${String(customerOrdersStore.length + 1).padStart(3, '0')}`,
-      orderNumber: payload.orderNumber || `SO-SAPCO-1405-${String(customerOrdersStore.length + 10)}`,
+      orderNumber,
       customerName: payload.customerName || 'ساپکو',
-      contractNumber: payload.contractNumber || 'CNT-SAP-2026-001',
+      contractNumber: payload.contractNumber || '',
       orderDate: payload.orderDate || new Date().toISOString().slice(0, 10),
-      dueDate: payload.dueDate || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10),
-      priority: payload.priority || 2,
-      status: 'OPEN',
+      dueDate: payload.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10),
+      priority,
+      status: payload.status || 'OPEN',
       lines: payload.lines || [],
       notes: payload.notes,
       createdAt: new Date().toISOString(),
     };
-
     customerOrdersStore.unshift(newOrder);
-
-    // Refresh plan suggestions
     planSuggestionsStore.length = 0;
     planSuggestionsStore.push(...generateProductionPlanSuggestions());
-
-    res.status(201).json({ success: true, message: 'سفارش مشتری با موفقیت ثبت شد و نیازمندی‌های تولید به‌روز گردیدند.', data: newOrder });
+    res.status(201).json({ success: true, message: 'سفارش مشتری ثبت شد.', data: newOrder, source: 'memory-fallback' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ثبت سفارش مشتری',
-    });
+    const message = error instanceof Error ? error.message : 'خطا در ثبت سفارش مشتری';
+    const statusCode = (error as any)?.code === 'P2002' ? 409 : (message.includes('یافت نشد') || message.includes('معتبر نیست') || message.includes('الزامی') ? 400 : 500);
+    res.status(statusCode).json({ success: false, error: statusCode === 409 ? 'شماره سفارش مشتری قبلاً ثبت شده است.' : message });
   }
 });
 
 /**
  * 18.12. Update Customer Order (Edit Order, Status & Track Quantity Revisions)
  */
-apiRouter.put('/planning/customer-orders/:id', (req: Request, res: Response) => {
+apiRouter.put('/planning/customer-orders/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const payload = req.body;
+    const payload = req.body || {};
+    if (isDatabaseUrlConfigured()) {
+      const prisma = getPrismaClient();
+      const updated = await prisma.$transaction(async (tx: any) => {
+        const current = await tx.customerOrder.findFirst({
+          where: { OR: [{ id }, { orderNumber: id }] },
+          include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        });
+        if (!current) return null;
+        const data: any = {};
+        if (payload.orderNumber !== undefined) data.orderNumber = String(payload.orderNumber).trim();
+        if (payload.orderDate !== undefined) data.orderDate = new Date(payload.orderDate);
+        if (payload.dueDate !== undefined) data.requestedDeliveryDate = new Date(payload.dueDate);
+        if (payload.contractNumber !== undefined) data.customerContractNumber = payload.contractNumber || null;
+        if (payload.priority !== undefined) {
+          const priority = Number(payload.priority);
+          if (![1, 2, 3].includes(priority)) throw new Error('اولویت سفارش باید ۱، ۲ یا ۳ باشد.');
+          data.priority = priority;
+        }
+        if (payload.notes !== undefined) data.notes = payload.notes || null;
+        if (payload.status !== undefined) {
+          data.documentStatus = payload.status === 'CANCELLED' ? 'CANCELLED' : payload.status === 'FULFILLED' ? 'CLOSED' : 'CONFIRMED';
+        }
+        if (Array.isArray(payload.lines)) {
+          const resolved = await resolveRelationalOrderLines(tx, payload.lines, current.id);
+          await tx.customerOrderLine.deleteMany({ where: { orderId: current.id } });
+          data.orderLines = { create: resolved };
+        }
+        return tx.customerOrder.update({
+          where: { id: current.id },
+          data,
+          include: { customer: true, orderLines: { include: { part: true }, orderBy: { lineNumber: 'asc' } } },
+        });
+      }, { isolationLevel: 'Serializable' });
+      if (!updated) return res.status(404).json({ success: false, error: 'سفارش فروش مورد نظر یافت نشد.' });
+      const data = mapRelationalCustomerOrder(updated);
+      const idx = customerOrdersStore.findIndex(order => order.id === data.id);
+      if (idx >= 0) customerOrdersStore[idx] = data;
+      else customerOrdersStore.unshift(data);
+      planSuggestionsStore.length = 0;
+      return res.json({ success: true, message: `سفارش شماره «${data.orderNumber}» در PostgreSQL به‌روزرسانی شد.`, data, source: 'postgresql' });
+    }
+
     const idx = customerOrdersStore.findIndex(o => o.id === id || o.orderNumber === id);
-    if (idx === -1) {
-      return res.status(404).json({ success: false, error: 'سفارش فروش مورد نظر یافت نشد.' });
-    }
-
+    if (idx === -1) return res.status(404).json({ success: false, error: 'سفارش فروش مورد نظر یافت نشد.' });
     const current = customerOrdersStore[idx];
-    const oldTotalQty = (current.lines || []).reduce((s, l) => s + l.orderedQuantity, 0);
-    const updatedLines = Array.isArray(payload.lines)
-      ? payload.lines.map((l: any) => ({
-          ...l,
-          orderedQuantity: Number(l.orderedQuantity) || 0,
-          deliveredQuantity: Number(l.deliveredQuantity) || 0,
-          remainingQuantity: Math.max(0, (Number(l.orderedQuantity) || 0) - (Number(l.deliveredQuantity) || 0)),
-        }))
-      : current.lines;
-    const newTotalQty = updatedLines.reduce((s: number, l: any) => s + l.orderedQuantity, 0);
-    const newStatus = payload.status || current.status;
-    const existingRevisions = Array.isArray(current.revisions) ? [...current.revisions] : [];
-
-    if (newTotalQty !== oldTotalQty || newStatus !== current.status || payload.revisionReasonFa) {
-      existingRevisions.unshift({
-        id: `REV-ORD-${Date.now()}`,
-        revisionNumber: existingRevisions.length + 1,
-        timestamp: new Date().toLocaleString('fa-IR'),
-        actor: payload.actor || 'کارشناس فروش و برنامه‌ریزی',
-        fieldLabelFa: newTotalQty !== oldTotalQty ? 'تیراژ کل اقلام سفارش' : 'وضعیت سفارش مشتری',
-        oldQty: oldTotalQty,
-        newQty: newTotalQty,
-        unit: 'عدد',
-        oldStatus: current.status,
-        newStatus,
-        reasonFa: payload.revisionReasonFa || payload.notes || 'ویرایش تیراژ و برنامه تحویل سفارش مشتری',
-      });
-    }
-
-    const updatedOrder: CustomerOrder = {
-      ...current,
-      ...payload,
-      id: current.id,
-      orderNumber: payload.orderNumber || current.orderNumber,
-      status: newStatus,
-      lines: updatedLines,
-      revisions: payload.revisions || existingRevisions,
-    };
-
+    const updatedLines = Array.isArray(payload.lines) ? payload.lines.map((line: any) => ({
+      ...line,
+      orderedQuantity: Number(line.orderedQuantity) || 0,
+      deliveredQuantity: Number(line.deliveredQuantity) || 0,
+      remainingQuantity: Math.max(0, (Number(line.orderedQuantity) || 0) - (Number(line.deliveredQuantity) || 0)),
+    })) : current.lines;
+    const updatedOrder: CustomerOrder = { ...current, ...payload, id: current.id, lines: updatedLines };
     customerOrdersStore[idx] = updatedOrder;
-
-    // Refresh plan suggestions
     planSuggestionsStore.length = 0;
     planSuggestionsStore.push(...generateProductionPlanSuggestions());
-
-    res.json({
-      success: true,
-      message: `سفارش شماره «${updatedOrder.orderNumber}» با موفقیت ویرایش شد و بازنگری تیراژ ثبت گردید.`,
-      data: updatedOrder,
-    });
+    res.json({ success: true, message: `سفارش شماره «${updatedOrder.orderNumber}» به‌روزرسانی شد.`, data: updatedOrder, source: 'memory-fallback' });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : 'خطا در ویرایش سفارش مشتری',
-    });
+    const message = error instanceof Error ? error.message : 'خطا در ویرایش سفارش مشتری';
+    const statusCode = (error as any)?.code === 'P2002' ? 409 : (message.includes('یافت نشد') || message.includes('معتبر نیست') ? 400 : 500);
+    res.status(statusCode).json({ success: false, error: statusCode === 409 ? 'شماره سفارش مشتری قبلاً ثبت شده است.' : message });
   }
 });
 
@@ -5359,112 +7486,983 @@ apiRouter.get('/reports/dashboard-summary', (req: Request, res: Response) => {
 });
 
 // 19.1 Plan vs Actual
-apiRouter.get('/reports/plan-vs-actual', (req: Request, res: Response) => {
+apiRouter.get('/reports/plan-vs-actual', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش برنامه در برابر واقعی فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getPlanVsActualReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const planStatusMap: Record<string, string> = {
+      DRAFT_SUGGESTION: 'DRAFT',
+      APPROVED: 'APPROVED',
+      COMPLETED: 'COMPLETED',
+      REJECTED: 'CANCELLED',
+    };
+    const dbPlanStatus = filters.status && filters.status !== 'ALL' ? planStatusMap[filters.status] : undefined;
+    const plans = await prisma.productionPlan.findMany({
+      where: {
+        ...(dbPlanStatus ? { status: dbPlanStatus as any } : {}),
+        ...(filters.startDate || filters.endDate ? {
+          endDate: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+      },
+      include: {
+        planLines: {
+          where: filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : undefined,
+          include: {
+            part: { select: { id: true, partNumber: true, name: true } },
+            manufacturingOrders: { select: { id: true, moNumber: true, completedQty: true, scrapQty: true } },
+          },
+          orderBy: [{ priority: 'desc' }, { plannedEndDate: 'asc' }],
+        },
+      },
+      orderBy: [{ startDate: 'desc' }, { planNumber: 'asc' }],
+    });
+    const data = plans.flatMap((plan: any) => plan.planLines.map((line: any) => {
+      const actualProducedQuantity = line.manufacturingOrders.reduce((sum: number, mo: any) => sum + Number(mo.completedQty), 0);
+      const actualScrapQuantity = line.manufacturingOrders.reduce((sum: number, mo: any) => sum + Number(mo.scrapQty), 0);
+      const plannedQuantity = Number(line.plannedQty);
+      return {
+        planId: plan.id,
+        planNumber: plan.planNumber,
+        planVersion: '—',
+        partId: line.part.id,
+        partCode: line.part.partNumber,
+        partName: line.part.name,
+        plannedQuantity,
+        actualProducedQuantity,
+        actualScrapQuantity,
+        achievementRatePercent: plannedQuantity > 0 ? Math.round((actualProducedQuantity / plannedQuantity) * 1000) / 10 : 0,
+        varianceQuantity: actualProducedQuantity - plannedQuantity,
+        status: plan.status === 'COMPLETED' ? 'COMPLETED' : plan.status === 'DRAFT' ? 'DRAFT_SUGGESTION' : plan.status === 'CANCELLED' ? 'REJECTED' : 'APPROVED',
+        targetDueDate: line.plannedEndDate.toISOString(),
+        isEstimate: line.manufacturingOrders.length === 0,
+        linkedMoNumbers: line.manufacturingOrders.map((mo: any) => mo.moNumber),
+      };
+    }));
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_PLANS_AND_MANUFACTURING_ORDERS',
+      meta: {
+        reportTitle: 'تطبیق برنامه تولید با عملکرد واقعی دستورات ساخت',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'نسخه برنامه در مدل فعلی ثبت نمی‌شود؛ مقدار نسخه با — نمایش داده شده است.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش برنامه در برابر واقعی' });
   }
 });
 
 // 19.2 Customer Order Fulfillment
-apiRouter.get('/reports/customer-order-fulfillment', (req: Request, res: Response) => {
+apiRouter.get('/reports/customer-order-fulfillment', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش تحقق سفارش مشتری فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getCustomerOrderFulfillmentReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const orders = await prisma.customerOrder.findMany({
+      where: {
+        ...(filters.customerId ? { customerId: filters.customerId } : {}),
+        ...(filters.customerName ? { customer: { is: { name: { contains: filters.customerName, mode: 'insensitive' } } } } : {}),
+        ...(filters.status === 'CANCELLED' ? { documentStatus: 'CANCELLED' } : {}),
+      },
+      include: {
+        customer: { select: { name: true } },
+        orderLines: {
+          where: filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : undefined,
+          include: { part: { select: { id: true, partNumber: true, name: true } } },
+          orderBy: { lineNumber: 'asc' },
+        },
+      },
+      orderBy: [{ requestedDeliveryDate: 'asc' }, { orderNumber: 'asc' }],
+    });
+    const references = orders.flatMap((order: any) => [order.orderNumber, order.id]);
+    const deliveryDocuments = references.length
+      ? await prisma.inventoryDocument.findMany({
+          where: {
+            postingStatus: 'POSTED',
+            referenceType: 'CUSTOMER_ORDER',
+            referenceNumber: { in: references },
+          },
+          include: { lines: { select: { partId: true, quantity: true } } },
+        })
+      : [];
+    const deliveredByOrderPart = new Map<string, number>();
+    for (const doc of deliveryDocuments) {
+      for (const line of doc.lines) {
+        const key = `${doc.referenceNumber}|${line.partId}`;
+        deliveredByOrderPart.set(key, (deliveredByOrderPart.get(key) || 0) + Number(line.quantity));
+      }
+    }
+
+    const now = Date.now();
+    const data = orders.flatMap((order: any) => order.orderLines.map((line: any) => {
+      const dueDate = line.requestedDate;
+      const dueTime = dueDate.getTime();
+      const deliveredQuantity = deliveredByOrderPart.get(`${order.orderNumber}|${line.partId}`) ??
+        deliveredByOrderPart.get(`${order.id}|${line.partId}`) ?? Number(line.deliveredQty);
+      const orderedQuantity = Number(line.orderedQty);
+      const remainingQuantity = Math.max(0, orderedQuantity - deliveredQuantity);
+      const isDelayed = now > dueTime && remainingQuantity > 0;
+      const daysOverdue = isDelayed ? Math.floor((now - dueTime) / (24 * 3600 * 1000)) : 0;
+      const fulfillmentPercent = orderedQuantity > 0 ? Math.round((deliveredQuantity / orderedQuantity) * 1000) / 10 : 0;
+      const status = remainingQuantity <= 0
+        ? 'FULFILLED'
+        : isDelayed ? 'DELAYED'
+        : deliveredQuantity > 0 ? 'PARTIALLY_FULFILLED'
+        : order.documentStatus === 'CANCELLED' ? 'CANCELLED'
+        : order.documentStatus === 'DRAFT' ? 'OPEN'
+        : 'ACTIVE';
+      return {
+        orderId: order.id,
+        orderLineId: line.id,
+        orderNumber: order.orderNumber,
+        contractNumber: order.customerContractNumber || '—',
+        customerName: order.customer.name,
+        partId: line.partId,
+        partCode: line.part.partNumber,
+        partName: line.part.name,
+        orderedQuantity,
+        deliveredQuantity,
+        remainingQuantity,
+        fulfillmentPercent,
+        dueDate: dueDate.toISOString(),
+        status,
+        daysOverdue,
+        isDelayed,
+      };
+    })).filter((row: any) => {
+      const date = new Date(row.dueDate).getTime();
+      return (!filters.startDate || date >= new Date(filters.startDate).getTime()) &&
+        (!filters.endDate || date <= new Date(filters.endDate + 'T23:59:59.999Z').getTime()) &&
+        (!filters.status || filters.status === 'ALL' || row.status === filters.status);
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_CUSTOMER_ORDERS_AND_POSTED_DELIVERY_DOCUMENTS',
+      meta: {
+        reportTitle: 'گزارش تحقق سفارشات مشتری بر اساس اسناد تحویل ثبت‌شده',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'تحویل بر اساس اسناد POSTED با مرجع سفارش مشتری محاسبه می‌شود؛ در صورت ثبت نکردن referenceNumber سفارش روی سند تحویل، مقدار تحویل در گزارش لحاظ نخواهد شد.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش تحقق سفارشات' });
   }
 });
 
 // 19.3 Production Backlog
-apiRouter.get('/reports/production-backlog', (req: Request, res: Response) => {
+apiRouter.get('/reports/production-backlog', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش معوقات تولید فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getProductionBacklogReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const orders = await prisma.manufacturingOrder.findMany({
+      where: {
+        status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS', 'SUSPENDED'] },
+        ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
+        ...(filters.customerId ? { planLine: { is: { customerOrder: { is: { customerId: filters.customerId } } } } } : {}),
+        ...(filters.startDate || filters.endDate ? {
+          scheduledEndDate: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+      },
+      include: {
+        part: { select: { id: true, partNumber: true, name: true, carModel: true, weightGrossKg: true, materialId: true } },
+        planLine: {
+          include: {
+            customerOrder: { include: { customer: { select: { name: true } } } },
+          },
+        },
+      },
+      orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
+    });
+    const materialIds = [...new Set(orders.map((order: any) => order.part.materialId).filter(Boolean))];
+    const rawParts = materialIds.length
+      ? await prisma.part.findMany({
+          where: { materialId: { in: materialIds }, category: 'RAW_MATERIAL', active: true },
+          select: { id: true, materialId: true },
+        })
+      : [];
+    const rawPartIds = rawParts.map((part: any) => part.id);
+    const rawBalances = rawPartIds.length
+      ? await prisma.stockBalance.findMany({
+          where: { partId: { in: rawPartIds }, qualityStatus: 'AVAILABLE' },
+          select: { partId: true, weightKgAvailable: true },
+        })
+      : [];
+    const availableByMaterial = new Map<string, number>();
+    for (const rawPart of rawParts) {
+      const materialId = rawPart.materialId;
+      if (!materialId) continue;
+      const available = rawBalances.filter((balance: any) => balance.partId === rawPart.id)
+        .reduce((sum: number, balance: any) => sum + Number(balance.weightKgAvailable), 0);
+      availableByMaterial.set(materialId, (availableByMaterial.get(materialId) || 0) + available);
+    }
+
+    const now = Date.now();
+    const data = orders.map((order: any) => {
+      const backlogQuantity = Math.max(0, Number(order.targetQty) - Number(order.completedQty));
+      const dueDate = order.scheduledEndDate;
+      const daysOverdue = now > dueDate.getTime() && backlogQuantity > 0
+        ? Math.floor((now - dueDate.getTime()) / (24 * 3600 * 1000))
+        : 0;
+      const requiredRawMaterialKg = Number((backlogQuantity * Number(order.part.weightGrossKg || 0)).toFixed(3));
+      const availableRawMaterialKg = order.part.materialId ? (availableByMaterial.get(order.part.materialId) || 0) : 0;
+      const materialAvailabilityStatus = requiredRawMaterialKg <= 0
+        ? 'SHORTAGE'
+        : availableRawMaterialKg >= requiredRawMaterialKg
+          ? 'AVAILABLE'
+          : availableRawMaterialKg > 0 ? 'PARTIAL' : 'SHORTAGE';
+      const urgencyLevel = order.priority >= 3 || daysOverdue > 5
+        ? 'CRITICAL'
+        : order.priority >= 2 || daysOverdue > 0 || backlogQuantity > 1000
+          ? 'HIGH'
+          : 'MEDIUM';
+      return {
+        orderNumber: order.moNumber,
+        customerName: order.planLine?.customerOrder?.customer?.name || '—',
+        contractNumber: order.planLine?.customerOrder?.customerContractNumber || '—',
+        partId: order.part.id,
+        partCode: order.part.partNumber,
+        partName: order.part.name,
+        carModel: order.part.carModel || undefined,
+        backlogQuantity,
+        dueDate: dueDate.toISOString(),
+        daysOverdue,
+        urgencyLevel,
+        requiredRawMaterialKg,
+        materialAvailabilityStatus,
+        availableRawMaterialKg: Number(availableRawMaterialKg.toFixed(3)),
+        materialAvailabilityNote: !order.part.materialId || requiredRawMaterialKg <= 0
+          ? 'برای این قطعه گرید ماده یا وزن ناخالص استاندارد ثبت نشده است.'
+          : undefined,
+      };
+    }).filter((row: any) => row.backlogQuantity > 0);
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_MANUFACTURING_ORDERS_PART_MASTER_AND_RAW_MATERIAL_STOCK',
+      meta: {
+        reportTitle: 'گزارش معوقات دستورات ساخت و کفایت موجودی ماده اولیه',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'برآورد ماده اولیه بر اساس وزن ناخالص قطعه و موجودی قابل‌استفاده اقلام خام هم‌گرید است؛ جایگزین انفجار BOM چندماده‌ای نیست.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش معوقات تولید' });
   }
 });
 
+async function getDatabaseWipReportRows(filters: ReportFilterParams) {
+  const prisma = getPrismaClient();
+  const orders = await prisma.manufacturingOrder.findMany({
+    where: {
+      status: { in: ['PLANNED', 'RELEASED', 'IN_PROGRESS', 'SUSPENDED'] },
+      ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
+    },
+    include: {
+      part: { select: { id: true, partNumber: true, name: true } },
+      operations: {
+        where: {
+          ...(filters.processType ? { operation: { is: { processType: filters.processType } } } : {}),
+          ...(filters.machineId ? { plannedMachineId: filters.machineId } : {}),
+        },
+        include: {
+          operation: { select: { code: true, name: true, processType: true } },
+          plannedMachine: { select: { id: true, code: true, name: true, hallLocation: true } },
+          reports: { orderBy: { reportDate: 'desc' }, take: 1, select: { reportDate: true } },
+        },
+        orderBy: { stepNumber: 'asc' },
+      },
+    },
+    orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
+  });
+  const moIds = orders.map((order: any) => order.id);
+  const transfers = moIds.length
+    ? await prisma.productionTransfer.findMany({
+        where: { manufacturingOrderId: { in: moIds }, status: { in: ['DISPATCHED', 'RECEIVED'] } },
+        include: {
+          fromWarehouse: { select: { code: true, name: true } },
+          toWarehouse: { select: { code: true, name: true } },
+        },
+        orderBy: { dispatchedAt: 'asc' },
+      })
+    : [];
+
+  const rows: any[] = [];
+  for (const order of orders) {
+    for (const operation of order.operations) {
+      const inboundTransfers = transfers.filter((transfer: any) =>
+        transfer.toStageOperationId === operation.id && transfer.status === 'RECEIVED'
+      );
+      const outboundTransfers = transfers.filter((transfer: any) =>
+        transfer.fromStageOperationId === operation.id
+      );
+      const receivedQty = inboundTransfers.reduce((sum: number, transfer: any) => sum + Number(transfer.quantity), 0);
+      const transferredQty = outboundTransfers.reduce((sum: number, transfer: any) => sum + Number(transfer.quantity), 0);
+      const inputQty = Number(operation.inputQty);
+      const goodOutputQty = Number(operation.outputGoodQty);
+      const scrapQty = Number(operation.outputScrapQty);
+      const waitingInputQty = Math.max(0, receivedQty - inputQty);
+      const inProgressQty = Math.max(0, inputQty - goodOutputQty - scrapQty);
+      const readyForTransferQty = Math.max(0, goodOutputQty - transferredQty);
+      const totalActiveWipQty = waitingInputQty + inProgressQty + readyForTransferQty;
+      const activities = [
+        operation.startDate,
+        operation.reports[0]?.reportDate,
+        ...inboundTransfers.map((transfer: any) => transfer.receivedAt || transfer.dispatchedAt),
+        ...outboundTransfers.map((transfer: any) => transfer.receivedAt || transfer.dispatchedAt),
+      ].filter(Boolean).map((date: any) => new Date(date).getTime());
+      const lastActivityAt = new Date(activities.length ? Math.max(...activities) : order.updatedAt).toISOString();
+      const warehouseLocation = operation.plannedMachine
+        ? [operation.plannedMachine.hallLocation, operation.plannedMachine.code, operation.plannedMachine.name].filter(Boolean).join(' / ')
+        : inboundTransfers[inboundTransfers.length - 1]?.toWarehouse?.name || 'موقعیت ثبت نشده';
+      if (totalActiveWipQty > 0 || transferredQty > 0) {
+        rows.push({
+          partId: order.part.id,
+          partCode: order.part.partNumber,
+          partName: order.part.name,
+          moId: order.id,
+          moNumber: order.moNumber,
+          stepNumber: operation.stepNumber,
+          stepCode: operation.operation.code,
+          stepName: operation.operation.name,
+          processType: operation.operation.processType,
+          machineId: operation.plannedMachineId,
+          machineName: operation.plannedMachine?.name,
+          warehouseLocation,
+          waitingInputQty,
+          inProgressQty,
+          readyForTransferQty,
+          transferredQty,
+          totalActiveWipQty,
+          lastActivityAt,
+          dataBasis: 'PRODUCTION_OPERATION_COUNTERS_AND_TRANSFER_LEDGER',
+        });
+      }
+    }
+  }
+  return rows;
+}
+
 // 19.4 WIP by Part & Operation
-apiRouter.get('/reports/wip-by-part-operation', (req: Request, res: Response) => {
+apiRouter.get('/reports/wip-by-part-operation', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش WIP فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getWipByPartAndOperationReport(filters);
-    res.json({ success: true, ...report });
+    const data = await getDatabaseWipReportRows(filters);
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_OPERATIONS_AND_TRANSFERS',
+      meta: {
+        reportTitle: 'گزارش موجودی کار در جریان ساخت به تفکیک قطعه و مرحله',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'موجودی مرحله از شمارنده‌های ورودی/خروجی عملیات و انتقال‌های دریافت‌شده محاسبه می‌شود؛ بارگذاری اولیه مرحله اول فقط در صورت ثبت inputQty قابل مشاهده است.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش WIP' });
   }
 });
 
 // 19.5 WIP Aging
-apiRouter.get('/reports/wip-aging', (req: Request, res: Response) => {
+apiRouter.get('/reports/wip-aging', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش سن‌یابی WIP فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getWipAgingReport(filters);
-    res.json({ success: true, ...report });
+    const rows = await getDatabaseWipReportRows(filters);
+    const now = Date.now();
+    const data = rows.filter((row: any) => row.totalActiveWipQty > 0).map((row: any) => {
+      const idleHours = Math.max(0, Math.round((now - new Date(row.lastActivityAt).getTime()) / (3600 * 1000)));
+      const idleDays = Math.round((idleHours / 24) * 10) / 10;
+      const ageCategory = idleDays > 7 ? 'OVER_7_DAYS_STAGNANT' : idleDays >= 3 ? '3_TO_7_DAYS' : idleDays >= 1 ? '1_TO_3_DAYS' : 'UNDER_24_HOURS';
+      const statusSeverity = idleDays > 7 ? 'CRITICAL' : idleDays >= 3 ? 'ATTENTION' : 'NORMAL';
+      return {
+        moNumber: row.moNumber,
+        partCode: row.partCode,
+        partName: row.partName,
+        stepNumber: row.stepNumber,
+        stepName: row.stepName,
+        warehouseLocation: row.warehouseLocation,
+        quantityInStation: row.totalActiveWipQty,
+        lastActivityDate: row.lastActivityAt,
+        idleHours,
+        idleDays,
+        ageCategory,
+        statusSeverity,
+      };
+    }).sort((a: any, b: any) => b.idleHours - a.idleHours);
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_OPERATIONS_AND_TRANSFERS',
+      meta: {
+        reportTitle: 'گزارش سن‌یابی و ماندگاری اقلام در جریان ساخت',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش سن‌یابی WIP' });
   }
 });
 
 // 19.6 Material Consumption vs Standard
-apiRouter.get('/reports/material-consumption-vs-standard', (req: Request, res: Response) => {
+// BOM variance is intentionally unavailable until actual issue quantities can be reconciled
+// against an approved, versioned BOM. Never fall back to sample or estimated consumption.
+apiRouter.get('/reports/material-consumption-vs-standard', (_req: Request, res: Response) => {
+  return res.status(409).json({
+    success: false,
+    error: 'مقایسه با استاندارد BOM تا زمان اتصال BOM نسخه‌دار و تأییدشده به مصرف واقعی غیرفعال است. برای مشاهده مصرف ثبت‌شده، گزارش مصرف واقعی مواد را باز کنید.',
+    source: 'BOM_VARIANCE_DISABLED_UNTIL_VERSIONED_BOM_RECONCILIATION',
+  });
+});
+
+// 19.6a Actual Material Consumption from Posted Inventory Transactions and Production Reports
+apiRouter.get('/reports/material-consumption-actual', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش مصرف واقعی فقط با اتصال PostgreSQL قابل ارائه است.' });
+    }
+
     const filters = extractReportFilters(req);
-    const report = getMaterialConsumptionVsStandardReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const transactionDate: any = {};
+    if (filters.startDate) transactionDate.gte = new Date(filters.startDate);
+    if (filters.endDate) transactionDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+
+    const transactions = await prisma.inventoryTransaction.findMany({
+      where: {
+        postingStatus: 'POSTED',
+        transactionType: 'OUTBOUND',
+        weightKgSigned: { lt: 0 },
+        manufacturingOrderId: { not: null },
+        productionOperationId: { not: null },
+        ...(Object.keys(transactionDate).length ? { transactionDate } : {}),
+      },
+      include: {
+        part: { select: { partNumber: true, name: true, material: { select: { grade: true } } } },
+        manufacturingOrder: {
+          select: {
+            id: true,
+            moNumber: true,
+            partId: true,
+            part: { select: { partNumber: true, name: true } },
+          },
+        },
+        productionOperation: {
+          select: {
+            id: true,
+            stepNumber: true,
+            operation: { select: { code: true, name: true, processType: true } },
+          },
+        },
+        physicalCoil: { select: { coilId: true, coilPackNumber: true, heatNumber: true, material: { select: { grade: true } } } },
+        materialLot: { select: { lotNumber: true, heatNumber: true, material: { select: { grade: true } } } },
+      },
+      orderBy: [{ transactionDate: 'desc' }],
+      take: 10000,
+    });
+
+    const operationIds = [...new Set(transactions.map((row: any) => row.productionOperationId).filter(Boolean))] as string[];
+    const reportDate: any = {};
+    if (filters.startDate) reportDate.gte = new Date(filters.startDate);
+    if (filters.endDate) reportDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    const productionReports = operationIds.length
+      ? await prisma.productionReport.findMany({
+          where: {
+            productionOperationId: { in: operationIds },
+            postingStatus: 'POSTED',
+            ...(Object.keys(reportDate).length ? { reportDate } : {}),
+            ...(filters.machineId ? { machineId: filters.machineId } : {}),
+          },
+          include: {
+            machine: { select: { code: true, name: true } },
+            operatorUser: { select: { fullName: true } },
+            scraps: { select: { quantity: true, weightKg: true } },
+          },
+          orderBy: [{ reportDate: 'asc' }],
+          take: 10000,
+        })
+      : [];
+
+    const reportsByOperation = new Map<string, any[]>();
+    for (const report of productionReports) {
+      const rows = reportsByOperation.get(report.productionOperationId) || [];
+      rows.push(report);
+      reportsByOperation.set(report.productionOperationId, rows);
+    }
+
+    const grouped = new Map<string, any>();
+    for (const tx of transactions as any[]) {
+      const mo = tx.manufacturingOrder;
+      const operation = tx.productionOperation;
+      if (!mo || !operation) continue;
+      if (filters.partId && mo.partId !== filters.partId && mo.part.partNumber !== filters.partId) continue;
+      if (filters.processType && operation.operation.processType !== filters.processType) continue;
+
+      const operationReports = reportsByOperation.get(operation.id) || [];
+      if (filters.machineId && operationReports.length === 0) continue;
+      const key = [mo.id, operation.id, tx.partId].join('|');
+      let item = grouped.get(key);
+      if (!item) {
+        item = {
+          moId: mo.id,
+          moNumber: mo.moNumber,
+          productPartCode: mo.part.partNumber,
+          productPartName: mo.part.name,
+          operationId: operation.id,
+          operationStep: operation.stepNumber,
+          operationCode: operation.operation.code,
+          operationName: operation.operation.name,
+          processType: operation.operation.processType,
+          materialCode: tx.part.partNumber,
+          materialName: tx.part.name,
+          materialGrade: tx.part.material?.grade || tx.physicalCoil?.material?.grade || tx.materialLot?.material?.grade || '—',
+          actualIssuedMaterialKg: 0,
+          actualProducedGoodQty: 0,
+          actualScrapQty: 0,
+          actualScrapWeightKg: 0,
+          actualMachineNames: [],
+          actualOperatorNames: [],
+          coilNumbers: [],
+          contractNumbers: [],
+          productionReportCount: 0,
+          lastProductionReportAt: undefined,
+        };
+        grouped.set(key, item);
+      }
+
+      item.actualIssuedMaterialKg += Math.abs(Number(tx.weightKgSigned));
+      const coilNumber = tx.physicalCoil?.coilId || tx.materialLot?.lotNumber;
+      if (coilNumber && !item.coilNumbers.includes(coilNumber)) item.coilNumbers.push(coilNumber);
+      if (tx.contractNumber && !item.contractNumbers.includes(tx.contractNumber)) item.contractNumbers.push(tx.contractNumber);
+
+      for (const report of operationReports) {
+        item.actualProducedGoodQty += Number(report.goodQuantity);
+        item.actualScrapQty += Number(report.scrapQuantity);
+        item.actualScrapWeightKg += report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.weightKg), 0);
+        const machineName = report.machine ? `${report.machine.code} - ${report.machine.name}` : '';
+        const operatorName = report.operatorUser?.fullName || '';
+        if (machineName && !item.actualMachineNames.includes(machineName)) item.actualMachineNames.push(machineName);
+        if (operatorName && !item.actualOperatorNames.includes(operatorName)) item.actualOperatorNames.push(operatorName);
+        item.productionReportCount += 1;
+        const reportAt = report.reportDate.toISOString();
+        if (!item.lastProductionReportAt || reportAt > item.lastProductionReportAt) item.lastProductionReportAt = reportAt;
+      }
+    }
+
+    const data = [...grouped.values()].map(item => ({
+      ...item,
+      actualIssuedMaterialKg: Math.round(item.actualIssuedMaterialKg * 1000) / 1000,
+      actualProducedGoodQty: Math.round(item.actualProducedGoodQty * 1000) / 1000,
+      actualScrapQty: Math.round(item.actualScrapQty * 1000) / 1000,
+      actualScrapWeightKg: Math.round(item.actualScrapWeightKg * 1000) / 1000,
+    })).sort((a, b) => a.moNumber.localeCompare(b.moNumber) || a.operationStep - b.operationStep || a.materialCode.localeCompare(b.materialCode));
+
+    return res.json({
+      success: true,
+      source: 'POSTGRESQL_POSTED_INVENTORY_LEDGER_AND_ACTUAL_PRODUCTION_REPORTS',
+      meta: {
+        reportTitle: 'گزارش مصرف واقعی مواد به تفکیک دستور ساخت، عملیات و عملکرد واقعی خط',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value !== undefined && value !== '').map(([key, value]) => [key, String(value)])),
+        totalRecordsCount: data.length,
+      },
+      summary: {
+        inventoryIssueTransactions: transactions.length,
+        productionReports: productionReports.length,
+        reportRows: data.length,
+      },
+      data,
+      limitations: [
+        'مصرف واقعی از تراکنش‌های خروج قطعی کاردکس محاسبه می‌شود؛ برگشت ته‌کلاف به‌عنوان مصرف منفی دوباره‌شماری نمی‌شود.',
+        'ماشین و اپراتور از گزارش عملکرد واقعی تولید خوانده می‌شوند، نه از ماشین برنامه‌ریزی‌شده عملیات.',
+        'اگر برای یک عملیات گزارش عملکرد ثبت نشده باشد، مقادیر تولید، ضایعات، ماشین و اپراتور صفر/خالی می‌مانند.',
+        'مقایسه با BOM تا اتصال نسخه تأییدشده BOM به مصرف واقعی غیرفعال است.',
+      ],
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش مصرف مواد' });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش مصرف واقعی مواد' });
   }
 });
 
 // 19.7 SAPCO Material Account
-apiRouter.get('/reports/sapco-material-account', (req: Request, res: Response) => {
+apiRouter.get('/reports/sapco-material-account', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش حساب مواد ساپکو فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getSapcoMaterialAccountReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const contracts = await prisma.materialContract.findMany({
+      where: {
+        ...(filters.status && filters.status !== 'ALL' ? { status: filters.status as any } : {}),
+        ...(filters.partId ? { OR: [{ materialId: filters.partId }, { material: { is: { code: filters.partId } } }, { material: { is: { grade: filters.partId } } }] } : {}),
+      },
+      include: {
+        material: { select: { code: true, grade: true, name: true } },
+        supplierCustomer: { select: { name: true, code: true } },
+        transactions: { orderBy: { receiptDate: 'asc' } },
+      },
+      orderBy: [{ endDate: 'asc' }, { contractNumber: 'asc' }],
+    });
+    const contractIds = contracts.map((row: any) => row.id);
+    const [inventoryTransactions, balances] = contractIds.length
+      ? await Promise.all([
+          prisma.inventoryTransaction.findMany({
+            where: {
+              contractId: { in: contractIds },
+              postingStatus: 'POSTED',
+            },
+            select: { contractId: true, weightKg: true, weightKgSigned: true, transactionDate: true, transactionType: true, document: { select: { documentType: true } } },
+          }),
+          prisma.stockBalance.findMany({
+            where: { contractId: { in: contractIds } },
+            select: { contractId: true, weightKgOnHand: true },
+          }),
+        ])
+      : [[], []];
+
+    const data = contracts.map((contract: any) => {
+      const contractTx = contract.transactions;
+      const isReceipt = (tx: any) => tx.transactionType === 'RECEIPT';
+      const isReturn = (tx: any) => tx.transactionType === 'RETURN';
+      const inRange = (date: Date) => {
+        const time = date.getTime();
+        return (!filters.startDate || time >= new Date(filters.startDate).getTime()) &&
+          (!filters.endDate || time <= new Date(filters.endDate + 'T23:59:59.999Z').getTime());
+      };
+      const beforeStart = (date: Date) => Boolean(filters.startDate && date < new Date(filters.startDate));
+      const issuedRows = inventoryTransactions.filter((tx: any) => tx.contractId === contract.id);
+      const receiptLedgerTotal = contractTx.filter(isReceipt).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const ledgerCompleteness = Math.abs(receiptLedgerTotal - Number(contract.receivedWeightKg)) <= 0.001 ? 'COMPLETE' : 'PARTIAL_HISTORY';
+      const openingReceipts = contractTx.filter((tx: any) => isReceipt(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const openingSupplierReturns = contractTx.filter((tx: any) => isReturn(tx) && beforeStart(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const isContractBookMovement = (tx: any) =>
+        tx.transactionType === 'OUTBOUND' ||
+        tx.transactionType === 'ADJUSTMENT_POS' ||
+        tx.transactionType === 'ADJUSTMENT_NEG' ||
+        (tx.transactionType === 'INBOUND' && tx.document?.documentType === 'RETURN');
+      const movementDelta = (rows: any[]) => rows.filter(isContractBookMovement)
+        .reduce((sum: number, tx: any) => sum + Number(tx.weightKgSigned), 0);
+      const openingInventoryMovement = movementDelta(issuedRows.filter((tx: any) => beforeStart(tx.transactionDate)));
+      const openingBalanceKg = ledgerCompleteness === 'COMPLETE'
+        ? openingReceipts - openingSupplierReturns + openingInventoryMovement
+        : (filters.startDate ? Number(contract.receivedWeightKg) + openingInventoryMovement : 0);
+      const receivedInRange = contractTx.filter((tx: any) => isReceipt(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const supplierReturns = contractTx.filter((tx: any) => isReturn(tx) && inRange(tx.receiptDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const issued = issuedRows.filter((tx: any) => tx.transactionType === 'OUTBOUND' && inRange(tx.transactionDate)).reduce((sum: number, tx: any) => sum + Number(tx.weightKg), 0);
+      const periodInventoryMovement = movementDelta(issuedRows.filter((tx: any) => inRange(tx.transactionDate)));
+      const totalReceivedKg = ledgerCompleteness === 'COMPLETE'
+        ? receivedInRange
+        : filters.startDate || filters.endDate ? 0 : Number(contract.receivedWeightKg);
+      const closingBookBalanceKg = openingBalanceKg + totalReceivedKg - supplierReturns + periodInventoryMovement;
+      const physicalStockInPlantKg = balances.filter((row: any) => row.contractId === contract.id).reduce((sum: number, row: any) => sum + Number(row.weightKgOnHand), 0);
+      return {
+        contractId: contract.id,
+        contractNumber: contract.contractNumber,
+        title: contract.title,
+        materialGrade: contract.material.grade,
+        allocatedQuotaKg: Number(contract.totalAllocatedWeightKg),
+        openingBalanceKg: Number(openingBalanceKg.toFixed(3)),
+        totalReceivedKg: Number(totalReceivedKg.toFixed(3)),
+        totalIssuedKg: Number(issued.toFixed(3)),
+        closingBookBalanceKg: Number(closingBookBalanceKg.toFixed(3)),
+        physicalStockInPlantKg: Number(physicalStockInPlantKg.toFixed(3)),
+        discrepancyKg: Number((physicalStockInPlantKg - closingBookBalanceKg).toFixed(3)),
+        status: contract.status,
+        supplier: contract.supplierCustomer.name,
+        ledgerCompleteness,
+        physicalStockAsOf: new Date().toISOString(),
+      };
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_MATERIAL_CONTRACT_TRANSACTIONS_INVENTORY_LEDGER_AND_STOCK_BALANCES',
+      meta: {
+        reportTitle: 'حساب مواد ساپکو بر اساس قرارداد، رسید، حواله و مانده فیزیکی',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'مانده فیزیکی، موجودی لحظه‌ای فعلی است؛ مانده دفتری بر اساس بازه تاریخی انتخاب‌شده محاسبه می‌شود. برای قراردادهای فاقد تاریخچه رسید، دقت مانده تاریخی محدود است.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش حساب ساپکو' });
   }
 });
 
 // 19.8 Inventory Valuation Quantities
-apiRouter.get('/reports/inventory-valuation-quantities', (req: Request, res: Response) => {
+apiRouter.get('/reports/inventory-valuation-quantities', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش تفکیک مقداری موجودی فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getInventoryValuationQuantitiesReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const balances = await prisma.stockBalance.findMany({
+      where: {
+        ...(filters.partId ? { OR: [{ partId: filters.partId }, { part: { is: { partNumber: filters.partId } } }] } : {}),
+      },
+      include: {
+        part: { include: { unit: true } },
+      },
+      orderBy: [{ part: { partNumber: 'asc' } }, { updatedAt: 'desc' }],
+    });
+    const grouped = new Map<string, any>();
+    for (const balance of balances) {
+      const key = balance.partId;
+      if (!grouped.has(key)) {
+        const category = balance.part.category === 'FINISHED_GOOD'
+          ? 'FINISHED_GOODS'
+          : balance.part.category === 'WIP_PART'
+            ? 'WIP_PARTS'
+            : 'RAW_SHEET_METAL';
+        grouped.set(key, {
+          category,
+          partOrMaterialCode: balance.part.partNumber,
+          description: balance.part.name,
+          unit: balance.part.unit.code,
+          physicalQuantity: 0,
+          companyOwnedQuantity: 0,
+          sapcoConsignmentQuantity: 0,
+          qualityBlockedQuantity: 0,
+          reservedQuantity: 0,
+          availableFreeQuantity: 0,
+          totalPhysicalWeightKg: 0,
+        });
+      }
+      const row = grouped.get(key);
+      const onHand = Number(balance.quantityOnHand);
+      row.physicalQuantity += onHand;
+      row.reservedQuantity += Number(balance.quantityReserved);
+      row.totalPhysicalWeightKg += Number(balance.weightKgOnHand);
+      if (balance.ownership === 'SAPCO_SUPPLIER_OWNED') row.sapcoConsignmentQuantity += onHand;
+      else row.companyOwnedQuantity += onHand;
+      if (balance.qualityStatus !== 'AVAILABLE') row.qualityBlockedQuantity += onHand;
+      else row.availableFreeQuantity += Number(balance.quantityAvailable);
+    }
+    const data = [...grouped.values()].map(row => ({
+      ...row,
+      physicalQuantity: Number(row.physicalQuantity.toFixed(3)),
+      companyOwnedQuantity: Number(row.companyOwnedQuantity.toFixed(3)),
+      sapcoConsignmentQuantity: Number(row.sapcoConsignmentQuantity.toFixed(3)),
+      qualityBlockedQuantity: Number(row.qualityBlockedQuantity.toFixed(3)),
+      reservedQuantity: Number(row.reservedQuantity.toFixed(3)),
+      availableFreeQuantity: Number(row.availableFreeQuantity.toFixed(3)),
+      totalPhysicalWeightKg: Number(row.totalPhysicalWeightKg.toFixed(3)),
+    }));
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_STOCK_BALANCES',
+      meta: {
+        reportTitle: 'گزارش تفکیک مقداری موجودی بر اساس مالکیت و وضعیت کیفی',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: { partId: filters.partId },
+        note: 'این گزارش مانده جاری را نشان می‌دهد؛ فیلتر تاریخ برای موجودی لحظه‌ای اعمال نمی‌شود.',
+      },
+      data,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش تفکیک مقداری موجودی' });
   }
 });
 
 // 19.9 Scrap by Part & Operation
-apiRouter.get('/reports/scrap-by-part-operation', (req: Request, res: Response) => {
+apiRouter.get('/reports/scrap-by-part-operation', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش ضایعات فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getScrapByPartAndOperationReport(filters);
-    res.json({ success: true, ...report });
+    const prisma = getPrismaClient();
+    const reports = await prisma.productionReport.findMany({
+      where: {
+        postingStatus: 'POSTED',
+        ...(filters.startDate || filters.endDate ? {
+          reportDate: {
+            ...(filters.startDate ? { gte: new Date(filters.startDate) } : {}),
+            ...(filters.endDate ? { lte: new Date(filters.endDate + 'T23:59:59.999Z') } : {}),
+          },
+        } : {}),
+        ...(filters.partId ? { manufacturingOrder: { is: { part: { is: { OR: [{ id: filters.partId }, { partNumber: filters.partId }] } } } } } : {}),
+        ...(filters.machineId ? { machineId: filters.machineId } : {}),
+        ...(filters.processType ? { productionOperation: { is: { operation: { is: { processType: filters.processType } } } } } : {}),
+      },
+      include: {
+        manufacturingOrder: { include: { part: true } },
+        productionOperation: { include: { operation: true } },
+        machine: { select: { code: true, name: true } },
+        scraps: true,
+      },
+      orderBy: { reportDate: 'desc' },
+    });
+    const grouped = new Map<string, any>();
+    for (const report of reports) {
+      const part = report.manufacturingOrder.part;
+      const operation = report.productionOperation;
+      const key = [part.id, operation.id, report.machineId].join('|');
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          partCode: part.partNumber,
+          partName: part.name,
+          stepNumber: operation.stepNumber,
+          stepName: operation.operation.name,
+          processType: operation.operation.processType,
+          machineCode: report.machine.code,
+          machineName: report.machine.name,
+          totalInputQty: 0,
+          scrapPieces: 0,
+          scrapWeightKg: 0,
+          scrapNormPercent: part.scrapNormPercent == null ? 0 : Number(part.scrapNormPercent),
+          normConfigured: part.scrapNormPercent != null,
+          reasons: new Map<string, number>(),
+        });
+      }
+      const row = grouped.get(key);
+      const detailedScrapPieces = report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.quantity), 0);
+      const detailedScrapWeight = report.scraps.reduce((sum: number, scrap: any) => sum + Number(scrap.weightKg), 0);
+      row.totalInputQty += Number(report.goodQuantity) + Number(report.scrapQuantity);
+      row.scrapPieces += Math.max(detailedScrapPieces, Number(report.scrapQuantity));
+      row.scrapWeightKg += detailedScrapWeight;
+      for (const scrap of report.scraps) {
+        const reason = String(scrap.scrapReason);
+        row.reasons.set(reason, (row.reasons.get(reason) || 0) + Number(scrap.quantity));
+      }
+    }
+    const data = [...grouped.values()].map(row => {
+      const actualScrapPercent = row.totalInputQty > 0 ? row.scrapPieces / row.totalInputQty * 100 : 0;
+      const commonReason = [...row.reasons.entries()].sort((a: any, b: any) => b[1] - a[1])[0]?.[0];
+      return {
+        partCode: row.partCode,
+        partName: row.partName,
+        stepNumber: row.stepNumber,
+        stepName: row.stepName,
+        processType: row.processType,
+        machineCode: row.machineCode,
+        machineName: row.machineName,
+        totalInputQty: Number(row.totalInputQty.toFixed(3)),
+        scrapPieces: Number(row.scrapPieces.toFixed(3)),
+        scrapWeightKg: Number(row.scrapWeightKg.toFixed(3)),
+        scrapNormPercent: Number(row.scrapNormPercent.toFixed(2)),
+        actualScrapPercent: Number(actualScrapPercent.toFixed(2)),
+        isAboveNorm: row.normConfigured && actualScrapPercent > row.scrapNormPercent,
+        normConfigured: row.normConfigured,
+        commonScrapDefectType: commonReason || 'DETAIL_NOT_RECORDED',
+      };
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_PRODUCTION_REPORTS_AND_SCRAP_DETAILS',
+      meta: {
+        reportTitle: 'گزارش ضایعات به تفکیک قطعه، عملیات و ماشین',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: filters,
+        note: 'مقایسه با حد مجاز فقط برای قطعاتی انجام می‌شود که scrapNormPercent در اطلاعات پایه آن‌ها تعریف شده باشد؛ وزن ضایعات فقط از رکوردهای تفصیلی ضایعات محاسبه می‌شود.',
+      },
+      data,
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش ضایعات' });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش ضایعات تولید' });
   }
 });
 
 // 19.10 Machine Workload & Available Capacity
-apiRouter.get('/reports/machine-workload-capacity', (req: Request, res: Response) => {
+apiRouter.get('/reports/machine-workload-capacity', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'گزارش ظرفیت ماشین‌آلات فقط از PostgreSQL قابل ارائه است.' });
     const filters = extractReportFilters(req);
-    const report = getMachineWorkloadCapacityReport(filters);
-    res.json({ success: true, ...report });
+    const startDate = filters.startDate ? new Date(filters.startDate) : new Date(new Date().setHours(0, 0, 0, 0));
+    const endDate = filters.endDate ? new Date(filters.endDate + 'T23:59:59.999Z') : new Date(startDate.getTime() + 6 * 24 * 3600 * 1000);
+    if (endDate < startDate) return res.status(400).json({ success: false, error: 'تاریخ پایان باید بعد از تاریخ شروع باشد.' });
+    const periodDays = Math.max(1, Math.floor((endDate.getTime() - startDate.getTime()) / (24 * 3600 * 1000)) + 1);
+    const prisma = getPrismaClient();
+    const machines = await prisma.machine.findMany({
+      where: {
+        active: true,
+        ...(filters.machineId ? { OR: [{ id: filters.machineId }, { code: filters.machineId }] } : {}),
+      },
+      include: {
+        machineAssignments: {
+          where: {
+            assignedDate: { gte: startDate, lte: endDate },
+            status: { in: ['SCHEDULED', 'ACTIVE'] },
+          },
+          include: { shift: { select: { productiveHours: true } } },
+        },
+      },
+      orderBy: [{ code: 'asc' }],
+    });
+    const processTypeMap: Record<string, string> = {
+      PRESS: 'PRESS',
+      SPOT_WELDING: 'WELDING',
+      CO2_WELDING: 'WELDING',
+      WELDING: 'WELDING',
+      PAINTING: 'PAINT',
+      CUTTING: 'CUTTING',
+      BENDING: 'BENDING',
+      PUNCHING: 'FORMING',
+      FORMING: 'FORMING',
+    };
+    const nominalDailyCapacityHours = 15;
+    const data = machines.map((machine: any) => {
+      const scheduledWorkloadHours = machine.machineAssignments.reduce((sum: number, assignment: any) => sum + Number(assignment.shift.productiveHours), 0);
+      const nominalCapacity = nominalDailyCapacityHours * periodDays;
+      const availableCapacityHours = Math.max(0, nominalCapacity - scheduledWorkloadHours);
+      const utilizationRatePercent = nominalCapacity > 0 ? scheduledWorkloadHours / nominalCapacity * 100 : 0;
+      const workloadCategory = utilizationRatePercent >= 100
+        ? 'OVERLOADED'
+        : utilizationRatePercent >= 80
+          ? 'HIGH_LOAD'
+          : utilizationRatePercent >= 40
+            ? 'OPTIMAL'
+            : 'UNDER_UTILIZED';
+      return {
+        machineId: machine.id,
+        machineCode: machine.code,
+        machineName: machine.name,
+        hall: machine.hallLocation,
+        processType: processTypeMap[machine.machineType] || 'OTHER',
+        tonnage: machine.tonnageCapacity == null ? undefined : Number(machine.tonnageCapacity),
+        nominalDailyCapacityHours,
+        scheduledWorkloadHours: Number(scheduledWorkloadHours.toFixed(2)),
+        availableCapacityHours: Number(availableCapacityHours.toFixed(2)),
+        utilizationRatePercent: Number(utilizationRatePercent.toFixed(1)),
+        isReliableCapacityData: false,
+        workloadCategory,
+        machineStatus: machine.status === 'ACTIVE' ? 'ACTIVE' : machine.status === 'MAINTENANCE' ? 'MAINTENANCE' : 'IDLE',
+      };
+    });
+    res.json({
+      success: true,
+      source: 'POSTGRESQL_MACHINE_ASSIGNMENTS_AND_SHIFT_CALENDARS',
+      meta: {
+        reportTitle: 'بارکاری زمان‌بندی‌شده و ظرفیت اسمی ماشین‌آلات',
+        generatedAt: new Date().toISOString(),
+        totalRecordsCount: data.length,
+        appliedFilters: { ...filters, startDate: startDate.toISOString(), endDate: endDate.toISOString() },
+        note: 'بارکاری از شیفت‌های تخصیص‌یافته محاسبه شده است؛ ظرفیت ۱۵ ساعت در روز، فرض برنامه‌ریزی دوشیفته است و تا زمان ثبت تقویم واقعی، توقفات و زمان تنظیم، داده ظرفیت قابل اتکای قطعی نیست.',
+      },
+      data,
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش لود کاری ماشین‌آلات' });
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش بارکاری ماشین‌آلات' });
   }
 });
 
@@ -5490,17 +8488,66 @@ apiRouter.get('/reports/production-delays/analytics', (req: Request, res: Respon
 });
 
 // 19.12 Inventory Movements
-apiRouter.get('/reports/inventory-movements', (req: Request, res: Response) => {
+apiRouter.get('/reports/inventory-movements', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش گردش انبار فقط از پایگاه داده عملیاتی قابل ارائه است؛ اتصال DATABASE_URL برقرار نیست.' });
+    }
     const filters = extractReportFilters(req);
-    const report = getInventoryMovementsReport(filters);
-    res.json({ success: true, ...report });
+    const where: any = { postingStatus: 'POSTED' };
+    if (filters.startDate || filters.endDate) {
+      where.transactionDate = {};
+      if (filters.startDate) where.transactionDate.gte = new Date(filters.startDate);
+      if (filters.endDate) where.transactionDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    }
+    if (filters.partId) where.partId = filters.partId;
+    const prisma = getPrismaClient();
+    const rows = await prisma.inventoryTransaction.findMany({
+      where,
+      include: {
+        part: { select: { partNumber: true, name: true } },
+        unit: { select: { code: true, symbol: true } },
+        warehouse: { select: { code: true, name: true } },
+        location: { select: { code: true } },
+        document: { include: { targetWarehouse: { select: { code: true, name: true } } } },
+        createdByUser: { select: { fullName: true, username: true } },
+      },
+      orderBy: [{ transactionDate: 'desc' }, { createdAt: 'desc' }],
+      take: 5000,
+    });
+    const data = rows.map((tx: any) => ({
+      transactionId: tx.id,
+      documentNumber: tx.document?.documentNumber || tx.transactionNumber,
+      transactionDate: tx.transactionDate.toISOString(),
+      documentType: tx.document?.documentType || tx.transactionType,
+      partCode: tx.part?.partNumber || tx.partId,
+      partName: tx.part?.name || '',
+      quantity: Number(tx.quantitySigned ?? tx.quantity ?? 0),
+      unit: tx.unit?.code || tx.unit?.symbol || '—',
+      sourceLocation: [tx.warehouse?.name || tx.warehouseId, tx.location?.code].filter(Boolean).join(' / '),
+      targetLocation: tx.document?.targetWarehouse?.name || tx.document?.targetWarehouse?.code || tx.document?.referenceNumber || '—',
+      ownership: tx.ownership === 'SAPCO_SUPPLIER_OWNED' ? 'امانی ساپکو' : 'ملکی کارخانه',
+      operatorOrUser: tx.createdByUser?.fullName || tx.createdByUser?.username || tx.createdByUserId,
+      isReversed: Boolean(tx.isReversal || tx.document?.isReversed),
+    }));
+    res.json({
+      success: true,
+      meta: {
+        reportTitle: 'گزارش تحلیلی گردش اسناد و کاردکس جابجایی موجودی‌ها',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+        totalRecordsCount: data.length,
+      },
+      data,
+      source: 'POSTGRESQL_INVENTORY_TRANSACTION_LEDGER',
+      truncated: rows.length === 5000,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش گردش اسناد انبار' });
   }
 });
 
-// 19.13 Inventory Reconciliation
 apiRouter.get('/reports/inventory-reconciliation', (req: Request, res: Response) => {
   try {
     const filters = extractReportFilters(req);
@@ -5512,28 +8559,152 @@ apiRouter.get('/reports/inventory-reconciliation', (req: Request, res: Response)
 });
 
 // 19.14 Coil & Sheet Stock Inventory
-apiRouter.get('/reports/coil-inventory', (req: Request, res: Response) => {
+apiRouter.get('/reports/coil-inventory', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش موجودی کویل فقط از پایگاه داده عملیاتی قابل ارائه است؛ اتصال DATABASE_URL برقرار نیست.' });
+    }
     const filters = extractReportFilters(req);
-    const report = getCoilInventoryReport(filters);
-    res.json({ success: true, ...report });
+    const where: any = {};
+    if (filters.startDate || filters.endDate) {
+      where.receiptDate = {};
+      if (filters.startDate) where.receiptDate.gte = new Date(filters.startDate);
+      if (filters.endDate) where.receiptDate.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    }
+    if (filters.partId) where.partId = filters.partId;
+    const prisma = getPrismaClient();
+    const coils = await prisma.physicalCoil.findMany({
+      where,
+      include: {
+        material: { select: { code: true, grade: true } },
+        warehouse: { select: { name: true } },
+        warehouseLocation: { select: { code: true } },
+        contractAllocations: { include: { contract: { select: { contractNumber: true } } } },
+      },
+      orderBy: [{ receiptDate: 'desc' }, { createdAt: 'desc' }],
+      take: 5000,
+    });
+    const data = coils.map((coil: any) => {
+      const received = Number(coil.originalWeightKg || 0);
+      const remaining = Number(coil.remainingWeightKg || 0);
+      const consumed = Math.max(0, received - remaining);
+      const status = coil.qualityStatus === 'QUARANTINE' || coil.qualityStatus === 'QUALITY_BLOCKED' || coil.physicalStatus === 'BLOCKED'
+        ? 'BLOCKED'
+        : remaining <= 0 ? 'CONSUMED' : remaining < received ? 'PARTIAL' : 'FULL';
+      return {
+        coilId: coil.id,
+        coilNumber: coil.coilId,
+        materialCode: coil.material?.code || coil.partId || '—',
+        materialGrade: coil.material?.grade || '—',
+        thicknessMm: Number(coil.thicknessMm || 0),
+        widthMm: Number(coil.widthMm || 0),
+        receivedWeightKg: received,
+        consumedWeightKg: consumed,
+        remainingWeightKg: remaining,
+        warehouseLocation: [coil.warehouse?.name, coil.warehouseLocation?.code].filter(Boolean).join(' / '),
+        ownership: coil.ownership === 'SAPCO_SUPPLIER_OWNED' ? 'SAPCO_CONSIGNMENT' : 'FACTORY_OWNED',
+        contractNumber: coil.contractAllocations?.map((a: any) => a.contract?.contractNumber).filter(Boolean).join(', ') || '—',
+        heatNumber: coil.heatNumber || '—',
+        packingNumber: coil.coilPackNumber,
+        status,
+        receiptDate: coil.receiptDate.toISOString(),
+      };
+    }).filter((row: any) => !filters.status || filters.status === 'ALL' || row.status === filters.status);
+    res.json({
+      success: true,
+      meta: {
+        reportTitle: 'موجودی رول‌ها و کویل‌های ماده اولیه',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+        totalRecordsCount: data.length,
+      },
+      data,
+      source: 'POSTGRESQL_PHYSICAL_COILS',
+      truncated: coils.length === 5000,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش رول‌ها و کویل‌ها' });
   }
 });
 
-// 19.15 Lot & Coil Consumption Ledger
-apiRouter.get('/reports/lot-consumption', (req: Request, res: Response) => {
+apiRouter.get('/reports/lot-consumption', async (req: Request, res: Response) => {
   try {
+    if (!isDatabaseUrlConfigured()) {
+      return res.status(503).json({ success: false, error: 'گزارش مصرف لوت فقط از پایگاه داده عملیاتی قابل ارائه است؛ اتصال DATABASE_URL برقرار نیست.' });
+    }
     const filters = extractReportFilters(req);
-    const report = getLotConsumptionReport(filters);
-    res.json({ success: true, ...report });
+    const where: any = { issuedWeightKg: { gt: 0 } };
+    if (filters.startDate || filters.endDate) {
+      where.issuedAt = {};
+      if (filters.startDate) where.issuedAt.gte = new Date(filters.startDate);
+      if (filters.endDate) where.issuedAt.lte = new Date(filters.endDate + 'T23:59:59.999Z');
+    }
+    const prisma = getPrismaClient();
+    const records = await prisma.coilIssueReturnRecord.findMany({
+      where,
+      include: {
+        coil: {
+          include: { material: { select: { grade: true } } },
+        },
+        productionOperation: {
+          include: {
+            operation: { select: { code: true, name: true } },
+            plannedMachine: { select: { code: true, name: true } },
+          },
+        },
+      },
+      orderBy: [{ issuedAt: 'desc' }],
+      take: 5000,
+    });
+    const moIds = [...new Set(records.map((r: any) => r.manufacturingOrderId).filter((id: any) => Boolean(id)))];
+    const mos = moIds.length
+      ? await prisma.manufacturingOrder.findMany({ where: { id: { in: moIds } }, include: { part: { select: { partNumber: true, name: true } } } })
+      : [];
+    const moMap = new Map(mos.map((mo: any) => [mo.id, mo]));
+    const data = records.map((record: any) => {
+      const mo: any = moMap.get(record.manufacturingOrderId);
+      const consumed = Number(record.consumedWeightKg || 0);
+      const scrap = Number(record.varianceWeightKg || 0);
+      return {
+        issueDocumentNumber: record.documentNumber,
+        issueDate: record.issuedAt.toISOString(),
+        coilNumber: record.coil?.coilId || record.coilId,
+        heatNumber: record.coil?.heatNumber || '—',
+        materialGrade: record.coil?.material?.grade || '—',
+        thicknessMm: Number(record.coil?.thicknessMm || 0),
+        consumedKg: consumed,
+        destinationMachine: record.productionOperation?.plannedMachine ? `${record.productionOperation.plannedMachine.code} - ${record.productionOperation.plannedMachine.name}` : 'ثبت نشده',
+        operationStep: record.productionOperation?.stepNumber || null,
+        operationName: record.productionOperation?.operation?.name || 'ثبت نشده',
+        targetMoNumber: mo?.moNumber || record.manufacturingOrderId || '—',
+        targetPartCode: mo?.part?.partNumber || '—',
+        targetPartName: mo?.part?.name || '—',
+        piecesProduced: 0,
+        scrapKg: scrap,
+        scrapPercent: consumed + scrap > 0 ? Math.round((scrap / (consumed + scrap)) * 10000) / 100 : 0,
+        operatorName: 'ثبت نشده',
+      };
+    }).filter((row: any) => !filters.partId || row.targetPartCode === filters.partId || row.targetMoNumber === filters.partId);
+    res.json({
+      success: true,
+      meta: {
+        reportTitle: 'ردیابی مصرف رول/لوت پای پرس‌ها',
+        generatedAt: new Date().toISOString(),
+        generatedBy: 'سیستم',
+        appliedFilters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])),
+        totalRecordsCount: data.length,
+      },
+      data,
+      source: 'POSTGRESQL_COIL_ISSUE_RETURN_RECORDS',
+      note: 'ماشین، اپراتور و تعداد تولیدشده تا زمان ثبت ارتباط صریح این اطلاعات با رکورد حواله، نمایش داده نمی‌شوند.',
+      truncated: records.length === 5000,
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در گزارش مصرف لوت و کویل' });
   }
 });
 
-// 19.16 Supplier Matrix (Grade x Thickness)
 apiRouter.get('/reports/supplier-matrix', (req: Request, res: Response) => {
   try {
     const filters = extractReportFilters(req);
@@ -6984,6 +10155,78 @@ apiRouter.get('/erp-services/capacity-overlaps', async (req: Request, res: Respo
       success: false,
       error: error instanceof Error ? error.message : 'خطا در تحلیل تداخل ظرفیت ماشین‌آلات',
     });
+  }
+});
+
+
+/**
+ * POST /api/wip/identity-links
+ * Explicitly maps one snapshot WIP order and all its operations to normalized
+ * production records. This endpoint does not post inventory or production quantities.
+ */
+apiRouter.get('/wip/production-posting-context', async (req: Request, res: Response) => {
+  try {
+    const wipMoId = typeof req.query.wipMoId === 'string' ? req.query.wipMoId : '';
+    const wipOrder = manufacturingOrdersStore.find(order => order.id === wipMoId);
+    if (!wipOrder) return res.status(404).json({ success: false, error: 'دستور WIP یافت نشد.' });
+
+    const prisma = getPrismaClient();
+    const [manufacturingOrders, shifts, users, machines, identityLink] = await Promise.all([
+      prisma.manufacturingOrder.findMany({
+        where: { part: { partNumber: wipOrder.partCode } },
+        include: {
+          part: { select: { partNumber: true, name: true } },
+          operations: {
+            include: { operation: { select: { processType: true, name: true } }, plannedMachine: { select: { id: true, code: true, name: true } } },
+            orderBy: { stepNumber: 'asc' },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 100,
+      }),
+      prisma.shift.findMany({ where: { active: true }, select: { id: true, code: true, name: true, startTime: true, endTime: true }, orderBy: { startTime: 'asc' } }),
+      prisma.user.findMany({ where: { active: true }, select: { id: true, username: true, fullName: true, personnelCode: true }, orderBy: { fullName: 'asc' } }),
+      prisma.machine.findMany({ where: { active: true, status: 'ACTIVE' }, select: { id: true, code: true, name: true }, orderBy: { code: 'asc' } }),
+      prisma.wipManufacturingOrderLink.findUnique({
+        where: { wipManufacturingOrderId: wipMoId },
+        select: { manufacturingOrderId: true },
+      }),
+    ]);
+    return res.json({ success: true, data: { manufacturingOrders, shifts, users, machines, identityLink } });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'خطا در دریافت اطلاعات ثبت تولید' });
+  }
+});
+
+apiRouter.post('/wip/identity-links', async (req: Request, res: Response) => {
+  try {
+    const { wipManufacturingOrderId, manufacturingOrderId, createdBy, notes } = req.body || {};
+    if (
+      typeof wipManufacturingOrderId !== 'string' || !wipManufacturingOrderId.trim() ||
+      typeof manufacturingOrderId !== 'string' || !manufacturingOrderId.trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'شناسه دستور ساخت WIP و شناسه دستور ساخت دیتابیس الزامی است.',
+      });
+    }
+
+    const result = await linkWipManufacturingOrderToRelational(
+      wipManufacturingOrderId.trim(),
+      manufacturingOrderId.trim(),
+      typeof createdBy === 'string' ? createdBy : undefined,
+      typeof notes === 'string' ? notes : undefined,
+    );
+    return res.status(201).json({
+      success: true,
+      message: 'ارتباط هویتی دستور ساخت و تمام عملیات آن با موفقیت ثبت شد.',
+      data: result,
+      inventoryPosted: false,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'خطا در ایجاد ارتباط هویتی WIP';
+    const status = /not found/i.test(message) ? 404 : 409;
+    return res.status(status).json({ success: false, error: message, inventoryPosted: false });
   }
 });
 

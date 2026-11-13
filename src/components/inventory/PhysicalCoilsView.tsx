@@ -220,11 +220,20 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
   const [issueMode, setIssueMode] = useState<'SINGLE' | 'MULTI'>('SINGLE');
   const [issueWeight, setIssueWeight] = useState('');
   const [issueMoId, setIssueMoId] = useState('');
+  const [issueOperationId, setIssueOperationId] = useState('');
   const [issueScrap, setIssueScrap] = useState('0');
-  const [multiPartsList, setMultiPartsList] = useState<Array<{ partName: string; moId: string; issuedWeightKg: string }>>([
-    { partName: 'قطعه شماره ۱ (براکت چپ)', moId: 'MO-1403-101', issuedWeightKg: '800' },
-    { partName: 'قطعه شماره ۲ (براکت راست)', moId: 'MO-1403-102', issuedWeightKg: '700' },
+  const [issueRequestKey, setIssueRequestKey] = useState('');
+  const [initialInputQuantityPcs, setInitialInputQuantityPcs] = useState('');
+  const [multiPartsList, setMultiPartsList] = useState<Array<{ partName: string; moId: string; moOperationId: string; issuedWeightKg: string }>>([
+    { partName: '', moId: '', moOperationId: '', issuedWeightKg: '' },
   ]);
+  const [availableManufacturingOrders, setAvailableManufacturingOrders] = useState<Array<{
+    id: string; moNumber: string; partCode: string; partName: string; status: string;
+    weightNetKg: number;
+    weightGrossKg: number;
+    wipManufacturingOrderId: string | null;
+    operations: Array<{ id: string; stepNumber: number; operationCode: string; operationName: string; processType: string; status: string; plannedMachine?: string | null; isFirstOperation?: boolean }>;
+  }>>([]);
 
   // Return Form states
   const [returnWeight, setReturnWeight] = useState('');
@@ -236,6 +245,20 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
     Array<{ id: string; contractNumber: string; title?: string; customerName?: string }>
   >([]);
 
+  const selectedIssueMo = availableManufacturingOrders.find(mo => mo.id === issueMoId);
+  const selectedIssueOperation = selectedIssueMo?.operations.find(operation => operation.id === issueOperationId);
+  const suggestedInitialInputPcs = selectedIssueMo && selectedIssueMo.weightGrossKg > 0
+    ? Math.floor(Math.max(0, (Number(issueWeight) || 0) - (Number(issueScrap) || 0)) / selectedIssueMo.weightGrossKg)
+    : 0;
+
+  useEffect(() => {
+    if (selectedIssueOperation?.isFirstOperation) {
+      setInitialInputQuantityPcs(suggestedInitialInputPcs > 0 ? String(suggestedInitialInputPcs) : '');
+    } else {
+      setInitialInputQuantityPcs('');
+    }
+  }, [issueMoId, issueOperationId, issueWeight, issueScrap]);
+
   // Genealogy data state
   const [genealogyData, setGenealogyData] = useState<any>(null);
   const [genealogyLoading, setGenealogyLoading] = useState(false);
@@ -246,9 +269,10 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
   const fetchCoils = async () => {
     setLoading(true);
     try {
-      const [coilsRes, cntRes] = await Promise.all([
+      const [coilsRes, cntRes, moRes] = await Promise.all([
         fetch('/api/inventory/coils'),
         fetch('/api/inventory/contracts'),
+        fetch('/api/inventory/coils/issue-options'),
       ]);
       const data = await coilsRes.json();
       if (data.success) {
@@ -258,6 +282,8 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
       if (cntData.success && Array.isArray(cntData.data)) {
         setAvailableContracts(cntData.data);
       }
+      const moData = await moRes.json();
+      if (moData.success && Array.isArray(moData.data)) setAvailableManufacturingOrders(moData.data);
     } catch (err) {
       console.error('Error fetching coils:', err);
     } finally {
@@ -312,6 +338,10 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
 
     if (issueMode === 'MULTI') {
       const validParts = multiPartsList.filter(p => Number(p.issuedWeightKg) > 0);
+      if (validParts.length === 0 || validParts.some(p => !p.moId.trim() || !p.moOperationId.trim())) {
+        setNotification({ type: 'error', message: 'برای هر ردیف، دستور ساخت، عملیات مجاز و وزن حواله را انتخاب کنید.' });
+        return;
+      }
       const totalMultiKg = validParts.reduce((sum, p) => sum + Number(p.issuedWeightKg), 0);
       const scrap = Number(issueScrap) || 0;
       const totalRequired = totalMultiKg + scrap;
@@ -329,9 +359,11 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            issueRequestKey,
             multiParts: validParts.map(p => ({
               partName: p.partName,
               moId: p.moId,
+              moOperationId: p.moOperationId,
               issuedWeightKg: Number(p.issuedWeightKg),
             })),
             scrappedKg: scrap,
@@ -344,6 +376,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
         } else {
           setNotification({ type: 'success', message: data.message });
           setIssueModalOpen(false);
+          setIssueRequestKey('');
           fetchCoils();
         }
       } catch (err: any) {
@@ -351,6 +384,10 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
       }
     } else {
       const issuedKg = Number(issueWeight);
+      if (!issueMoId.trim() || !issueOperationId.trim()) {
+        setNotification({ type: 'error', message: 'برای رهگیری مصرف، دستور ساخت و عملیات تولید را انتخاب کنید.' });
+        return;
+      }
       if (!issuedKg || issuedKg <= 0 || issuedKg > selectedCoil.remainingWeightKg) {
         setNotification({
           type: 'error',
@@ -364,9 +401,13 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            issueRequestKey,
             issuedWeightKg: issuedKg,
-            moId: issueMoId || 'MO-PROD-LINE-01',
+            moId: issueMoId.trim(),
+            moOperationId: issueOperationId.trim(),
             scrappedKg: Number(issueScrap) || 0,
+            initialInputQuantityPcs: selectedIssueOperation?.isFirstOperation ? Number(initialInputQuantityPcs) || 0 : undefined,
+            wipManufacturingOrderId: selectedIssueMo?.wipManufacturingOrderId || undefined,
             user: currentUser,
           }),
         });
@@ -376,6 +417,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
         } else {
           setNotification({ type: 'success', message: data.message });
           setIssueModalOpen(false);
+          setIssueRequestKey('');
           setIssueWeight('');
           fetchCoils();
         }
@@ -779,6 +821,11 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                             onClick={() => {
                               setSelectedCoil(coil);
                               setIssueWeight(String(coil.remainingWeightKg));
+                              setIssueMoId('');
+                              setIssueOperationId('');
+                              setIssueScrap('0');
+                              setInitialInputQuantityPcs('');
+                              setIssueRequestKey(globalThis.crypto?.randomUUID?.() || `coil-issue-${Date.now()}-${Math.random().toString(36).slice(2)}`);
                               setIssueMode('SINGLE');
                               setIssueModalOpen(true);
                             }}
@@ -982,15 +1029,53 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                   </div>
 
                   <div>
-                    <label className="block text-slate-600 mb-1 font-medium">شماره دستور ساخت (MO)</label>
-                    <input
-                      type="text"
-                      placeholder="مثال: MO-1403-1002"
+                    <label className="block text-slate-600 mb-1 font-medium">دستور ساخت (MO)</label>
+                    <select
                       value={issueMoId}
-                      onChange={e => setIssueMoId(e.target.value)}
+                      onChange={e => { setIssueMoId(e.target.value); setIssueOperationId(''); }}
+                      required
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 focus:border-slate-400 focus:outline-none"
-                    />
+                    >
+                      <option value="">انتخاب دستور ساخت</option>
+                      {availableManufacturingOrders.map(mo => (
+                        <option key={mo.id} value={mo.id}>{mo.moNumber} — {mo.partCode} / {mo.partName}</option>
+                      ))}
+                    </select>
                   </div>
+                  <div>
+                    <label className="block text-slate-600 mb-1 font-medium">عملیات مصرف</label>
+                    <select
+                      value={issueOperationId}
+                      onChange={e => setIssueOperationId(e.target.value)}
+                      required
+                      disabled={!issueMoId}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 focus:border-slate-400 focus:outline-none disabled:opacity-50"
+                    >
+                      <option value="">انتخاب عملیات</option>
+                      {availableManufacturingOrders.find(mo => mo.id === issueMoId)?.operations.map(operation => (
+                        <option key={operation.id} value={operation.id}>مرحله {operation.stepNumber} — {operation.operationName}{operation.plannedMachine ? ' (' + operation.plannedMachine + ')' : ''}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {selectedIssueOperation?.isFirstOperation && (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-3 space-y-2">
+                      <div className="text-xs font-semibold text-slate-800">ورودی اولیه مرحله اول (عدد قطعه)</div>
+                      <div className="text-[11px] text-slate-600">
+                        پیشنهاد سیستم: {formatNumber(suggestedInitialInputPcs)} عدد؛ بر اساس وزن ناخالص مهندسی هر قطعه ({formatNumber(selectedIssueMo?.weightGrossKg || 0)} kg)
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        required
+                        value={initialInputQuantityPcs}
+                        onChange={e => setInitialInputQuantityPcs(e.target.value)}
+                        placeholder="تعداد پیشنهادی را بررسی و تأیید کنید"
+                        className="w-full bg-white border border-blue-200 rounded-lg px-3 py-2 text-slate-900 font-mono font-bold focus:border-blue-500 focus:outline-none"
+                      />
+                      <p className="text-[10px] text-slate-500">تعداد پیشنهادی قابل ویرایش است؛ مقدار نهایی با تأیید اپراتور در موجودی انتظار مرحله اول ثبت می‌شود.</p>
+                    </div>
+                  )}
                 </>
               ) : (
                 /* Multi-Part Allocation (Scenario: 1 coil for 2 parts simultaneously) */
@@ -1003,7 +1088,7 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                     <div key={idx} className="bg-white p-3 rounded-lg border border-slate-200 space-y-2">
                       <div className="flex items-center justify-between text-[11px] font-bold text-slate-700">
                         <span>قطعه شماره {idx + 1}</span>
-                        {multiPartsList.length > 2 && (
+                        {multiPartsList.length > 1 && (
                           <button
                             type="button"
                             onClick={() => setMultiPartsList(multiPartsList.filter((_, i) => i !== idx))}
@@ -1014,50 +1099,75 @@ export const PhysicalCoilsView: React.FC<PhysicalCoilsViewProps> = ({ currentUse
                         )}
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                        <div className="sm:col-span-2">
-                          <input
-                            type="text"
-                            placeholder="نام قطعه / شرح عملیات (مثلاً براکت چپ پراید)"
-                            value={p.partName}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-slate-500 mb-1">دستور ساخت</label>
+                          <select
+                            value={p.moId}
                             onChange={e => {
                               const updated = [...multiPartsList];
-                              updated[idx].partName = e.target.value;
+                              const selectedMo = availableManufacturingOrders.find(mo => mo.id === e.target.value);
+                              updated[idx].moId = e.target.value;
+                              updated[idx].partName = selectedMo ? selectedMo.partCode + ' — ' + selectedMo.partName : '';
+                              updated[idx].moOperationId = '';
                               setMultiPartsList(updated);
                             }}
+                            required
                             className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-900"
-                          />
+                          >
+                            <option value="">انتخاب MO</option>
+                            {availableManufacturingOrders.map(mo => (
+                              <option key={mo.id} value={mo.id}>{mo.moNumber} — {mo.partCode}</option>
+                            ))}
+                          </select>
+                          <span className="block mt-1 text-[10px] text-slate-500">{p.partName}</span>
                         </div>
                         <div>
+                          <label className="block text-[10px] text-slate-500 mb-1">وزن مورد نیاز (kg)</label>
                           <input
                             type="number"
-                            placeholder="وزن (kg)"
+                            placeholder="وزن"
                             value={p.issuedWeightKg}
                             onChange={e => {
                               const updated = [...multiPartsList];
                               updated[idx].issuedWeightKg = e.target.value;
                               setMultiPartsList(updated);
                             }}
+                            min={0.001}
+                            required
                             className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-900 font-mono font-bold"
                           />
                         </div>
                       </div>
-
                       <div>
-                        <input
-                          type="text"
-                          placeholder="دستور ساخت MO (مثلاً MO-1403-101)"
-                          value={p.moId}
+                        <label className="block text-[10px] text-slate-500 mb-1">عملیات مصرف</label>
+                        <select
+                          value={p.moOperationId}
                           onChange={e => {
                             const updated = [...multiPartsList];
-                            updated[idx].moId = e.target.value;
+                            updated[idx].moOperationId = e.target.value;
                             setMultiPartsList(updated);
                           }}
-                          className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1 text-[11px] text-slate-700"
-                        />
+                          required
+                          disabled={!p.moId}
+                          className="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1 text-[11px] text-slate-700 disabled:opacity-50"
+                        >
+                          <option value="">انتخاب عملیات</option>
+                          {availableManufacturingOrders.find(mo => mo.id === p.moId)?.operations.map(operation => (
+                            <option key={operation.id} value={operation.id}>مرحله {operation.stepNumber} — {operation.operationName}</option>
+                          ))}
+                        </select>
                       </div>
                     </div>
                   ))}
+
+                  <button
+                    type="button"
+                    onClick={() => setMultiPartsList([...multiPartsList, { partName: '', moId: '', moOperationId: '', issuedWeightKg: '' }])}
+                    className="w-full rounded-lg border border-dashed border-blue-300 bg-white px-3 py-2 text-xs font-medium text-blue-800 hover:bg-blue-50"
+                  >
+                    افزودن قطعه / دستور ساخت
+                  </button>
 
                   <div className="flex items-center justify-between pt-2 border-t border-blue-200 text-xs">
                     <span className="text-slate-600">
