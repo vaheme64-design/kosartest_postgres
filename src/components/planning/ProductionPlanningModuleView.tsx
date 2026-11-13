@@ -151,14 +151,21 @@ export const ProductionPlanningModuleView: React.FC<ProductionPlanningModuleView
   const handleRegenerate = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/planning/suggestions/regenerate', { method: 'POST' });
+      const res = await fetch('/api/planning/proposals/regenerate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
       const data = await res.json();
-      if (data.success) {
-        await loadPlanningData();
-        if (onGlobalRefresh) await onGlobalRefresh();
+      if (!res.ok || !data.success) {
+        setPlanToast(data.error || 'تولید پیشنهاد برنامه ناموفق بود.');
+        return;
       }
+      await loadPlanningData();
+      setPlanToast('پیشنهاد برنامه جدید از اطلاعات PostgreSQL ایجاد شد. برای بررسی و تأیید به تب پیشنهاد برنامه بروید.');
+      if (onGlobalRefresh) await onGlobalRefresh();
     } catch (err) {
-      console.error('Failed to regenerate plans:', err);
+      setPlanToast(err instanceof Error ? err.message : 'خطا در تولید پیشنهاد برنامه');
     } finally {
       setLoading(false);
     }
