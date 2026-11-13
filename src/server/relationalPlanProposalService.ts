@@ -1,6 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { getPrismaClient } from './db/prisma';
 import { getRelationalPlanningReadModel } from './relationalPlanningReadModel';
+import {
+  advanceProductionWipSnapshotVersion,
+  getLocationForProcess,
+  getProductionWipSnapshotVersion,
+  loadProductionWipState,
+  manufacturingOrdersStore,
+  productionLogsStore,
+  wipTransfersStore,
+} from './productionWipEngine';
+import type { ManufacturingOrder as WipManufacturingOrder } from '../types/productionWip';
 
 const prisma = getPrismaClient();
 const today = () => new Date(new Date().toISOString().slice(0, 10));
@@ -261,7 +271,12 @@ export async function approveRelationalPlanProposal(id: string, approvedBy: stri
 
 export async function releaseRelationalPlanProposal(id: string, releasedBy: string) {
   const currentReadModel = await getRelationalPlanningReadModel();
-  return prisma.$transaction(async tx => {
+  // Load the latest durable WIP snapshot before the transaction. The snapshot
+  // version is checked again inside the same transaction as plan/MO release.
+  await loadProductionWipState();
+  const expectedWipSnapshotVersion = getProductionWipSnapshotVersion();
+  let bridgedWipOrders: WipManufacturingOrder[] = [];
+  const result = await prisma.$transaction(async tx => {
     const proposal = await tx.productionPlanProposal.findUnique({
       where: { id },
       include: {
@@ -377,13 +392,115 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
             }),
           },
         },
-        include: { operations: { orderBy: { stepNumber: 'asc' } } },
+        include: { operations: { include: { plannedMachine: true, plannedDie: true }, orderBy: { stepNumber: 'asc' } } },
       });
       manufacturingOrders.push(mo);
+
+      const bridgeOrderId = `WIP-${mo.id}`;
+      const nowIso = now.toISOString();
+      const wipOperations = line.route.operations.map((routeOperation: any, index: number) => {
+        const productionOperation = mo.operations.find((item: any) => item.stepNumber === routeOperation.stepNumber);
+        if (!productionOperation) {
+          throw new Error(`عملیات relational مرحله ${routeOperation.stepNumber} برای ایجاد پل WIP پیدا نشد.`);
+        }
+        return {
+          id: `WIPOP-${productionOperation.id}`,
+          moId: bridgeOrderId,
+          moNumber: mo.moNumber,
+          stepNumber: routeOperation.stepNumber,
+          stepCode: routeOperation.stepCode,
+          stepName: routeOperation.stepName,
+          processType: routeOperation.operation.processType,
+          sequence: index + 1,
+          machineId: productionOperation.plannedMachineId || undefined,
+          machineName: productionOperation.plannedMachine?.name || undefined,
+          dieMoldId: productionOperation.plannedDieId || undefined,
+          dieMoldName: productionOperation.plannedDie?.name || undefined,
+          warehouseLocation: getLocationForProcess(routeOperation.operation.processType, routeOperation.stepNumber),
+          status: index === 0 ? 'READY' as const : 'PENDING' as const,
+          waitingInputQty: 0,
+          inProgressQty: 0,
+          goodOutputQty: 0,
+          scrapQty: 0,
+          reworkQty: 0,
+          rejectedQty: 0,
+          readyForTransferQty: 0,
+          transferredQty: 0,
+          standardCycleTimeSec: routeOperation.standardCycleTimeSec,
+          scrapNormPercent: numeric(routeOperation.scrapNormPercent),
+          lastActivityAt: nowIso,
+          createdAt: nowIso,
+        };
+      });
+      const wipOrder: WipManufacturingOrder = {
+        id: bridgeOrderId,
+        moNumber: mo.moNumber,
+        partId: line.partId,
+        partCode: line.part.partNumber,
+        partName: line.part.name,
+        targetQuantity: numeric(mo.targetQty),
+        // Material is not issued at plan release. The first operation is ready
+        // for input, but no WIP quantity is fabricated or implied here.
+        initialInputQuantity: 0,
+        completedQuantity: 0,
+        totalScrapQuantity: 0,
+        totalReworkQuantity: 0,
+        totalRejectedQuantity: 0,
+        routingId: line.routeId,
+        routingVersion: line.route.version,
+        status: 'RELEASED',
+        startDate: mo.scheduledStartDate.toISOString().slice(0, 10),
+        dueDate: mo.scheduledEndDate.toISOString().slice(0, 10),
+        operations: wipOperations,
+        notes: `پل اجرایی از دستور ساخت relational ${mo.moNumber}`,
+        createdBy: releasedBy,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      bridgedWipOrders.push(wipOrder);
+      await tx.wipManufacturingOrderLink.create({
+        data: {
+          wipManufacturingOrderId: bridgeOrderId,
+          manufacturingOrderId: mo.id,
+          createdBy: releasedBy,
+          notes: 'ایجاد خودکار پل هویتی همزمان با صدور برنامه تولید',
+          operationLinks: {
+            create: mo.operations.map((productionOperation: any) => ({
+              wipOperationId: `WIPOP-${productionOperation.id}`,
+              productionOperationId: productionOperation.id,
+            })),
+          },
+        },
+      });
+
       await tx.customerOrderLine.update({
         where: { id: line.customerOrderLineId },
         data: { status: 'IN_PRODUCTION' },
       });
+    }
+
+    if (bridgedWipOrders.length) {
+      const snapshot = await tx.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+      if (!snapshot || snapshot.version !== expectedWipSnapshotVersion) {
+        throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: WIP snapshot changed while releasing the production plan; retry after refreshing.');
+      }
+      const currentPayload = snapshot.payload as any;
+      if (!currentPayload || !Array.isArray(currentPayload.manufacturingOrders) ||
+          !Array.isArray(currentPayload.wipTransfers) || !Array.isArray(currentPayload.productionLogs)) {
+        throw new Error('Persistent WIP snapshot is malformed. Refusing to append released manufacturing orders.');
+      }
+      const nextPayload = {
+        manufacturingOrders: [...currentPayload.manufacturingOrders, ...bridgedWipOrders],
+        wipTransfers: currentPayload.wipTransfers,
+        productionLogs: currentPayload.productionLogs,
+      };
+      const updatedSnapshot = await tx.wipStateSnapshot.updateMany({
+        where: { id: 'production-wip-state', version: expectedWipSnapshotVersion },
+        data: { payload: nextPayload, version: { increment: 1 } },
+      });
+      if (updatedSnapshot.count !== 1) {
+        throw new Error('WIP_SNAPSHOT_VERSION_CONFLICT: WIP snapshot changed while releasing the production plan; retry after refreshing.');
+      }
     }
 
     const updatedProposal = await tx.productionPlanProposal.update({
@@ -392,4 +509,10 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
     });
     return { proposal: updatedProposal, plan, manufacturingOrders, replayed: false };
   }, { isolationLevel: 'Serializable' });
+
+  if (!result.replayed && bridgedWipOrders.length) {
+    manufacturingOrdersStore.push(...bridgedWipOrders);
+    advanceProductionWipSnapshotVersion(expectedWipSnapshotVersion);
+  }
+  return result;
 }
