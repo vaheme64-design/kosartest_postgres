@@ -29,7 +29,6 @@ import {
 } from '../../types/productionPlanning';
 import { Part, Machine, DieMold, Routing } from '../../types/inventory';
 import { PlanningDashboardView } from './PlanningDashboardView';
-import { MachineRecommendationView } from './MachineRecommendationView';
 import { RelationalPlanProposalView } from './RelationalPlanProposalView';
 import { NewCustomerOrderModal } from './NewCustomerOrderModal';
 import { MrpModuleView } from './MrpModuleView';
