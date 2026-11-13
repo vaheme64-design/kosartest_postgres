@@ -8,7 +8,7 @@ interface MaterialIssueModalProps {
 }
 
 export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({ isOpen, onClose, onSuccess }) => {
-  const [options, setOptions] = useState<any>({ stockBalances: [], operations: [], warehouses: [] });
+  const [options, setOptions] = useState<any>({ stockBalances: [], operations: [], warehouses: [], users: [] });
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
