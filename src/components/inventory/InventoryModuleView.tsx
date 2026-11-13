@@ -51,6 +51,7 @@ import { IssueFormModal } from './IssueFormModal';
 import { TransferFormModal } from './TransferFormModal';
 import { AdjustmentFormModal } from './AdjustmentFormModal';
 import { ReturnFromProductionModal } from './ReturnFromProductionModal';
+import { MaterialIssueModal } from './MaterialIssueModal';
 import { InventoryModuleSkeleton } from '../ui/Skeleton';
 
 export type InventorySubTab =
@@ -141,6 +142,7 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
   // Modal States
   const [isReceiptOpen, setIsReceiptOpen] = useState(false);
   const [isIssueOpen, setIsIssueOpen] = useState(false);
+  const [isMaterialIssueOpen, setIsMaterialIssueOpen] = useState(false);
   const [issueModalPreset, setIssueModalPreset] = useState<any>(null);
   const [isReturnOpen, setIsReturnOpen] = useState(false);
   const [isTransferOpen, setIsTransferOpen] = useState(false);
@@ -473,6 +475,14 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
             >
               <ArrowUpRight className="w-3.5 h-3.5 text-orange-400" />
               <span>حواله خروج به خط</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsMaterialIssueOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-semibold transition-colors shadow-2xs cursor-pointer"
+            >
+              <ArrowRightLeft className="w-3.5 h-3.5" />
+              <span>حواله مواد به عملیات</span>
             </button>
             <button
               type="button"
@@ -969,6 +979,16 @@ export const InventoryModuleView: React.FC<InventoryModuleViewProps> = ({
         balances={balances}
         onSubmit={handleCreateDocument}
         onItemCreated={loadInventoryData}
+      />
+
+      <MaterialIssueModal
+        isOpen={isMaterialIssueOpen}
+        onClose={() => setIsMaterialIssueOpen(false)}
+        onSuccess={async () => {
+          setNotification({ type: 'success', message: 'مواد با موفقیت به محل پای‌کار عملیات منتقل شد.' });
+          await loadInventoryData();
+          if (onGlobalRefresh) await onGlobalRefresh();
+        }}
       />
 
       <AdjustmentFormModal
