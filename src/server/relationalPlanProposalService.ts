@@ -7,8 +7,6 @@ import {
   getProductionWipSnapshotVersion,
   loadProductionWipState,
   manufacturingOrdersStore,
-  productionLogsStore,
-  wipTransfersStore,
 } from './productionWipEngine';
 import type { ManufacturingOrder as WipManufacturingOrder } from '../types/productionWip';
 
@@ -284,7 +282,7 @@ export async function releaseRelationalPlanProposal(id: string, releasedBy: stri
           include: {
             customerOrderLine: { include: { order: true } },
             route: { include: { operations: { include: { operation: true, die: true }, orderBy: { stepNumber: 'asc' } } } },
-            part: { select: { thicknessMm: true } },
+            part: { select: { partNumber: true, name: true, thicknessMm: true } },
           },
           orderBy: [{ priority: 'asc' }, { plannedEndDate: 'asc' }],
         },
