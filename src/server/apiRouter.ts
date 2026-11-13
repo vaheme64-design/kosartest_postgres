@@ -3225,7 +3225,7 @@ apiRouter.get('/inventory/material-issue-options', async (_req: Request, res: Re
   try {
     if (!isDatabaseUrlConfigured()) return res.status(503).json({ success: false, error: 'این فهرست فقط از PostgreSQL قابل دریافت است.' });
     const prisma = getPrismaClient();
-    const [stockBalances, operations, warehouses] = await Promise.all([
+    const [stockBalances, operations, warehouses, users] = await Promise.all([
       prisma.stockBalance.findMany({
         where: {
           quantityAvailable: { gt: 0 },
@@ -3255,6 +3255,11 @@ apiRouter.get('/inventory/material-issue-options', async (_req: Request, res: Re
         include: { locations: { where: { active: true }, select: { id: true, code: true } } },
         orderBy: { code: 'asc' },
       }),
+      prisma.user.findMany({
+        where: { active: true },
+        select: { id: true, fullName: true, personnelCode: true, username: true },
+        orderBy: { fullName: 'asc' },
+      }),
     ]);
     return res.json({
       success: true,
@@ -3262,6 +3267,7 @@ apiRouter.get('/inventory/material-issue-options', async (_req: Request, res: Re
         stockBalances,
         operations: operations.filter((item: any) => item.wipExecutionLink),
         warehouses,
+        users,
       },
     });
   } catch (error) {
@@ -3284,11 +3290,12 @@ apiRouter.post('/inventory/material-issues', async (req: Request, res: Response)
   const productionOperationId = String(payload.productionOperationId || '').trim();
   const targetWarehouseId = String(payload.targetWarehouseId || '').trim();
   const targetLocationId = String(payload.targetLocationId || '').trim();
+  const createdByUserId = String(payload.createdByUserId || '').trim();
   const quantity = Number(payload.quantity);
   const suppliedWeightKg = payload.weightKg === undefined || payload.weightKg === null || payload.weightKg === ''
     ? null : Number(payload.weightKg);
 
-  if (!sourceStockBalanceId || !productionOperationId || !targetWarehouseId || !targetLocationId ||
+  if (!sourceStockBalanceId || !productionOperationId || !targetWarehouseId || !targetLocationId || !createdByUserId ||
       !Number.isFinite(quantity) || quantity <= 0 ||
       (suppliedWeightKg !== null && (!Number.isFinite(suppliedWeightKg) || suppliedWeightKg < 0))) {
     return res.status(400).json({ success: false, error: 'موجودی مبدا، عملیات تولید، انبار و موقعیت مقصد و مقدار معتبر الزامی هستند.' });
@@ -3399,12 +3406,10 @@ apiRouter.post('/inventory/material-issues', async (req: Request, res: Response)
         throw insufficient;
       }
 
-      const user = payload.createdByUserId
-        ? await tx.user.findFirst({ where: { id: String(payload.createdByUserId), active: true } })
-        : await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      const user = await tx.user.findFirst({ where: { id: createdByUserId, active: true } });
       if (!user) {
-        const invalid: any = new Error('برای ثبت حواله باید حداقل یک کاربر فعال در PostgreSQL وجود داشته باشد.');
-        invalid.statusCode = 409;
+        const invalid: any = new Error('کاربر ثبت‌کننده انتخاب‌شده وجود ندارد یا غیرفعال است.');
+        invalid.statusCode = 400;
         throw invalid;
       }
 
