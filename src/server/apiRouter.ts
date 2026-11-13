@@ -3239,6 +3239,13 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
       },
       orderBy: [{ scheduledEndDate: 'asc' }, { priority: 'desc' }],
     });
+    const wipLinks = await prisma.wipManufacturingOrderLink.findMany({
+      where: { manufacturingOrderId: { in: orders.map((order: any) => order.id) } },
+      select: { manufacturingOrderId: true, wipManufacturingOrderId: true },
+    });
+    const wipIdByManufacturingOrderId = new Map(
+      wipLinks.map((link: any) => [link.manufacturingOrderId, link.wipManufacturingOrderId]),
+    );
     const data = orders.map((order: any) => {
       const firstStep = Math.min(...order.operations.map((operation: any) => operation.stepNumber));
       const eligibleOperations = order.operations.filter((operation: any) => operation.status === 'READY' || operation.status === 'IN_PROGRESS' || (operation.status === 'PENDING' && operation.stepNumber === firstStep));
@@ -3249,7 +3256,7 @@ apiRouter.get('/inventory/coils/issue-options', async (_req: Request, res: Respo
       partName: order.part.name,
       weightNetKg: Number(order.part.weightNetKg || 0),
       weightGrossKg: Number(order.part.weightGrossKg || 0),
-      wipManufacturingOrderId: manufacturingOrdersStore.find(wip => wip.moNumber === order.moNumber && wip.partCode === order.part.partNumber)?.id || null,
+      wipManufacturingOrderId: wipIdByManufacturingOrderId.get(order.id) || null,
       status: order.status,
       operations: eligibleOperations.map((operation: any) => ({
         id: operation.id,
