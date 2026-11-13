@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, Wand2, CheckCircle2, Send, AlertTriangle, ChevronDown, Save } from 'lucide-react';
+import { RefreshCw, Wand2, CheckCircle2, Send, AlertTriangle, Save } from 'lucide-react';
 import { formatNumber, toPersianDigits } from '../../utils/formatters';
 import { formatToJalali } from '../../utils/jalali';
 
