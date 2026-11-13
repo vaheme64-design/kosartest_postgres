@@ -174,6 +174,16 @@ async function main() {
     }
     console.log('PASS: Relational MO and operation identities are bridged into WIP atomically without inventing material input.');
 
+    const issueOptions = await requestJson(baseUrl, '/api/inventory/coils/issue-options');
+    assert(issueOptions.response.status === 200 && issueOptions.payload.success, 'Coil issue options must load from the relational manufacturing-order ledger.');
+    for (const releasedMo of release.payload.data.manufacturingOrders) {
+      const issueOption = issueOptions.payload.data.find((item: any) => item.id === releasedMo.id);
+      assert(issueOption, 'Every newly released relational MO with a READY first operation must be available for raw-material issue.');
+      assert(issueOption.wipManufacturingOrderId === `WIP-${releasedMo.id}`, 'Coil issue options must resolve the exact durable WIP bridge identity, not infer it from part and MO labels.');
+      assert(issueOption.operations[0]?.isFirstOperation && issueOption.operations[0]?.status === 'READY', 'The first released operation must be exposed as the initial material-input target.');
+    }
+    console.log('PASS: Newly released relational MOs appear in coil issue options with their durable WIP identity.');
+
     const replay = await requestJson(baseUrl, `/api/planning/proposals/${activeProposalId}/release`, 'POST', { releasedBy: 'CI Retry' });
     assert(replay.response.status === 200 && replay.payload.data.replayed, 'Repeated release must be idempotent.');
     assert(replay.payload.data.plan.id === planId, 'Repeated release must return the original plan, not create another one.');
