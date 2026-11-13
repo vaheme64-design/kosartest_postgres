@@ -271,6 +271,11 @@ async function main() {
       issueRequestKey: issueKey,
       notes: 'CI operation-linked component issue',
     };
+    const materialIssueOptions = await requestJson(baseUrl, '/api/inventory/material-issue-options');
+    assert(materialIssueOptions.response.status === 200 && materialIssueOptions.payload.success, 'Non-coil issue UI options endpoint must load.');
+    assert(materialIssueOptions.payload.data.stockBalances.some((item: any) => item.id === sourceBalance.id), 'Issue options must include the selected available non-coil stock balance.');
+    assert(materialIssueOptions.payload.data.operations.some((item: any) => item.id === targetOperation.id), 'Issue options must include the released operation with a WIP identity link.');
+    assert(materialIssueOptions.payload.data.warehouses.some((item: any) => item.id === wipWarehouse!.id && item.locations.some((location: any) => location.id === stagingLocation.id)), 'Issue options must include the active WIP staging warehouse and location.');
     const materialIssue = await requestJson(baseUrl, '/api/inventory/material-issues', 'POST', issueBody);
     assert(materialIssue.response.status === 201 && materialIssue.payload.success, `Non-coil material issue failed: ${JSON.stringify(materialIssue.payload)}`);
     materialIssueDocumentId = materialIssue.payload.data.id;
