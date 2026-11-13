@@ -78,3 +78,11 @@ The proposal lifecycle is now backed by `ProductionPlanProposal` and `Production
 ### Explicit operational boundary
 
 This increment persists planning proposals and creates relational plans/MOs, but it does not yet reserve raw materials or create a coil issue. It also does not yet create the legacy WIP snapshot identity link for a newly released MO; the normalized MO and route operations are durable, while the WIP execution bridge remains a separate integration step. Proposal dates currently use generation date through customer requested date as a planning window, not a finite-capacity schedule. Machine eligibility is technical filtering only; shift capacity, downtime, setup/load commitments, and dispatch sequencing are not solved here. The existing legacy planning UI still uses the old suggestion endpoints; UI wiring to the new `/planning/proposals` API is a follow-up, and legacy sample-backed endpoints remain blocked in database mode.
+
+
+### رابط کاربری چرخه پیشنهاد برنامه
+- تب «پیشنهاد برنامه و پرس» اکنون به APIهای پایدار `/api/planning/proposals` متصل است و فهرست نسخه‌ها، وضعیت هر پیشنهاد، ردیف‌های سفارش، موعد تحویل، هشدارها و عملیات مسیر را از PostgreSQL می‌خواند.
+- برای هر عملیات، انتخاب ماشین فقط از فهرست ماشین‌های واجد شرایط ذخیره‌شده در snapshot پیشنهاد ممکن است؛ انتخاب‌ها با «ذخیره به‌عنوان نسخه جدید» در نسخه جدید ثبت می‌شوند و نسخه قبلی باقی می‌ماند.
+- گردش کار رابط کاربری: تولید پیشنهاد ← بررسی/اصلاح تخصیص ← تأیید ← صدور دستورهای تولید. صدور فقط برای پیشنهاد تأییدشده فعال است.
+- دکمه تولید پیشنهاد در داشبورد نیز به endpoint relational منتقل شد؛ رابط کاربری دیگر برای تولید یا تأیید برنامه به endpoint نمونه‌محور قدیمی متکی نیست.
+- محدودیت‌ها همچنان برقرارند: صدور برنامه هنوز رزرو/حواله خودکار مواد را انجام نمی‌دهد، MOهای relational هنوز به‌صورت خودکار به snapshot اجرایی WIP پل نمی‌شوند و تاریخ‌ها زمان‌بندی ظرفیت محدود ماشین/شیفت نیستند.
