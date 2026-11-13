@@ -7,6 +7,7 @@ const nonce = `REL-PLAN-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 let orderId: string | undefined;
 let proposalGroupId: string | undefined;
 let planId: string | undefined;
+let bridgedWipOrderIds: string[] = [];
 let server: import('node:http').Server | undefined;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -152,6 +153,28 @@ async function main() {
     assert(linkedPlanLine.manufacturingOrders[0].operations.length === part.routes[0].operations.length, 'Released MO must materialize every route operation.');
     assert(linkedPlanLine.manufacturingOrders[0].operations[0].status === 'READY', 'First MO operation must be READY; later operations wait for predecessor output.');
     assert(linkedPlanLine.manufacturingOrders[0].operations.slice(1).every((item: any) => item.status === 'PENDING'), 'Downstream MO operations must remain PENDING.');
+
+    const releasedMoIds = release.payload.data.manufacturingOrders.map((item: any) => item.id);
+    bridgedWipOrderIds = releasedMoIds.map((id: string) => `WIP-${id}`);
+    const bridgeLinks = await prisma.wipManufacturingOrderLink.findMany({
+      where: { manufacturingOrderId: { in: releasedMoIds } },
+      include: { operationLinks: true, manufacturingOrder: { include: { operations: true } } },
+    });
+    assert(bridgeLinks.length === releasedMoIds.length, 'Every released relational MO must have one durable WIP identity bridge.');
+    for (const bridge of bridgeLinks) {
+      assert(bridge.operationLinks.length === bridge.manufacturingOrder.operations.length, 'Every relational operation must have exactly one WIP operation identity link.');
+    }
+    const wipSnapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+    const wipPayload = wipSnapshot?.payload as any;
+    const mirroredOrders = (wipPayload?.manufacturingOrders || []).filter((item: any) => bridgedWipOrderIds.includes(item.id));
+    assert(mirroredOrders.length === releasedMoIds.length, 'Every released MO must be present in the durable WIP execution snapshot.');
+    for (const mirrored of mirroredOrders) {
+      assert(mirrored.initialInputQuantity === 0, 'Plan release must not fabricate an initial material issue or WIP quantity.');
+      assert(mirrored.operations[0]?.status === 'READY' && mirrored.operations[0]?.waitingInputQty === 0, 'First operation is ready for material input but must have zero waiting quantity until material is issued.');
+      assert(mirrored.operations.slice(1).every((item: any) => item.status === 'PENDING'), 'Downstream WIP operations must remain pending.');
+    }
+    console.log('PASS: Relational MO and operation identities are bridged into WIP atomically without inventing material input.');
+
     const replay = await requestJson(baseUrl, `/api/planning/proposals/${activeProposalId}/release`, 'POST', { releasedBy: 'CI Retry' });
     assert(replay.response.status === 200 && replay.payload.data.replayed, 'Repeated release must be idempotent.');
     assert(replay.payload.data.plan.id === planId, 'Repeated release must return the original plan, not create another one.');
@@ -165,6 +188,26 @@ async function main() {
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
     if (planId) {
+      const releasedMoIds = (await prisma.manufacturingOrder.findMany({ where: { planId }, select: { id: true } })).map((item: any) => item.id);
+      if (releasedMoIds.length) {
+        await prisma.wipManufacturingOrderLink.deleteMany({ where: { manufacturingOrderId: { in: releasedMoIds } } });
+      }
+      const snapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
+      if (snapshot && bridgedWipOrderIds.length) {
+        const payload = snapshot.payload as any;
+        if (payload && Array.isArray(payload.manufacturingOrders)) {
+          await prisma.wipStateSnapshot.updateMany({
+            where: { id: 'production-wip-state', version: snapshot.version },
+            data: {
+              payload: {
+                ...payload,
+                manufacturingOrders: payload.manufacturingOrders.filter((item: any) => !bridgedWipOrderIds.includes(item.id)),
+              },
+              version: { increment: 1 },
+            },
+          });
+        }
+      }
       await prisma.manufacturingOrder.deleteMany({ where: { planId } });
       await prisma.productionPlan.deleteMany({ where: { id: planId } });
     }
