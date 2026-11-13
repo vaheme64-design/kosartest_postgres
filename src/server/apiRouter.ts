@@ -3211,6 +3211,319 @@ apiRouter.post('/inventory/contracts/:id/allocate-coil', async (req: Request, re
 /**
  * 16.12. Audit Logs
  */
+/**
+ * POST /api/inventory/material-issues
+ * Transfer a non-coil raw material/consumable from warehouse stock to a released
+ * manufacturing operation's WIP staging location. The component remains its own
+ * inventory item; this does not change the manufactured part's WIP quantity.
+ */
+apiRouter.post('/inventory/material-issues', async (req: Request, res: Response) => {
+  if (!isDatabaseUrlConfigured()) {
+    return res.status(503).json({ success: false, error: 'حواله مواد به عملیات تولید فقط با اتصال PostgreSQL مجاز است.' });
+  }
+
+  const payload = req.body || {};
+  const issueRequestKey = String(payload.issueRequestKey || req.header('Idempotency-Key') || '').trim();
+  if (issueRequestKey.length < 8 || issueRequestKey.length > 160) {
+    return res.status(400).json({ success: false, error: 'شناسه یکتای درخواست حواله (Idempotency-Key) معتبر نیست.' });
+  }
+
+  const sourceStockBalanceId = String(payload.sourceStockBalanceId || '').trim();
+  const productionOperationId = String(payload.productionOperationId || '').trim();
+  const targetWarehouseId = String(payload.targetWarehouseId || '').trim();
+  const targetLocationId = String(payload.targetLocationId || '').trim();
+  const quantity = Number(payload.quantity);
+  const suppliedWeightKg = payload.weightKg === undefined || payload.weightKg === null || payload.weightKg === ''
+    ? null : Number(payload.weightKg);
+
+  if (!sourceStockBalanceId || !productionOperationId || !targetWarehouseId || !targetLocationId ||
+      !Number.isFinite(quantity) || quantity <= 0 ||
+      (suppliedWeightKg !== null && (!Number.isFinite(suppliedWeightKg) || suppliedWeightKg < 0))) {
+    return res.status(400).json({ success: false, error: 'موجودی مبدا، عملیات تولید، انبار و موقعیت مقصد و مقدار معتبر الزامی هستند.' });
+  }
+
+  const prisma = getPrismaClient();
+  const fingerprint = JSON.stringify({
+    sourceStockBalanceId, productionOperationId, targetWarehouseId, targetLocationId,
+    quantity, weightKg: suppliedWeightKg,
+  });
+  const now = new Date();
+
+  try {
+    const result = await prisma.$transaction(async (tx: any) => {
+      const prior = await tx.inventoryDocument.findUnique({
+        where: { issueRequestKey },
+        include: { lines: true, transactions: true },
+      });
+      if (prior) {
+        if (prior.issueRequestFingerprint !== fingerprint) {
+          const conflict: any = new Error('این شناسه درخواست قبلاً با اطلاعات متفاوت استفاده شده است.');
+          conflict.statusCode = 409;
+          throw conflict;
+        }
+        return { document: prior, replayed: true };
+      }
+
+      const source = await tx.stockBalance.findUnique({
+        where: { id: sourceStockBalanceId },
+        include: { part: { include: { unit: true } }, warehouse: true },
+      });
+      if (!source) {
+        const missing: any = new Error('ردیف موجودی مبدا در PostgreSQL یافت نشد.');
+        missing.statusCode = 404;
+        throw missing;
+      }
+      if (source.physicalCoilId) {
+        const invalid: any = new Error('این مسیر مخصوص مواد غیرکلافی است؛ برای کلاف از حواله کلاف استفاده کنید.');
+        invalid.statusCode = 400;
+        throw invalid;
+      }
+      if (!source.part.active || !['RAW_MATERIAL', 'CONSUMABLE'].includes(source.part.category)) {
+        const invalid: any = new Error('فقط اقلام فعال از گروه مواد اولیه یا مواد مصرفی قابل حواله در این مسیر هستند.');
+        invalid.statusCode = 400;
+        throw invalid;
+      }
+      if (source.qualityStatus !== 'AVAILABLE') {
+        const invalid: any = new Error('فقط موجودی با وضعیت کیفی AVAILABLE قابل حواله است.');
+        invalid.statusCode = 409;
+        throw invalid;
+      }
+
+      const operation = await tx.productionOperation.findUnique({
+        where: { id: productionOperationId },
+        include: { manufacturingOrder: { include: { part: true } } },
+      });
+      if (!operation || !['RELEASED', 'IN_PROGRESS'].includes(operation.manufacturingOrder.status)) {
+        const invalid: any = new Error('عملیات باید متعلق به یک دستور ساخت صادرشده یا در حال تولید باشد.');
+        invalid.statusCode = 409;
+        throw invalid;
+      }
+      const operationLink = await tx.wipOperationLink.findUnique({
+        where: { productionOperationId: operation.id },
+      });
+      if (!operationLink) {
+        const invalid: any = new Error('برای این عملیات، پیوند معتبر به عملیات WIP وجود ندارد.');
+        invalid.statusCode = 409;
+        throw invalid;
+      }
+
+      const targetWarehouse = await tx.warehouse.findUnique({ where: { id: targetWarehouseId } });
+      if (!targetWarehouse || !targetWarehouse.active || targetWarehouse.type !== 'WIP') {
+        const invalid: any = new Error('انبار مقصد باید یک انبار فعال از نوع WIP باشد.');
+        invalid.statusCode = 400;
+        throw invalid;
+      }
+      const targetLocation = await tx.warehouseLocation.findFirst({
+        where: { id: targetLocationId, warehouseId: targetWarehouse.id, active: true },
+      });
+      if (!targetLocation) {
+        const invalid: any = new Error('موقعیت مقصد در انبار WIP انتخاب‌شده وجود ندارد یا غیرفعال است.');
+        invalid.statusCode = 400;
+        throw invalid;
+      }
+      if (source.warehouseId === targetWarehouse.id && source.locationId === targetLocation.id) {
+        const invalid: any = new Error('انبار و موقعیت مبدا و مقصد نمی‌توانند یکسان باشند.');
+        invalid.statusCode = 400;
+        throw invalid;
+      }
+
+      if (source.part.unitId !== source.part.unit.id) {
+        throw new Error('واحد پایه قلم در اطلاعات موجودی ناسازگار است.');
+      }
+      if (payload.unitId && payload.unitId !== source.part.unitId) {
+        const invalid: any = new Error('واحد حواله باید با واحد پایه قلم یکسان باشد.');
+        invalid.statusCode = 400;
+        throw invalid;
+      }
+      const weightKg = suppliedWeightKg === null
+        ? (source.part.unit.code === 'KG' ? quantity : 0)
+        : suppliedWeightKg;
+
+      const availableQty = Number(source.quantityAvailable);
+      const availableKg = Number(source.weightKgAvailable);
+      if (availableQty + 1e-9 < quantity || availableKg + 1e-9 < weightKg) {
+        const insufficient: any = new Error(`موجودی آزاد کافی نیست. مقدار آزاد: ${availableQty} ${source.part.unit.symbol}، وزن آزاد: ${availableKg} kg.`);
+        insufficient.statusCode = 409;
+        throw insufficient;
+      }
+
+      const user = payload.createdByUserId
+        ? await tx.user.findFirst({ where: { id: String(payload.createdByUserId), active: true } })
+        : await tx.user.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+      if (!user) {
+        const invalid: any = new Error('برای ثبت حواله باید حداقل یک کاربر فعال در PostgreSQL وجود داشته باشد.');
+        invalid.statusCode = 409;
+        throw invalid;
+      }
+
+      const documentNumber = `ISS-MAT-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+      const document = await tx.inventoryDocument.create({
+        data: {
+          documentNumber,
+          documentType: 'WIP_TRANSFER',
+          documentDate: now,
+          documentStatus: 'CONFIRMED',
+          postingStatus: 'POSTED',
+          warehouseId: source.warehouseId,
+          targetWarehouseId: targetWarehouse.id,
+          referenceType: 'MANUFACTURING_ORDER',
+          referenceNumber: operation.manufacturingOrder.moNumber,
+          createdByUserId: user.id,
+          postedByUserId: user.id,
+          postedAt: now,
+          issueRequestKey,
+          issueRequestFingerprint: fingerprint,
+          notes: String(payload.notes || `حواله ماده ${source.part.partNumber} به عملیات ${operation.stepNumber} دستور ${operation.manufacturingOrder.moNumber}`),
+        },
+      });
+
+      const line = await tx.inventoryDocumentLine.create({
+        data: {
+          documentId: document.id,
+          lineNumber: 1,
+          partId: source.partId,
+          materialLotId: source.materialLotId,
+          productionOperationId: operation.id,
+          locationId: source.locationId,
+          targetLocationId: targetLocation.id,
+          quantity,
+          unitId: source.part.unitId,
+          weightKg,
+          ownership: source.ownership,
+          contractId: source.contractId,
+          contractNumber: source.contractNumber,
+          qualityStatus: 'AVAILABLE',
+          notes: String(payload.notes || ''),
+        },
+      });
+
+      // Conditional decrement prevents two concurrent issues from consuming the same free stock.
+      const sourceUpdate = await tx.stockBalance.updateMany({
+        where: { id: source.id, quantityAvailable: { gte: quantity }, weightKgAvailable: { gte: weightKg } },
+        data: {
+          quantityOnHand: { decrement: quantity },
+          quantityAvailable: { decrement: quantity },
+          weightKgOnHand: { decrement: weightKg },
+          weightKgAvailable: { decrement: weightKg },
+          lastTransactionAt: now,
+        },
+      });
+      if (sourceUpdate.count !== 1) {
+        const conflict: any = new Error('موجودی مبدا هم‌زمان تغییر کرده است؛ موجودی را تازه‌سازی و دوباره بررسی کنید.');
+        conflict.statusCode = 409;
+        throw conflict;
+      }
+
+      const targetIdentity = {
+        partId: source.partId,
+        warehouseId: targetWarehouse.id,
+        locationId: targetLocation.id,
+        materialLotId: source.materialLotId,
+        physicalCoilId: null,
+        ownership: source.ownership,
+        contractId: source.contractId,
+        qualityStatus: 'AVAILABLE',
+      };
+      const targetBalance = await tx.stockBalance.findFirst({ where: targetIdentity });
+      const targetQtyAfter = Number(targetBalance?.quantityOnHand || 0) + quantity;
+      const targetKgAfter = Number(targetBalance?.weightKgOnHand || 0) + weightKg;
+      if (targetBalance) {
+        await tx.stockBalance.update({
+          where: { id: targetBalance.id },
+          data: {
+            quantityOnHand: { increment: quantity },
+            quantityAvailable: { increment: quantity },
+            weightKgOnHand: { increment: weightKg },
+            weightKgAvailable: { increment: weightKg },
+            lastTransactionAt: now,
+          },
+        });
+      } else {
+        await tx.stockBalance.create({
+          data: {
+            ...targetIdentity,
+            quantityOnHand: quantity,
+            quantityReserved: 0,
+            quantityAvailable: quantity,
+            weightKgOnHand: weightKg,
+            weightKgReserved: 0,
+            weightKgAvailable: weightKg,
+            lastTransactionAt: now,
+          },
+        });
+      }
+
+      const baseTransaction = {
+        documentId: document.id,
+        documentLineId: line.id,
+        partId: source.partId,
+        materialLotId: source.materialLotId,
+        physicalCoilId: null,
+        productionOperationId: operation.id,
+        unitId: source.part.unitId,
+        quantity,
+        weightKg,
+        ownership: source.ownership,
+        contractId: source.contractId,
+        contractNumber: source.contractNumber,
+        qualityStatus: 'AVAILABLE',
+        transactionDate: now,
+        postingStatus: 'POSTED',
+        createdByUserId: user.id,
+        manufacturingOrderId: operation.manufacturingOrderId,
+      };
+      await tx.inventoryTransaction.create({
+        data: {
+          ...baseTransaction,
+          transactionNumber: `${documentNumber}-OUT`,
+          warehouseId: source.warehouseId,
+          locationId: source.locationId,
+          transactionType: 'TRANSFER_OUT',
+          quantitySigned: -quantity,
+          weightKgSigned: -weightKg,
+          balanceAfter: Number(source.quantityOnHand) - quantity,
+          balanceKgAfter: Number(source.weightKgOnHand) - weightKg,
+        },
+      });
+      await tx.inventoryTransaction.create({
+        data: {
+          ...baseTransaction,
+          transactionNumber: `${documentNumber}-IN`,
+          warehouseId: targetWarehouse.id,
+          locationId: targetLocation.id,
+          transactionType: 'TRANSFER_IN',
+          quantitySigned: quantity,
+          weightKgSigned: weightKg,
+          balanceAfter: targetQtyAfter,
+          balanceKgAfter: targetKgAfter,
+        },
+      });
+
+      return {
+        document: await tx.inventoryDocument.findUnique({
+          where: { id: document.id },
+          include: { lines: true, transactions: true },
+        }),
+        replayed: false,
+      };
+    }, { isolationLevel: 'Serializable' });
+
+    return res.status(result.replayed ? 200 : 201).json({
+      success: true,
+      replayed: result.replayed,
+      message: result.replayed ? 'این حواله قبلاً ثبت شده بود؛ ثبت تکراری انجام نشد.' : 'مواد با موفقیت به محل پای‌کار عملیات منتقل شد.',
+      data: result.document,
+      producedPartWipChanged: false,
+    });
+  } catch (error) {
+    const statusCode = Number((error as any)?.statusCode) || (/P2002|P2034/.test(String((error as any)?.code || '')) ? 409 : 500);
+    return res.status(statusCode).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'خطا در ثبت حواله ماده به عملیات تولید.',
+    });
+  }
+});
+
 apiRouter.get('/inventory/audit-logs', (_req: Request, res: Response) => {
   res.json({ success: true, count: auditLogsStore.length, data: auditLogsStore });
 });
