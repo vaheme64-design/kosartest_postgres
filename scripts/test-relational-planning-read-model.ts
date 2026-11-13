@@ -7,7 +7,6 @@ const nonce = `REL-PLAN-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 let orderId: string | undefined;
 let proposalGroupId: string | undefined;
 let planId: string | undefined;
-let bridgedWipOrderIds: string[] = [];
 let server: import('node:http').Server | undefined;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -155,7 +154,7 @@ async function main() {
     assert(linkedPlanLine.manufacturingOrders[0].operations.slice(1).every((item: any) => item.status === 'PENDING'), 'Downstream MO operations must remain PENDING.');
 
     const releasedMoIds = release.payload.data.manufacturingOrders.map((item: any) => item.id);
-    bridgedWipOrderIds = releasedMoIds.map((id: string) => `WIP-${id}`);
+    const bridgedWipOrderIds = releasedMoIds.map((id: string) => `WIP-${id}`);
     const bridgeLinks = await prisma.wipManufacturingOrderLink.findMany({
       where: { manufacturingOrderId: { in: releasedMoIds } },
       include: { operationLinks: true, manufacturingOrder: { include: { operations: true } } },
@@ -193,7 +192,8 @@ async function main() {
         await prisma.wipManufacturingOrderLink.deleteMany({ where: { manufacturingOrderId: { in: releasedMoIds } } });
       }
       const snapshot = await prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } });
-      if (snapshot && bridgedWipOrderIds.length) {
+      const cleanupWipOrderIds = releasedMoIds.map((id: string) => `WIP-${id}`);
+      if (snapshot && cleanupWipOrderIds.length) {
         const payload = snapshot.payload as any;
         if (payload && Array.isArray(payload.manufacturingOrders)) {
           await prisma.wipStateSnapshot.updateMany({
@@ -201,7 +201,7 @@ async function main() {
             data: {
               payload: {
                 ...payload,
-                manufacturingOrders: payload.manufacturingOrders.filter((item: any) => !bridgedWipOrderIds.includes(item.id)),
+                manufacturingOrders: payload.manufacturingOrders.filter((item: any) => !cleanupWipOrderIds.includes(item.id)),
               },
               version: { increment: 1 },
             },
