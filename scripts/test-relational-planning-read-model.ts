@@ -1,5 +1,7 @@
 import express from 'express';
-import { apiRouter } from '../src/server/apiRouter';
+import { apiRouter, loadInventoryAppState } from '../src/server/apiRouter';
+import { loadProductionWipState } from '../src/server/productionWipEngine';
+import { INITIAL_PARTS } from '../src/server/sampleData';
 import { getPrismaClient } from '../src/server/db/prisma';
 
 const prisma = getPrismaClient();
@@ -7,6 +9,9 @@ const nonce = `REL-PLAN-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
 let orderId: string | undefined;
 let proposalGroupId: string | undefined;
 let planId: string | undefined;
+let coilId: string | undefined;
+let materialLotId: string | undefined;
+let contractId: string | undefined;
 let server: import('node:http').Server | undefined;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -184,6 +189,172 @@ async function main() {
     }
     console.log('PASS: Newly released relational MOs appear in coil issue options with their durable WIP identity.');
 
+    // Full E2E: use the newly released MO (not a seeded/legacy WIP fixture),
+    // receive and allocate a real physical coil, issue it into first-stage WIP,
+    // load the operation, and post its first production report atomically.
+    const e2eMo = await prisma.manufacturingOrder.findUnique({
+      where: { id: linkedPlanLine.manufacturingOrders[0].id },
+      include: {
+        part: { include: { unit: true } },
+        operations: { include: { operation: true, plannedMachine: true }, orderBy: { stepNumber: 'asc' } },
+      },
+    });
+    assert(e2eMo && e2eMo.operations.length >= 2, 'E2E released MO must contain at least two relational operations.');
+    assert(e2eMo.part.unit.code === 'PCS' && Number(e2eMo.part.weightNetKg || 0) > 0, 'E2E finished part must use PCS and have positive engineering net weight.');
+    const rawPart = await prisma.part.findFirst({
+      where: { active: true, category: 'RAW_MATERIAL', materialId: e2eMo.part.materialId, unit: { code: 'KG' } },
+      include: { material: true, unit: true },
+    });
+    const appRawPart = rawPart ? INITIAL_PARTS.find(item => item.code === rawPart.partNumber) : undefined;
+    const rawWarehouse = await prisma.warehouse.findFirst({ where: { code: 'WH-RAW', active: true } });
+    const supplier = await prisma.customer.findFirst({ where: { active: true }, orderBy: { createdAt: 'asc' } });
+    assert(rawPart?.material && appRawPart && rawWarehouse && supplier, 'E2E requires a KG raw-material item mapped to the app catalog, WH-RAW and an active supplier/customer.');
+    assert(e2eMo.operations[0].plannedMachineId, 'E2E first operation must have an eligible machine assigned by the released plan.');
+    const firstOperation = e2eMo.operations[0];
+    const wipMoId = `WIP-${e2eMo.id}`;
+    const wipOperationId = `WIPOP-${firstOperation.id}`;
+    const firstStageLocation = await prisma.warehouseLocation.findFirst({
+      where: { code: 'LOC-WIP-BLANK', active: true },
+    });
+    assert(firstStageLocation, 'E2E first operation requires the configured first-stage WIP location.');
+    const contract = await prisma.materialContract.create({
+      data: {
+        contractNumber: `${nonce}-E2E-CONTRACT`,
+        supplierCustomerId: supplier.id,
+        title: 'CI relational plan to production E2E',
+        materialId: rawPart.materialId!,
+        totalAllocatedWeightKg: 100,
+        startDate: new Date(),
+        endDate: new Date(Date.now() + 30 * 86400000),
+      },
+    });
+    contractId = contract.id;
+
+    await loadInventoryAppState();
+    await loadProductionWipState();
+    const receipt = await requestJson(baseUrl, '/api/inventory/coils', 'POST', {
+      coilId: `${nonce}-E2E-COIL`,
+      coilPackNumber: `${nonce}-E2E-PACK`,
+      partId: appRawPart.id,
+      partCode: appRawPart.code,
+      partName: appRawPart.name,
+      materialGrade: rawPart.material.grade,
+      thicknessMm: Number(rawPart.thicknessMm || 1),
+      widthMm: 1000,
+      originalWeightKg: 100,
+      remainingWeightKg: 100,
+      warehouseId: rawWarehouse.code,
+      warehouseLocationCode: 'LOC-RAW-A1',
+      ownership: 'SAPCO_SUPPLIER_OWNED',
+      qualityStatus: 'AVAILABLE',
+      physicalStatus: 'AVAILABLE',
+      allocations: [],
+    });
+    assert(receipt.response.status === 201 && receipt.payload.success && receipt.payload.data?.id, `E2E physical coil receipt failed: ${JSON.stringify(receipt.payload)}`);
+    coilId = receipt.payload.data.id;
+    materialLotId = (await prisma.physicalCoil.findUnique({ where: { id: coilId } }))?.materialLotId || undefined;
+    assert(materialLotId, 'E2E coil receipt must create and retain its material lot.');
+    const allocated = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/allocate`, 'POST', {
+      allocations: [{ contractId: contract.id, contractNumber: contract.contractNumber, allocatedWeightKg: 100 }],
+    });
+    assert(allocated.response.status === 200 && allocated.payload.success, 'E2E physical coil must be allocated to its material contract.');
+
+    const issuePayload = {
+      issueRequestKey: `${nonce}-E2E-ISSUE-KEY`,
+      issuedWeightKg: 70,
+      moId: e2eMo.moNumber,
+      moOperationId: firstOperation.id,
+      partId: e2eMo.partId,
+      scrappedKg: 0,
+      initialInputQuantityPcs: 15,
+      wipManufacturingOrderId: wipMoId,
+    };
+    const issued = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', issuePayload);
+    assert(issued.response.status === 200 && issued.payload.success && !issued.payload.duplicate,
+      `E2E coil issue into the released relational MO failed: ${JSON.stringify(issued.payload)}`);
+    const issueRetry = await requestJson(baseUrl, `/api/inventory/coils/${coilId}/issue`, 'POST', issuePayload);
+    const coilAfterIssue = await prisma.physicalCoil.findUnique({ where: { id: coilId } });
+    assert(issueRetry.response.status === 200 && issueRetry.payload.duplicate === true && Number(coilAfterIssue?.remainingWeightKg) === 30,
+      'E2E duplicate coil issue must not deduct the physical coil or WIP input twice.');
+    const initialWipBalance = await prisma.stockBalance.findFirst({
+      where: { physicalCoilId: coilId, partId: e2eMo.partId, locationId: firstStageLocation.id, qualityStatus: 'AVAILABLE' },
+    });
+    assert(Number(initialWipBalance?.quantityOnHand) === 15 && initialWipBalance?.contractId === contract.id,
+      'E2E issue must create 15 PCS at first-stage WIP while retaining physical coil and contract identity.');
+    console.log('PASS: Released relational MO receives operator-confirmed first-stage PCS from a real physical coil.');
+
+    const postingContext = await requestJson(baseUrl, `/api/wip/production-posting-context?wipMoId=${encodeURIComponent(wipMoId)}`);
+    assert(postingContext.response.status === 200 && postingContext.payload.success && postingContext.payload.data.identityLink?.manufacturingOrderId === e2eMo.id,
+      'E2E WIP production context must resolve the same released relational MO.');
+    const shift = postingContext.payload.data.shifts[0];
+    const user = postingContext.payload.data.users[0];
+    assert(shift && user, 'E2E production posting requires an active shift and active user.');
+    const machineId = firstOperation.plannedMachineId || postingContext.payload.data.machines[0]?.id;
+    assert(machineId, 'E2E production posting requires an active machine.');
+    const loaded = await requestJson(baseUrl, '/api/wip/operations/input', 'POST', {
+      moId: wipMoId,
+      operationId: wipOperationId,
+      quantity: 15,
+      operatorName: 'CI E2E Operator',
+      machineId,
+      notes: 'Load 15 PCS issued from the relational plan E2E coil',
+    });
+    assert(loaded.response.status === 200 && loaded.payload.success, `E2E first-operation input load failed: ${JSON.stringify(loaded.payload)}`);
+
+    const productionPayload = {
+      moId: wipMoId,
+      operationId: wipOperationId,
+      relationalManufacturingOrderId: e2eMo.id,
+      idempotencyKey: `${nonce}-E2E-PRODUCTION-KEY`,
+      relationalMachineId: machineId,
+      shiftId: shift.id,
+      createdByUserId: user.id,
+      goodQty: 14,
+      scrapQty: 1,
+      reworkQty: 0,
+      rejectedQty: 0,
+      scrapReason: 'CI E2E validation scrap',
+      operatorName: 'CI E2E Operator',
+      notes: 'First operation production report after relational plan release and coil issue',
+    };
+    const production = await requestJson(baseUrl, '/api/wip/operations/production', 'POST', productionPayload);
+    assert(production.response.status === 201 && production.payload.success && production.payload.inventoryPosted === true,
+      `E2E atomic first production report failed: ${JSON.stringify(production.payload)}`);
+    const productionRetry = await requestJson(baseUrl, '/api/wip/operations/production', 'POST', productionPayload);
+    assert(productionRetry.response.status === 200 && productionRetry.payload.duplicate === true,
+      'E2E retry of the first production report must return the original report without duplicate ledger postings.');
+
+    const [reportCount, sourceAfter, nextOperation, scrapWarehouse, wipAfterProduction, postedTransactions] = await Promise.all([
+      prisma.productionReport.count({ where: { wipIdempotencyKey: productionPayload.idempotencyKey } }),
+      prisma.stockBalance.findFirst({ where: { physicalCoilId: coilId, partId: e2eMo.partId, locationId: firstStageLocation.id, qualityStatus: 'AVAILABLE' } }),
+      prisma.productionOperation.findUnique({ where: { id: e2eMo.operations[1].id } }),
+      prisma.warehouse.findFirst({ where: { type: 'SCRAP', active: true }, include: { locations: { where: { active: true }, orderBy: { code: 'asc' }, take: 1 } } }),
+      prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } }),
+      prisma.inventoryTransaction.findMany({ where: { manufacturingOrderId: e2eMo.id, productionOperationId: firstOperation.id } }),
+    ]);
+    assert(reportCount === 1, 'E2E production report must be persisted exactly once.');
+    assert(Number(sourceAfter?.quantityOnHand || 0) === 0, 'E2E production posting must consume all 15 PCS from first-stage WIP.');
+    assert(Number(nextOperation?.outputGoodQty) === 14 && Number(nextOperation?.inputQty) === 15 && Number(nextOperation?.outputScrapQty) === 1,
+      'E2E relational operation counters must record 15 input, 14 good and 1 scrap.');
+    assert(scrapWarehouse?.locations?.[0], 'E2E scrap posting requires an active scrap warehouse location.');
+    const nextLocation = await prisma.warehouseLocation.findFirst({ where: { code: 'LOC-WIP-DRAWN', active: true } });
+    assert(nextLocation, 'E2E next operation requires the configured downstream WIP location.');
+    const nextBalance = await prisma.stockBalance.findFirst({
+      where: { partId: e2eMo.partId, locationId: nextLocation.id, qualityStatus: 'AVAILABLE', physicalCoilId: coilId },
+    });
+    const scrapBalance = await prisma.stockBalance.findFirst({
+      where: { partId: e2eMo.partId, locationId: scrapWarehouse.locations[0].id, qualityStatus: 'SCRAP', physicalCoilId: coilId },
+    });
+    assert(Number(nextBalance?.quantityOnHand) === 14 && Number(scrapBalance?.quantityOnHand) === 1,
+      'E2E 14 good PCS must move automatically to the next operation and 1 scrap PCS to the scrap location.');
+    assert(postedTransactions.length === 4, 'E2E first production report must create balanced source, good-output and scrap ledger transactions.');
+    const snapshotOrderAfterProduction = ((wipAfterProduction?.payload as any)?.manufacturingOrders || []).find((row: any) => row.id === wipMoId);
+    assert(snapshotOrderAfterProduction?.operations[0]?.status === 'COMPLETED' &&
+      snapshotOrderAfterProduction?.operations[1]?.status === 'READY' &&
+      Number(snapshotOrderAfterProduction.operations[1]?.waitingInputQty) === 14,
+      'E2E WIP snapshot must complete the first operation and automatically queue 14 good PCS at the next operation without receiving confirmation.');
+    console.log('PASS: End-to-end relational plan → coil issue → first-stage input → atomic production report → automatic next-stage WIP transfer.');
+
     const replay = await requestJson(baseUrl, `/api/planning/proposals/${activeProposalId}/release`, 'POST', { releasedBy: 'CI Retry' });
     assert(replay.response.status === 200 && replay.payload.data.replayed, 'Repeated release must be idempotent.');
     assert(replay.payload.data.plan.id === planId, 'Repeated release must return the original plan, not create another one.');
@@ -196,8 +367,27 @@ async function main() {
     console.log('PASS: Sample-backed legacy suggestions and dashboard fail closed instead of leaking sample data.');
   } finally {
     if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    if (coilId) {
+      const coilDocs = await prisma.inventoryDocument.findMany({ where: { lines: { some: { physicalCoilId: coilId } } }, select: { id: true } });
+      await prisma.inventoryTransaction.deleteMany({ where: { OR: [{ physicalCoilId: coilId }, ...(planId ? [{ manufacturingOrder: { planId } }] : [])] } });
+      await prisma.inventoryDocumentLine.deleteMany({ where: { physicalCoilId: coilId } });
+      await prisma.coilIssueReturnRecord.deleteMany({ where: { coilId } });
+      await prisma.stockBalance.deleteMany({ where: { physicalCoilId: coilId } });
+      await prisma.contractCoilAllocation.deleteMany({ where: { coilId } });
+      if (coilDocs.length) await prisma.inventoryDocument.deleteMany({ where: { id: { in: coilDocs.map(row => row.id) } } });
+      await prisma.physicalCoil.deleteMany({ where: { id: coilId } });
+    }
+    if (materialLotId) await prisma.materialLot.deleteMany({ where: { id: materialLotId } });
+    if (contractId) {
+      await prisma.materialContractTransaction.deleteMany({ where: { contractId } });
+      await prisma.materialContract.deleteMany({ where: { id: contractId } });
+    }
     if (planId) {
       const releasedMoIds = (await prisma.manufacturingOrder.findMany({ where: { planId }, select: { id: true } })).map((item: any) => item.id);
+      if (releasedMoIds.length) {
+        await prisma.inventoryTransaction.deleteMany({ where: { manufacturingOrderId: { in: releasedMoIds } } });
+        await prisma.productionReport.deleteMany({ where: { manufacturingOrderId: { in: releasedMoIds } } });
+      }
       if (releasedMoIds.length) {
         await prisma.wipManufacturingOrderLink.deleteMany({ where: { manufacturingOrderId: { in: releasedMoIds } } });
       }
