@@ -202,7 +202,7 @@ async function main() {
     assert(e2eMo && e2eMo.operations.length >= 2, 'E2E released MO must contain at least two relational operations.');
     assert(e2eMo.part.unit.code === 'PCS' && Number(e2eMo.part.weightNetKg || 0) > 0, 'E2E finished part must use PCS and have positive engineering net weight.');
     const rawPart = await prisma.part.findFirst({
-      where: { active: true, category: 'RAW_MATERIAL', materialId: e2eMo.part.materialId, unit: { code: 'KG' } },
+      where: { active: true, category: 'RAW_MATERIAL', materialId: e2eMo.part.materialId, unit: { is: { code: 'KG' } } },
       include: { material: true, unit: true },
     });
     const appRawPart = rawPart ? INITIAL_PARTS.find(item => item.code === rawPart.partNumber) : undefined;
