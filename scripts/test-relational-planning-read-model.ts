@@ -331,7 +331,7 @@ async function main() {
     const [reportCount, sourceAfter, nextOperation, scrapWarehouse, wipAfterProduction, postedTransactions] = await Promise.all([
       prisma.productionReport.count({ where: { wipIdempotencyKey: productionPayload.idempotencyKey } }),
       prisma.stockBalance.findFirst({ where: { physicalCoilId: coilId, partId: e2eMo.partId, locationId: firstStageLocation.id, qualityStatus: 'AVAILABLE' } }),
-      prisma.productionOperation.findUnique({ where: { id: e2eMo.operations[1].id } }),
+      prisma.productionOperation.findUnique({ where: { id: firstOperation.id } }),
       prisma.warehouse.findFirst({ where: { type: 'SCRAP', active: true }, include: { locations: { where: { active: true }, orderBy: { code: 'asc' }, take: 1 } } }),
       prisma.wipStateSnapshot.findUnique({ where: { id: 'production-wip-state' } }),
       prisma.inventoryTransaction.findMany({ where: { productionReportId: production.payload.report?.id } }),
@@ -339,7 +339,7 @@ async function main() {
     assert(reportCount === 1, 'E2E production report must be persisted exactly once.');
     assert(Number(sourceAfter?.quantityOnHand || 0) === 0, 'E2E production posting must consume all 15 PCS from first-stage WIP.');
     assert(Number(nextOperation?.outputGoodQty) === 14 && Number(nextOperation?.inputQty) === 15 && Number(nextOperation?.outputScrapQty) === 1,
-      'E2E relational operation counters must record 15 input, 14 good and 1 scrap.');
+      `E2E reported relational operation must record 15 input, 14 good and 1 scrap (actual input=${nextOperation?.inputQty}, good=${nextOperation?.outputGoodQty}, scrap=${nextOperation?.outputScrapQty}).`);
     assert(scrapWarehouse?.locations?.[0], 'E2E scrap posting requires an active scrap warehouse location.');
     const nextWipOperation = releasedWipOrder.operations.find((row: any) => row.sequence === firstWipOperation.sequence + 1);
     const nextLocation = nextWipOperation
