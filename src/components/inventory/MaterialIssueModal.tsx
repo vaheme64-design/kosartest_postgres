@@ -17,6 +17,7 @@ export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({ isOpen, 
   const [productionOperationId, setProductionOperationId] = useState('');
   const [targetWarehouseId, setTargetWarehouseId] = useState('');
   const [targetLocationId, setTargetLocationId] = useState('');
+  const [createdByUserId, setCreatedByUserId] = useState('');
   const [quantity, setQuantity] = useState('');
   const [weightKg, setWeightKg] = useState('0');
   const [notes, setNotes] = useState('');
@@ -42,6 +43,7 @@ export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({ isOpen, 
         setProductionOperationId(payload.data.operations[0]?.id || '');
         setTargetWarehouseId(payload.data.warehouses[0]?.id || '');
         setTargetLocationId(payload.data.warehouses[0]?.locations[0]?.id || '');
+        setCreatedByUserId(payload.data.users[0]?.id || '');
         setQuantity('');
         setWeightKg('0');
         setNotes('');
@@ -71,7 +73,7 @@ export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({ isOpen, 
     setSuccess('');
     const qty = Number(quantity);
     const kg = Number(weightKg);
-    if (!selectedStock || !selectedOperation || !targetWarehouseId || !targetLocationId || !Number.isFinite(qty) || qty <= 0) {
+    if (!selectedStock || !selectedOperation || !targetWarehouseId || !targetLocationId || !createdByUserId || !Number.isFinite(qty) || qty <= 0) {
       setError('قلم موجودی، عملیات، محل مقصد و مقدار حواله را کامل انتخاب کنید.');
       return;
     }
@@ -168,6 +170,13 @@ export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({ isOpen, 
               </label>
 
               <label className="block space-y-1.5">
+                <span className="text-sm font-semibold text-slate-700">تحویل‌گیرنده / ثبت‌کننده حواله</span>
+                <select className={selectClass} value={createdByUserId} onChange={e => { setCreatedByUserId(e.target.value); requestKeyRef.current = ''; }} required>
+                  {options.users.map((user: any) => <option key={user.id} value={user.id}>{user.fullName}{user.personnelCode ? ` — ${user.personnelCode}` : ''}</option>)}
+                </select>
+              </label>
+
+              <label className="block space-y-1.5">
                 <span className="text-sm font-semibold text-slate-700">موقعیت مقصد</span>
                 <select className={selectClass} value={targetLocationId} onChange={e => setTargetLocationId(e.target.value)} required>
                   {locations.map((item: any) => <option key={item.id} value={item.id}>{item.code}</option>)}
@@ -199,7 +208,7 @@ export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({ isOpen, 
               <p className="max-w-sm text-xs leading-5 text-slate-500">ثبت حواله فقط موجودی خود ماده را به محل عملیات منتقل می‌کند و تعداد WIP قطعه تولیدی را تغییر نمی‌دهد.</p>
               <div className="flex gap-2">
                 <button type="button" onClick={onClose} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">انصراف</button>
-                <button type="submit" disabled={submitting || loadingOptions || !options.stockBalances.length || !options.operations.length || !locations.length} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+                <button type="submit" disabled={submitting || loadingOptions || !options.stockBalances.length || !options.operations.length || !locations.length || !options.users.length} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
                   {submitting ? <Loader2 className="animate-spin" size={16} /> : <ArrowLeftRight size={16} />}
                   ثبت حواله
                 </button>
