@@ -97,8 +97,9 @@ export const RelationalPlanProposalView: React.FC<{ onReleased?: () => Promise<v
     setBusy(true);
     setMessage(null);
     try {
-      await action();
-      await load(selectedId);
+      const result = await action();
+      const preferredId = result?.id || result?.proposal?.id || selectedId;
+      await load(preferredId);
       setMessage({ type: 'success', text: successText });
       if (released && onReleased) await onReleased();
     } catch (error) {
