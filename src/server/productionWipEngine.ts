@@ -111,7 +111,7 @@ export async function persistProductionWipState(): Promise<void> {
 }
 
 // Helper to determine warehouse location based on operation process
-function getLocationForProcess(processType: string, stepNumber: number): string {
+export function getLocationForProcess(processType: string, stepNumber: number): string {
   switch (processType) {
     case 'SHEARING':
       return 'LOC-RAW-B1';
